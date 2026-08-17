@@ -18,18 +18,21 @@ and generates a plain Hyprland snippet of `windowrulev2` pinning rules plus
 declarative config rather than live state, it survives a crash for free.
 
 - **Bar widget (QML):** the clickable UI in the Omarchy bar.
-- **Engine (`relaunch`, a small Go binary):** does the `hyprctl` inventory and
-  writes the config and Hyprland snippet. The widget shells out to it.
+- **Engine (`relaunch`, a bash + jq script):** inventories windows and
+  existing Hyprland startup apps, writes workspace-pin rules, and launches
+  the list from a hidden `relaunch boot` hook. The widget shells out to it.
 
 ## Install
 
-Via Omarchy (recommended once published):
+Via Omarchy (recommended):
 
 ```sh
 omarchy plugin add https://github.com/farmall856/omarchy-relaunch.git --enable
 ```
 
-The engine binary still needs to be built and on your PATH:
+That clone is enough. Opening the widget (or just loading the bar) runs the
+engine from the plugin folder and wires the hidden boot hook. Optionally
+also:
 
 ```sh
 git clone https://github.com/farmall856/omarchy-relaunch.git
@@ -37,12 +40,12 @@ cd omarchy-relaunch
 ./install.sh
 ```
 
-`install.sh` builds `relaunch` into `~/.local/bin`, installs the plugin folder,
-and wires the Hyprland `source =` line.
+`install.sh` copies `relaunch` into `~/.local/bin`, installs the plugin folder,
+and wires a hidden `relaunch boot` hook plus `relaunch.lua` pins.
 
 ### Dependencies
 
-- **Go** (build-time only) — to compile the `relaunch` engine.
+- **bash** and **jq** — both ship with Omarchy Quattro. No compiler.
 - **Hyprland / Omarchy Quattro** — the runtime.
 - A Nerd Font in the bar (Omarchy default) for the widget glyph.
 

@@ -1,0 +1,812 @@
+#!/usr/bin/env bash
+# relaunch — engine for the omarchy-relaunch bar widget.
+# Inventories running windows and existing Hyprland startup apps, then
+# generates workspace-pin rules. App launches happen from `relaunch boot`
+# (a hidden autostart hook), so this script can skip or disable itself.
+set -euo pipefail
+
+HYPRCTL="${HYPRCTL:-hyprctl}"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+
+config_dir() {
+  if [[ -n "${RELAUNCH_CONFIG_DIR:-}" ]]; then
+    printf '%s\n' "$RELAUNCH_CONFIG_DIR"
+    return
+  fi
+  printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-relaunch"
+}
+
+config_path() { printf '%s\n' "$(config_dir)/config.json"; }
+snippet_path() { printf '%s\n' "$(config_dir)/relaunch.conf"; }
+lua_path() { printf '%s\n' "$(config_dir)/relaunch.lua"; }
+disabled_path() { printf '%s\n' "$(config_dir)/disabled"; }
+skip_path() { printf '%s\n' "$(config_dir)/skip-once"; }
+
+autostart_path() {
+  printf '%s\n' "${RELAUNCH_AUTOSTART:-$HOME/.config/hypr/autostart.lua}"
+}
+
+hyprland_lua_path() {
+  printf '%s\n' "${RELAUNCH_HYPRLAND_LUA:-$HOME/.config/hypr/hyprland.lua}"
+}
+
+plugin_dir() {
+  printf '%s\n' "${RELAUNCH_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/io.github.laytonf.relaunch}"
+}
+
+json_out=false
+
+has_json_flag() {
+  local a
+  for a in "$@"; do
+    [[ "$a" == --json ]] && return 0
+  done
+  return 1
+}
+
+die() {
+  local msg="$1"
+  if $json_out; then
+    jq -n --arg error "$msg" '{ok: false, error: $error}'
+  else
+    printf 'error: %s\n' "$msg" >&2
+  fi
+  exit 1
+}
+
+need_jq() {
+  command -v jq >/dev/null 2>&1 || die "jq not found (required; ships with Omarchy)"
+}
+
+# Shared jq helpers. Keep known_exec in sync with AGENTS.md.
+jq_lib='
+def known_exec:
+  {
+    "brave-browser": "brave",
+    "Brave-browser": "brave",
+    "google-chrome": "google-chrome-stable",
+    "chromium": "chromium",
+    "firefox": "firefox",
+    "zen": "zen-browser",
+    "Alacritty": "alacritty",
+    "kitty": "kitty",
+    "org.wezfurlong.wezterm": "wezterm",
+    "foot": "foot",
+    "code": "code",
+    "code-oss": "code",
+    "VSCodium": "codium",
+    "codium": "codium",
+    "org.telegram.desktop": "telegram-desktop",
+    "Slack": "slack",
+    "discord": "discord",
+    "vesktop": "vesktop",
+    "obsidian": "obsidian",
+    "thunderbird": "thunderbird",
+    "org.gnome.Nautilus": "nautilus",
+    "thunar": "thunar",
+    "mpv": "mpv",
+    "Spotify": "spotify",
+    "spotify": "spotify",
+    "herdr": "herdr",
+    "Proton Mail": "proton-mail",
+    "Proton Pass": "proton-pass",
+    "signal": "signal-desktop"
+  };
+
+def exec_class:
+  {
+    "brave": "brave-browser",
+    "google-chrome-stable": "google-chrome",
+    "chromium": "chromium",
+    "firefox": "firefox",
+    "zen-browser": "zen",
+    "alacritty": "Alacritty",
+    "kitty": "kitty",
+    "wezterm": "org.wezfurlong.wezterm",
+    "foot": "foot",
+    "code": "code",
+    "codium": "VSCodium",
+    "telegram-desktop": "org.telegram.desktop",
+    "slack": "Slack",
+    "discord": "discord",
+    "vesktop": "vesktop",
+    "obsidian": "obsidian",
+    "thunderbird": "thunderbird",
+    "nautilus": "org.gnome.Nautilus",
+    "thunar": "thunar",
+    "mpv": "mpv",
+    "spotify": "Spotify",
+    "herdr": "herdr",
+    "proton-mail": "Proton Mail",
+    "proton-pass": "Proton Pass",
+    "signal-desktop": "signal",
+    "signal": "signal",
+    "omarchy-launch-terminal": "foot",
+    "xdg-terminal-exec": "foot"
+  };
+
+def guess_exec:
+  known_exec[.] // ascii_downcase;
+
+def class_for_exec:
+  exec_class[.] // .;
+
+def match_class:
+  if ((.initialClass // "") != "") then .initialClass else (.class // "") end;
+
+def regex_escape:
+  gsub("\\."; "\\.")
+  | gsub("\\+"; "\\+")
+  | gsub("\\*"; "\\*")
+  | gsub("\\?"; "\\?")
+  | gsub("\\("; "\\(")
+  | gsub("\\)"; "\\)")
+  | gsub("\\["; "\\[")
+  | gsub("\\]"; "\\]")
+  | gsub("\\{"; "\\{")
+  | gsub("\\}"; "\\}")
+  | gsub("\\^"; "\\^")
+  | gsub("\\$"; "\\$")
+  | gsub("\\|"; "\\|");
+
+def normalize_entry:
+  {
+    class: (.class // ""),
+    workspace: ((.workspace // 0) | tonumber),
+    exec: (.exec // ""),
+    enabled: (.enabled == true)
+  }
+  + (if .float == true then {float: true} else {} end);
+
+def load_config:
+  {
+    staggerSeconds: ((.staggerSeconds // 0) | tonumber),
+    ignored: ((.ignored // []) | map(tostring)),
+    entries: ((.entries // []) | map(normalize_entry))
+  };
+
+def dump_config:
+  {
+    staggerSeconds: .staggerSeconds,
+    ignored: (.ignored // []),
+    entries: [.entries[] | normalize_entry]
+  };
+
+def capture($clients):
+  load_config as $cfg
+  | ($cfg.entries) as $old
+  | ([ $old[] | {key: .class, value: .} ] | from_entries) as $by0
+  | (
+      $clients
+      | map(. + {match: match_class})
+      | map(select(.match != "" and ((.workspace.id // 0) >= 1)))
+      | sort_by(.workspace.id, .match)
+    ) as $cs
+  | reduce $cs[] as $cl (
+      {by: $by0, added: 0, updated: 0, order: [$old[].class], seen: {}};
+      if .seen[$cl.match] then .
+      else
+        .seen[$cl.match] = true
+        | if .by[$cl.match] then
+            if .by[$cl.match].workspace != $cl.workspace.id then
+              .by[$cl.match].workspace = $cl.workspace.id
+              | .updated += 1
+            else . end
+          else
+            .by[$cl.match] = (
+              {
+                class: $cl.match,
+                workspace: $cl.workspace.id,
+                exec: ($cl.match | guess_exec),
+                enabled: true
+              }
+              + (if $cl.floating == true then {float: true} else {} end)
+            )
+            | .order += [$cl.match]
+            | .added += 1
+          end
+      end
+    )
+  | {
+      staggerSeconds: $cfg.staggerSeconds,
+      ignored: $cfg.ignored,
+      entries: [ .order[] as $c | .by[$c] ],
+      added, updated
+    };
+
+def enabled_entries:
+  load_config
+  | .entries
+  | map(select(.enabled and .class != "" and .workspace > 0))
+  | sort_by(.workspace, .class);
+
+def snippet($gated):
+  (if $gated then [] else enabled_entries end) as $es
+  | (
+      "# Generated by omarchy-relaunch. Do not edit by hand.\n"
+      + "# Rules only. App launches are done by: relaunch boot\n\n"
+      + "# --- Workspace pinning rules ---\n"
+      + (
+          $es
+          | map(
+              "windowrulev2 = workspace \(.workspace) silent, class:^(\(.class | regex_escape))$\n"
+              + (if .float == true then
+                  "windowrulev2 = float, class:^(\(.class | regex_escape))$\n"
+                else "" end)
+            )
+          | add // ""
+        )
+    );
+
+def lua_rules:
+  enabled_entries
+  | map(
+      "o.window({ class = \"^(\(.class | regex_escape))$\" }, { workspace = \"\(.workspace) silent\""
+      + (if .float == true then ", float = true" else "" end)
+      + " })\n"
+    )
+  | add // "";
+'
+
+load_config_json() {
+  local path
+  path="$(config_path)"
+  if [[ ! -f "$path" ]]; then
+    printf '%s\n' '{"staggerSeconds":0,"ignored":[],"entries":[]}'
+    return
+  fi
+  jq -e "$jq_lib"' load_config' "$path" || die "parse config: $path"
+}
+
+atomic_write() {
+  local dest="$1"
+  local tmp="${dest}.tmp"
+  mkdir -p "$(dirname "$dest")"
+  cat >"$tmp"
+  mv -f "$tmp" "$dest"
+}
+
+boot_gated() {
+  [[ -f "$(disabled_path)" || -f "$(skip_path)" ]]
+}
+
+write_config_from_json() {
+  jq "$jq_lib"' dump_config' | atomic_write "$(config_path)"
+}
+
+write_generated() {
+  local cfg gated=false
+  cfg="$(cat)"
+  if boot_gated; then gated=true; fi
+  jq -r --argjson gated "$gated" "$jq_lib"' snippet($gated)' <<<"$cfg" | atomic_write "$(snippet_path)"
+  {
+    cat <<'LUA'
+-- Generated by omarchy-relaunch. Do not edit by hand.
+-- Regenerated by: relaunch generate
+local cfg = os.getenv("XDG_CONFIG_HOME")
+if cfg == nil or cfg == "" then
+  cfg = os.getenv("HOME") .. "/.config"
+end
+local dir = cfg .. "/omarchy-relaunch"
+local function exists(path)
+  local f = io.open(path, "r")
+  if f ~= nil then f:close(); return true end
+  return false
+end
+if exists(dir .. "/disabled") or exists(dir .. "/skip-once") then
+  return
+end
+LUA
+    jq -r "$jq_lib"' lua_rules' <<<"$cfg"
+  } | atomic_write "$(lua_path)"
+}
+
+is_relaunch_exec() {
+  local exec="$1" token base
+  [[ "$exec" == *omarchy-relaunch* ]] && return 0
+  token="${exec%% *}"
+  token="${token##*/}"
+  [[ "$token" == relaunch ]] && return 0
+  for token in $exec; do
+    base="${token##*/}"
+    [[ "$base" == relaunch ]] && return 0
+  done
+  return 1
+}
+
+class_for_startup_exec() {
+  local exec="$1" token base mapped first=""
+  mapped="$(jq -r --arg e "$exec" "$jq_lib"' $e | class_for_exec' <<<"{}")"
+  if [[ -n "$mapped" && "$mapped" != "$exec" ]]; then
+    printf '%s\n' "$mapped"
+    return
+  fi
+  for token in $exec; do
+    [[ "$token" == -* || "$token" == -- ]] && continue
+    base="${token##*/}"
+    case "$base" in
+      setsid | env | command | nice | nohup | uwsm-app) continue ;;
+    esac
+    [[ -z "$first" ]] && first="$base"
+    mapped="$(jq -r --arg e "$base" "$jq_lib"' $e | class_for_exec' <<<"{}")"
+    if [[ -n "$mapped" && "$mapped" != "$base" ]]; then
+      printf '%s\n' "$mapped"
+      return
+    fi
+  done
+  printf '%s\n' "${first:-${exec%% *}}"
+}
+
+scan_startup() {
+  local file line kind exec id class n=0
+  file="$(autostart_path)"
+  if [[ ! -f "$file" ]]; then
+    printf '[]\n'
+    return
+  fi
+  local items='[]'
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    n=$((n + 1))
+    [[ "$line" =~ ^[[:space:]]*-- ]] && continue
+    kind=""
+    exec=""
+    if [[ "$line" =~ o\.launch_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
+      kind="launch_on_start"
+      exec="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ o\.exec_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
+      kind="exec_on_start"
+      exec="${BASH_REMATCH[1]}"
+    else
+      continue
+    fi
+    is_relaunch_exec "$exec" && continue
+    id="lua:${kind}:${exec}"
+    class="$(class_for_startup_exec "$exec")"
+    items="$(jq --arg id "$id" --arg source "$(basename "$file")" --arg kind "$kind" \
+      --arg exec "$exec" --arg class "$class" --argjson line "$n" \
+      '. + [{id: $id, source: $source, kind: $kind, exec: $exec, class: $class, line: $line}]' \
+      <<<"$items")"
+  done <"$file"
+  printf '%s\n' "$items"
+}
+
+boot_state_json() {
+  local disabled=false skip=false
+  [[ -f "$(disabled_path)" ]] && disabled=true
+  [[ -f "$(skip_path)" ]] && skip=true
+  jq -n --argjson disabled "$disabled" --argjson skip "$skip" \
+    '{disabled: $disabled, skipOnce: $skip, active: (($disabled or $skip) | not)}'
+}
+
+build_rows() {
+  local cfg startup
+  cfg="$1"
+  startup="$2"
+  jq --argjson startup "$startup" "$jq_lib"'
+    load_config as $cfg
+    | ($cfg.ignored) as $ign
+    | ([ $cfg.entries[] | {key: (.class | ascii_downcase), value: .} ] | from_entries) as $byClass
+    | ([ $cfg.entries[] | {key: (.exec | ascii_downcase), value: .} ] | from_entries) as $byExec
+    | [
+        $cfg.entries[]
+        | . as $e
+        | ($startup | map(select((.class | ascii_downcase) == ($e.class | ascii_downcase)
+              or (.exec | ascii_downcase) == ($e.exec | ascii_downcase))) | .[0] // null) as $s
+        | {
+            id: ("relaunch:" + $e.class),
+            kind: (if $s != null then (if ($ign | index($s.id)) then "relaunch" else "both" end) else "relaunch" end),
+            class: $e.class,
+            label: $e.class,
+            exec: (if $e.exec != "" then $e.exec else ($e.class | guess_exec) end),
+            workspace: $e.workspace,
+            enabled: $e.enabled,
+            inRelaunch: true,
+            ignored: (if $s != null then (($ign | index($s.id)) != null) else false end),
+            startupId: (if $s != null then $s.id else null end)
+          }
+      ] as $fromRelaunch
+    | [
+        $startup[]
+        | . as $s
+        | (
+            $byClass[($s.class | ascii_downcase)]
+            // $byExec[($s.exec | ascii_downcase)]
+            // $byExec[($s.exec | split(" ")[0] | ascii_downcase)]
+            // null
+          ) as $e
+        | select($e == null)
+        | {
+            id: $s.id,
+            kind: (if ($ign | index($s.id)) then "ignored" else "startup" end),
+            class: $s.class,
+            label: (if $s.class != "" then $s.class else $s.exec end),
+            exec: $s.exec,
+            workspace: 0,
+            enabled: false,
+            inRelaunch: false,
+            ignored: (($ign | index($s.id)) != null),
+            startupId: $s.id
+          }
+      ] as $fromStartup
+    | ($fromRelaunch + $fromStartup)
+  ' <<<"$cfg"
+}
+
+emit_state() {
+  local cfg startup rows extra
+  cfg="$(load_config_json)"
+  startup="$(scan_startup)"
+  rows="$(build_rows "$cfg" "$startup")"
+  extra="${1:-{\}}"
+  jq -n --argjson cfg "$cfg" --argjson startup "$startup" --argjson rows "$rows" \
+    --argjson boot "$(boot_state_json)" --argjson extra "$extra" \
+    --arg snippet "$(snippet_path)" --arg config "$(config_path)" \
+    '{
+      ok: true,
+      staggerSeconds: $cfg.staggerSeconds,
+      entries: $cfg.entries,
+      ignored: $cfg.ignored,
+      startup: $startup,
+      rows: $rows,
+      boot: $boot,
+      snippetPath: $snippet,
+      configPath: $config
+    } + $extra'
+}
+
+clients_json() {
+  local out
+  if ! out="$("$HYPRCTL" clients -j)"; then
+    die "hyprctl clients: command failed"
+  fi
+  jq -e 'type == "array"' >/dev/null <<<"$out" || die "hyprctl clients: expected a JSON array"
+  printf '%s\n' "$out"
+}
+
+cmd_save() {
+  local cfg clients merged extra
+  ensure_hooks
+  cfg="$(load_config_json)"
+  clients="$(clients_json)"
+  merged="$(jq --argjson clients "$clients" "$jq_lib"' capture($clients)' <<<"$cfg")"
+  jq "$jq_lib"' del(.added, .updated) | dump_config' <<<"$merged" | atomic_write "$(config_path)"
+  jq "$jq_lib"' del(.added, .updated)' <<<"$merged" | write_generated
+  extra="$(jq '{added: .added, updated: .updated}' <<<"$merged")"
+  if $json_out; then
+    emit_state "$extra"
+  else
+    jq -r '"Captured: \(.added) new, \(.updated) updated."' <<<"$merged"
+    printf 'Snippet: %s\n' "$(snippet_path)"
+    printf 'Run `relaunch reload` or reboot to apply.\n'
+  fi
+}
+
+cmd_generate() {
+  ensure_hooks
+  load_config_json | write_generated
+  if $json_out; then
+    emit_state
+  else
+    printf 'Wrote %s\n' "$(snippet_path)"
+  fi
+}
+
+cmd_list() {
+  ensure_hooks
+  if $json_out; then
+    emit_state
+    return
+  fi
+  local cfg
+  cfg="$(load_config_json)"
+  printf 'boot: %s\n' "$(boot_state_json | jq -r 'if .disabled then "disabled" elif .skipOnce then "skip-next" else "on" end')"
+  if jq -e '.entries | length == 0' >/dev/null <<<"$cfg"; then
+    printf 'No relaunch entries. Run `relaunch save`.\n'
+  else
+    printf '%-4s %-3s %-24s %s\n' ws on class exec
+    jq -r "$jq_lib"'
+      .entries[]
+      | [
+          (.workspace | tostring),
+          (if .enabled then "x" else " " end),
+          .class,
+          (if .exec != "" then .exec else (.class | guess_exec) + " *" end)
+        ]
+      | @tsv
+    ' <<<"$cfg" | while IFS=$'\t' read -r ws on class exec; do
+      printf '%-4s [%s] %-24s %s\n' "$ws" "$on" "$class" "$exec"
+    done
+  fi
+  local startup
+  startup="$(scan_startup)"
+  if jq -e 'length > 0' >/dev/null <<<"$startup"; then
+    printf '\nstartup apps (autostart.lua):\n'
+    jq -r '.[] | "  [\(.kind)] \(.exec)  class=\(.class)"' <<<"$startup"
+  fi
+}
+
+cmd_reload() {
+  "$HYPRCTL" reload || die "hyprctl reload failed"
+  if $json_out; then
+    emit_state
+  else
+    printf 'Hyprland reloaded.\n'
+  fi
+}
+
+cmd_boot() {
+  # Hidden autostart hook. Never listed as a startup app.
+  if [[ -f "$(disabled_path)" ]]; then
+    exit 0
+  fi
+  if [[ -f "$(skip_path)" ]]; then
+    rm -f "$(skip_path)"
+    load_config_json | write_generated
+    exit 0
+  fi
+  local cfg stagger exec
+  cfg="$(load_config_json)"
+  stagger="$(jq -r '.staggerSeconds' <<<"$cfg")"
+  while IFS= read -r exec; do
+    [[ -z "$exec" ]] && continue
+    if [[ "$stagger" =~ ^[1-9][0-9]*$ ]]; then
+      sleep "$stagger"
+    fi
+    bash -c "$exec" &
+  done < <(jq -r "$jq_lib"'
+    enabled_entries[]
+    | if .exec != "" then .exec else (.class | guess_exec) end
+  ' <<<"$cfg")
+}
+
+arg_value() {
+  local flag="$1"
+  shift
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "$flag" ]]; then
+      printf '%s\n' "${2:-}"
+      return 0
+    fi
+    shift
+  done
+  return 1
+}
+
+cmd_import() {
+  local exec ws class cfg
+  exec="$(arg_value --exec "$@" || true)"
+  ws="$(arg_value --workspace "$@" || true)"
+  [[ -n "$exec" ]] || die "import requires --exec"
+  [[ "$ws" =~ ^[1-9][0-9]*$ ]] || die "import requires --workspace N (N>=1)"
+  class="$(class_for_startup_exec "$exec")"
+  cfg="$(load_config_json)"
+  if jq -e --arg class "$class" '.entries[] | select(.class == $class)' >/dev/null <<<"$cfg"; then
+    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" '
+      .entries |= map(if .class == $class then .workspace = $ws | .exec = $exec | .enabled = true else . end)
+    ' <<<"$cfg")"
+  else
+    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" '
+      .entries += [{class: $class, workspace: $ws, exec: $exec, enabled: true}]
+    ' <<<"$cfg")"
+  fi
+  jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
+  jq "$jq_lib"' load_config' <<<"$cfg" | write_generated
+  if $json_out; then emit_state; else printf 'Imported %s -> workspace %s\n' "$class" "$ws"; fi
+}
+
+cmd_drop() {
+  local class cfg
+  class="$(arg_value --class "$@" || true)"
+  [[ -n "$class" ]] || die "drop requires --class"
+  cfg="$(load_config_json)"
+  cfg="$(jq --arg class "$class" '.entries |= map(select(.class != $class))' <<<"$cfg")"
+  jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
+  jq "$jq_lib"' load_config' <<<"$cfg" | write_generated
+  if $json_out; then emit_state; else printf 'Removed %s from relaunch\n' "$class"; fi
+}
+
+cmd_drop_startup() {
+  local id kind exec file tmp kept=0
+  id="$(arg_value --id "$@" || true)"
+  [[ -n "$id" ]] || die "drop-startup requires --id"
+  kind="${id#*:}"
+  kind="${kind%%:*}"
+  exec="${id#*:}"
+  exec="${exec#*:}"
+  file="$(autostart_path)"
+  [[ -f "$file" ]] || die "no autostart file: $file"
+  tmp="$(mktemp)"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*-- ]]; then
+      printf '%s\n' "$line" >>"$tmp"
+      continue
+    fi
+    if [[ "$kind" == launch_on_start && "$line" =~ o\.launch_on_start\([[:space:]]*\"([^\"]+)\" && "${BASH_REMATCH[1]}" == "$exec" ]]; then
+      kept=1
+      continue
+    fi
+    if [[ "$kind" == exec_on_start && "$line" =~ o\.exec_on_start\([[:space:]]*\"([^\"]+)\" && "${BASH_REMATCH[1]}" == "$exec" ]]; then
+      kept=1
+      continue
+    fi
+    printf '%s\n' "$line" >>"$tmp"
+  done <"$file"
+  [[ "$kept" == 1 ]] || die "startup line not found: $id"
+  mv -f "$tmp" "$file"
+  if $json_out; then emit_state; else printf 'Deleted startup config: %s\n' "$exec"; fi
+}
+
+cmd_ignore() {
+  local id cfg
+  id="$(arg_value --id "$@" || true)"
+  [[ -n "$id" ]] || die "ignore requires --id"
+  cfg="$(load_config_json)"
+  cfg="$(jq --arg id "$id" '.ignored = ((.ignored // []) + [$id] | unique)' <<<"$cfg")"
+  jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
+  if $json_out; then emit_state; else printf 'Ignoring startup config: %s\n' "$id"; fi
+}
+
+cmd_unignore() {
+  local id cfg
+  id="$(arg_value --id "$@" || true)"
+  [[ -n "$id" ]] || die "unignore requires --id"
+  cfg="$(load_config_json)"
+  cfg="$(jq --arg id "$id" '.ignored = [(.ignored // [])[] | select(. != $id)]' <<<"$cfg")"
+  jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
+  if $json_out; then emit_state; else printf 'No longer ignoring: %s\n' "$id"; fi
+}
+
+cmd_boot_skip() {
+  mkdir -p "$(config_dir)"
+  : >"$(skip_path)"
+  load_config_json | write_generated
+  if $json_out; then emit_state; else printf 'Relaunch will skip the next boot.\n'; fi
+}
+
+cmd_boot_disable() {
+  mkdir -p "$(config_dir)"
+  : >"$(disabled_path)"
+  rm -f "$(skip_path)"
+  load_config_json | write_generated
+  if $json_out; then emit_state; else printf 'Relaunch disabled until re-enabled.\n'; fi
+}
+
+cmd_boot_enable() {
+  rm -f "$(disabled_path)" "$(skip_path)"
+  load_config_json | write_generated
+  if $json_out; then emit_state; else printf 'Relaunch enabled on boot.\n'; fi
+}
+
+remove_managed_block() {
+  local file="$1" tmp
+  [[ -f "$file" ]] || return 0
+  tmp="$(mktemp)"
+  awk '
+    /omarchy-relaunch/ { skip=1; next }
+    skip && /^[[:space:]]*$/ { skip=0; next }
+    skip && /o\.(exec_on_start|launch_on_start)/ { skip=0; next }
+    skip && /dofile\(/ { skip=0; next }
+    skip && /source =/ { skip=0; next }
+    { print }
+  ' "$file" >"$tmp"
+  mv -f "$tmp" "$file"
+}
+
+cmd_uninstall() {
+  local yes=false a
+  for a in "$@"; do
+    [[ "$a" == --yes ]] && yes=true
+  done
+  $yes || die "uninstall requires --yes"
+  remove_managed_block "$(autostart_path)"
+  remove_managed_block "$(hyprland_lua_path)"
+  local hypr_conf="${RELAUNCH_HYPR_CONF:-$HOME/.config/hypr/hyprland.conf}"
+  if [[ -f "$hypr_conf" ]]; then
+    local tmp
+    tmp="$(mktemp)"
+    grep -vF "$(snippet_path)" "$hypr_conf" | grep -v 'omarchy-relaunch' >"$tmp" || true
+    mv -f "$tmp" "$hypr_conf"
+  fi
+  rm -rf "$(config_dir)"
+  rm -rf "$(plugin_dir)"
+  local bin="${PREFIX:-$HOME/.local}/bin/relaunch"
+  if [[ -f "$bin" ]] && grep -q 'omarchy-relaunch bar widget' "$bin"; then
+    rm -f "$bin"
+  fi
+  if $json_out; then
+    jq -n '{ok: true, uninstalled: true}'
+  else
+    printf 'Relaunch removed.\n'
+  fi
+}
+
+ensure_hooks() {
+  local auto lua bin
+  auto="$(autostart_path)"
+  lua="$(hyprland_lua_path)"
+  mkdir -p "$(dirname "$auto")" "$(config_dir)"
+  if [[ -f "$auto" ]] && ! grep -q 'omarchy-relaunch' "$auto"; then
+    {
+      printf '\n'
+      printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)'
+      printf '%s\n' "o.exec_on_start(\"${SELF} boot\")"
+    } >>"$auto"
+  fi
+  if [[ -f "$lua" ]] && ! grep -q 'omarchy-relaunch' "$lua"; then
+    {
+      printf '\n'
+      printf '%s\n' '-- omarchy-relaunch'
+      printf '%s\n' 'dofile((os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/omarchy-relaunch/relaunch.lua")'
+    } >>"$lua"
+  fi
+  [[ -f "$(lua_path)" ]] || printf 'return\n' >"$(lua_path)"
+
+  # Plugin-manager installs do not put the script on PATH. Copy it so a
+  # terminal `relaunch` works, but skip that when tests override the config dir.
+  if [[ -z "${RELAUNCH_CONFIG_DIR:-}" ]]; then
+    bin="${PREFIX:-$HOME/.local}/bin"
+    mkdir -p "$bin"
+    install -m 0755 "$SELF" "$bin/relaunch"
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+relaunch — engine for omarchy-relaunch
+
+  relaunch save [--json]                 capture running layout
+  relaunch generate [--json]             rebuild rules from config
+  relaunch list [--json]                 relaunch + startup inventory
+  relaunch reload                        hyprctl reload
+  relaunch boot                          hidden autostart hook
+  relaunch import --exec CMD --workspace N
+  relaunch drop --class CLASS            remove from relaunch list
+  relaunch drop-startup --id ID          delete the Hyprland startup line
+  relaunch ignore --id ID                leave startup alone, remember it
+  relaunch unignore --id ID
+  relaunch boot-skip                     skip relaunch on the next boot
+  relaunch boot-disable                  disable until re-enabled
+  relaunch boot-enable
+  relaunch uninstall --yes               remove relaunch permanently
+
+config:  ~/.config/omarchy-relaunch/config.json
+rules:   ~/.config/omarchy-relaunch/relaunch.lua
+EOF
+}
+
+main() {
+  need_jq
+  if [[ $# -lt 1 ]]; then
+    usage
+    exit 1
+  fi
+  local cmd="$1"
+  shift
+  if has_json_flag "$@"; then
+    json_out=true
+  fi
+  case "$cmd" in
+    save) cmd_save ;;
+    generate) cmd_generate ;;
+    list) cmd_list ;;
+    reload) cmd_reload ;;
+    boot) cmd_boot ;;
+    import) cmd_import "$@" ;;
+    drop) cmd_drop "$@" ;;
+    drop-startup) cmd_drop_startup "$@" ;;
+    ignore) cmd_ignore "$@" ;;
+    unignore) cmd_unignore "$@" ;;
+    boot-skip) cmd_boot_skip ;;
+    boot-disable) cmd_boot_disable ;;
+    boot-enable) cmd_boot_enable ;;
+    uninstall) cmd_uninstall "$@" ;;
+    ensure-hooks) ensure_hooks ;;
+    -h | --help | help) usage ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

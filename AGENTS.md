@@ -11,54 +11,69 @@ This folder is the source tree. The public repo is
 
 ## Architecture
 
-No daemon. Save is a one-shot inventory; restore is declarative Hyprland
-config sourced at startup.
+No daemon. Save inventories windows; `relaunch boot` (a hidden autostart
+hook) launches the list. Workspace pins live in generated `relaunch.lua`.
 
 | Piece | Role |
 |---|---|
 | `BarWidget.qml` | Bar button. Follows the `omarchy.clock` popup contract. |
-| `Panel.qml` | Popup UI. Shells out to the `relaunch` binary; never calls `hyprctl` itself. |
-| `engine/` | Go CLI (`github.com/farmall856/omarchy-relaunch/engine`). All Hyprland I/O and snippet generation. |
+| `Panel.qml` | Popup UI. Shells out to `relaunch`; never calls `hyprctl` itself. |
+| `relaunch` | bash + jq CLI. Inventory, list edits, boot policy, rule generation. |
 | `manifest.json` | Omarchy plugin schema v1, `kinds: ["bar-widget"]`. |
 
 Runtime files (user-owned, never commit):
 
-- `~/.config/omarchy-relaunch/config.json` — editable table
-- `~/.config/omarchy-relaunch/relaunch.conf` — generated `windowrulev2` + `exec-once`
+- `~/.config/omarchy-relaunch/config.json` — entries + ignored startup ids
+- `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
+- `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags
 - `~/.config/omarchy/plugins/io.github.laytonf.relaunch/` — installed QML copy
 
-Hyprland must contain `source = ~/.config/omarchy-relaunch/relaunch.conf`.
-`install.sh` appends that line; do not invent a different snippet path.
+`install.sh` adds a hidden `o.exec_on_start("relaunch boot")` to
+`autostart.lua` and a `dofile(.../relaunch.lua)` to `hyprland.lua`. Never
+show that hook in the inventory.
 
 ## Engine CLI
 
 ```
-relaunch save [--json]     # hyprctl clients → merge into config → write snippet
-relaunch generate [--json] # rewrite snippet from config
-relaunch list [--json]     # print the table
-relaunch reload            # hyprctl reload
+relaunch save [--json]                 # capture running layout
+relaunch generate [--json]             # rebuild rules
+relaunch list [--json]                 # entries + startup inventory + rows + boot
+relaunch reload
+relaunch boot                          # hidden autostart hook
+relaunch import --exec CMD --workspace N
+relaunch drop --class CLASS
+relaunch drop-startup --id ID
+relaunch ignore --id ID
+relaunch unignore --id ID
+relaunch boot-skip | boot-disable | boot-enable
+relaunch uninstall --yes
 ```
 
-`--json` is the widget contract. Keep the `result` shape in `engine/main.go`
-stable (`ok`, `error`, `added`, `updated`, `staggerSeconds`, `entries`,
-`snippetPath`, `configPath`). `Panel.qml` parses that object.
+`--json` is the widget contract. Keep `ok`, `error`, `added`, `updated`,
+`entries`, `rows`, `startup`, `ignored`, `boot`, `snippetPath`, `configPath`
+stable. `Panel.qml` parses that object.
 
 ## Invariants
 
 - One entry per window class. Capture keeps the first seen (lowest workspace).
   A `class:^(brave-browser)$` rule sends every Brave window to that workspace.
 - Match `initialClass`, not `class`. Brave/Electron mutate class after launch.
-- Launch commands come from the curated `knownExec` table in
-  `engine/internal/config/config.go`. Do not parse `/proc/<pid>/cmdline`.
-  Unknown apps fall back to a lowercased class. When adding a well-known app,
-  extend `knownExec`.
+- Launch commands come from the curated `known_exec` table in `relaunch`.
+  Do not parse `/proc/<pid>/cmdline`. Unknown apps fall back to a lowercased
+  class. When adding a well-known app, extend `known_exec`.
 - Recapture refreshes workspace only. Preserve user `exec`, `enabled`, and
   `float` edits.
 - Skip special/negative workspaces (`Workspace.ID < 1`) and empty classes.
 - Regex-escape class names in generated `windowrulev2` lines.
 - Persist with temp-file + rename (`config.json.tmp`, `relaunch.conf.tmp`).
 - Everything runs as the user. No sudo, no IPC beyond `hyprctl` and the
-  engine binary on `PATH`.
+  `relaunch` script on `PATH`.
+- Inventory only the user's `~/.config/hypr/autostart.lua`. Never list or
+  edit packaged Omarchy autostart. Hide any `relaunch` / `omarchy-relaunch`
+  hook from every list.
+- Existing startup lines are not deleted unless the user chooses "Delete
+  startup config". "Leave alone" records the id in `ignored` and still
+  shows the row when editing.
 
 ## QML conventions
 
@@ -69,7 +84,7 @@ Mirror `omarchy.clock` / `omarchy.weather`:
   and `injectPanel()` so the bar can route popouts.
 - Theme via `root.barForeground` / `root.barBackground`, `Style.space()`,
   `Style.font.*`. No hardcoded palette.
-- Use `Quickshell.Io.Process` to run `relaunch`. The binary must be on `PATH`
+- Use `Quickshell.Io.Process` to run `relaunch`. The script must be on `PATH`
   (`~/.local/bin` after `install.sh`).
 - After QML edits in a live install, `omarchy-shell shell rescanPlugins`
   (user plugin dir hot-reloads on save; this tree does not).
@@ -80,8 +95,8 @@ Do not edit `/usr/share/omarchy/`. Read it for the plugin contract.
 
 ```bash
 # Engine
-( cd engine && go build -o ~/.local/bin/relaunch . )
-( cd engine && go test ./... )
+./tests/relaunch-test.sh
+install -m 0755 ./relaunch ~/.local/bin/relaunch
 
 # Plugin schema (must stay green)
 omarchy plugin validate .
@@ -89,7 +104,7 @@ omarchy plugin validate .
 # QML (qt6 qmllint; include the shell import path)
 /usr/lib/qt6/bin/qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml
 
-# Local install: binary + plugin copy + hyprland source line
+# Local install: script + plugin copy + hyprland source line
 ./install.sh
 omarchy bar move io.github.laytonf.relaunch --section right   # first time
 ```
@@ -100,7 +115,10 @@ Prefer `./install.sh` over copying files by hand. Once published:
 omarchy plugin add https://github.com/farmall856/omarchy-relaunch.git --enable
 ```
 
-The engine still needs a separate build onto `PATH`.
+`omarchy plugin add <repo-url> --enable` is the supported install. The
+widget invokes `./relaunch` from the plugin folder (not PATH). First
+`list`/`save`/`generate` runs `ensure_hooks` so autostart and
+`hyprland.lua` get wired without `install.sh`.
 
 ## Repo / publish
 
@@ -114,8 +132,8 @@ Not initialized as a git repo yet. One-time:
 Marketplace submit:
 https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/new?template=submit-plugin.yml
 
-`.gitignore` already excludes the engine binary and generated
-`relaunch.conf` / `config.json`. Keep it that way.
+`.gitignore` already excludes generated `relaunch.conf` / `config.json`.
+Keep it that way.
 
 ## Out of scope unless asked
 

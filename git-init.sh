@@ -21,7 +21,7 @@ else
   git commit -m "Relaunch: initial Omarchy Quattro bar-widget plugin
 
 Save the current app->workspace layout and relaunch apps into the right
-workspaces after a reboot or crash. QML bar widget + Go engine that
+workspaces after a reboot or crash. QML bar widget + bash/jq engine that
 generates a Hyprland windowrule/exec-once snippet."
   echo "initial commit created."
 fi

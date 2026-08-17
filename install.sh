@@ -2,7 +2,7 @@
 # Installer for the Relaunch Omarchy plugin.
 #
 # Two parts:
-#   1. Build the `relaunch` engine binary (Go) onto your PATH. The QML bar
+#   1. Install the `relaunch` engine (bash + jq) onto your PATH. The QML bar
 #      widget shells out to it.
 #   2. Install the plugin folder into ~/.config/omarchy/plugins/ and ensure the
 #      generated Hyprland snippet is sourced.
@@ -19,13 +19,13 @@ HYPR_CONF="$HOME/.config/hypr/hyprland.conf"
 SNIPPET="$HOME/.config/omarchy-relaunch/relaunch.conf"
 SOURCE_LINE="source = $SNIPPET"
 
-echo "==> building relaunch engine"
-if ! command -v go >/dev/null 2>&1; then
-  echo "error: Go toolchain not found. Install go (pacman -S go) and retry." >&2
+echo "==> installing relaunch engine"
+if ! command -v jq >/dev/null 2>&1; then
+  echo "error: jq not found. It ships with Omarchy; install jq and retry." >&2
   exit 1
 fi
 mkdir -p "$BIN_DIR"
-( cd "$REPO_DIR/engine" && go build -o "$BIN_DIR/relaunch" . )
+install -m 0755 "$REPO_DIR/relaunch" "$BIN_DIR/relaunch"
 echo "    installed $BIN_DIR/relaunch"
 case ":$PATH:" in
   *":$BIN_DIR:"*) : ;;
@@ -39,14 +39,16 @@ install -m 0644 "$REPO_DIR/BarWidget.qml" "$PLUGIN_DST/BarWidget.qml"
 install -m 0644 "$REPO_DIR/Panel.qml"     "$PLUGIN_DST/Panel.qml"
 echo "    installed $PLUGIN_DST"
 
-echo "==> ensuring snippet is sourced from hyprland.conf"
+echo "==> wiring hidden boot hook (not shown in the Relaunch list)"
 mkdir -p "$(dirname "$SNIPPET")"
 [[ -f "$SNIPPET" ]] || echo "# populated by: relaunch save" > "$SNIPPET"
+"$BIN_DIR/relaunch" ensure-hooks
+echo "    autostart.lua -> relaunch boot"
+echo "    hyprland.lua  -> dofile relaunch.lua"
+
 if [[ -f "$HYPR_CONF" ]] && ! grep -qF "$SOURCE_LINE" "$HYPR_CONF"; then
   { echo ""; echo "# omarchy-relaunch"; echo "$SOURCE_LINE"; } >> "$HYPR_CONF"
   echo "    added source line to $HYPR_CONF"
-else
-  echo "    source line already present (or hyprland.conf missing)"
 fi
 
 echo "==> discovering plugin in the shell"

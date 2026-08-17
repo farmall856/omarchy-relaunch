@@ -4,9 +4,9 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// Relaunch panel. Anchored to the bar button. Shells out to the `relaunch`
-// engine binary for all work and renders its --json output. No privileged
-// actions; everything runs as the user, same as any Hyprland command.
+// Relaunch panel. Shells out to `relaunch` for inventory, list edits, and
+// boot-policy changes. Existing Hyprland startup apps are shown so they can
+// be imported, left alone (ignored), or have their startup line removed.
 Panel {
   id: root
   moduleName: "io.github.laytonf.relaunch"
@@ -15,17 +15,34 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
 
-  // --- state populated from `relaunch list/save --json` ---
   property var entries: []
+  property var rows: []
+  property var boot: ({ disabled: false, skipOnce: false, active: true })
   property int staggerSeconds: 0
   property string statusText: ""
   property bool busy: false
+  property bool confirmRemove: false
+
+  // Plugin-manager clones land the script next to this file, not on PATH.
+  readonly property string enginePath: {
+    var s = Qt.resolvedUrl("relaunch").toString()
+    if (s.indexOf("file://") === 0)
+      return decodeURIComponent(s.slice(7))
+    return "relaunch"
+  }
+
+  readonly property var relaunchRows: rows.filter(function(r) { return r.inRelaunch })
+  readonly property var startupRows: rows.filter(function(r) { return r.kind === "startup" })
+  readonly property var ignoredRows: rows.filter(function(r) { return r.kind === "ignored" })
 
   function open() {
     root.controller.show()
     refresh()
   }
-  function close() { root.controller.hide() }
+  function close() {
+    root.confirmRemove = false
+    root.controller.hide()
+  }
   function toggle() {
     if (root.opened) root.close()
     else root.open()
@@ -36,11 +53,18 @@ Panel {
     return false
   }
 
-  // Reload the table when the panel opens.
   function refresh() {
     root.busy = true
-    listProc.running = true
+    run(["list", "--json"])
   }
+
+  function run(args) {
+    root.busy = true
+    actionProc.command = [root.enginePath].concat(args)
+    actionProc.running = true
+  }
+
+  Component.onCompleted: root.run(["list", "--json"])
 
   function applyResult(text) {
     try {
@@ -49,7 +73,15 @@ Panel {
         root.statusText = "Error: " + (r.error || "unknown")
         return
       }
+      if (r.uninstalled === true) {
+        root.statusText = "Relaunch removed."
+        root.rows = []
+        root.entries = []
+        return
+      }
       if (r.entries !== undefined) root.entries = r.entries
+      if (r.rows !== undefined) root.rows = r.rows
+      if (r.boot !== undefined) root.boot = r.boot
       if (r.staggerSeconds !== undefined) root.staggerSeconds = r.staggerSeconds
       if (r.added !== undefined)
         root.statusText = "Saved: " + r.added + " new, " + r.updated + " updated."
@@ -58,41 +90,51 @@ Panel {
     }
   }
 
-  // `relaunch list --json` — populate the table on open.
+  function bootLabel() {
+    if (root.boot.disabled) return "Disabled until you re-enable it."
+    if (root.boot.skipOnce) return "Will skip the next boot only."
+    return "Runs on boot."
+  }
+
   Process {
-    id: listProc
-    command: ["relaunch", "list", "--json"]
+    id: actionProc
+    command: [root.enginePath, "list", "--json"]
     stdout: StdioCollector {
       onStreamFinished: { root.applyResult(this.text); root.busy = false }
     }
-  }
-
-  // `relaunch save --json` — capture current layout + write snippet.
-  Process {
-    id: saveProc
-    command: ["relaunch", "save", "--json"]
-    stdout: StdioCollector {
-      onStreamFinished: { root.applyResult(this.text); root.busy = false }
+    onExited: function(exitCode) {
+      if (exitCode !== 0 && root.statusText === "")
+        root.statusText = "Command failed"
+      root.busy = false
     }
   }
 
-  // `relaunch generate` — rebuild snippet from edited config.
-  Process {
-    id: genProc
-    command: ["relaunch", "generate"]
-    onExited: function(exitCode) {
-      root.busy = false
-      root.statusText = exitCode === 0 ? "Snippet regenerated." : "Regenerate failed"
+  component Chip: Rectangle {
+    id: chip
+    property string label: ""
+    property bool danger: false
+    signal clicked
+    height: Style.space(22)
+    width: chipLabel.implicitWidth + Style.space(12)
+    radius: Style.space(4)
+    color: chipMouse.containsMouse ? root.barForeground : "transparent"
+    border.color: root.barForeground
+    border.width: 1
+    opacity: root.busy ? 0.45 : 1
+    Text {
+      id: chipLabel
+      anchors.centerIn: parent
+      text: chip.label
+      color: chipMouse.containsMouse ? root.barBackground : root.barForeground
+      font.family: root.bar ? root.bar.fontFamily : Style.font.family
+      font.pixelSize: Style.font.caption
     }
-  }
-
-  // `relaunch reload` — hyprctl reload to apply immediately.
-  Process {
-    id: reloadProc
-    command: ["relaunch", "reload"]
-    onExited: function(exitCode) {
-      root.busy = false
-      root.statusText = exitCode === 0 ? "Hyprland reloaded." : "Reload failed"
+    MouseArea {
+      id: chipMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      enabled: !root.busy
+      onClicked: chip.clicked()
     }
   }
 
@@ -103,8 +145,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(360))
-    contentHeight: panel.fittedContentHeight(content.implicitHeight)
+    contentWidth: panel.fittedContentWidth(Style.space(400))
+    contentHeight: panel.fittedContentHeight(Math.min(content.implicitHeight, Style.space(520)))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -112,186 +154,291 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
-      Column {
-        id: content
-        width: parent.width
-        spacing: Style.space(10)
+      Flickable {
+        id: scroller
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: content.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        interactive: contentHeight > height
 
-        // --- Title ---
-        Text {
-          width: parent.width
-          text: "Relaunch"
-          color: root.barForeground
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.subtitle
-          font.bold: true
-        }
-
-        Text {
-          width: parent.width
-          text: "Save the app layout you have right now. On reboot, these apps relaunch into the same workspaces."
-          color: root.barForeground
-          opacity: 0.75
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
-        }
-
-        // --- Primary action ---
-        Rectangle {
-          width: parent.width
-          height: Style.space(36)
-          radius: Style.space(6)
-          color: saveMouse.containsMouse ? root.barForeground : "transparent"
-          border.color: root.barForeground
-          border.width: 1
-          opacity: root.busy ? 0.5 : 1.0
+        Column {
+          id: content
+          width: scroller.width
+          spacing: Style.space(10)
 
           Text {
-            anchors.centerIn: parent
-            text: root.busy ? "Working…" : "Save Startup App Workspaces"
-            color: saveMouse.containsMouse ? root.barBackground : root.barForeground
+            width: parent.width
+            text: "Relaunch"
+            color: root.barForeground
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.body
+            font.pixelSize: Style.font.subtitle
             font.bold: true
           }
-          MouseArea {
-            id: saveMouse
-            anchors.fill: parent
-            hoverEnabled: true
-            enabled: !root.busy
-            onClicked: {
-              root.busy = true
-              root.statusText = ""
-              saveProc.running = true
-            }
+
+          Text {
+            width: parent.width
+            text: "Save the layout you have now. Existing Hyprland startup apps stay listed so you can add them, drop one side, or leave them alone."
+            color: root.barForeground
+            opacity: 0.75
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
           }
-        }
 
-        // --- Secondary actions row ---
-        Row {
-          width: parent.width
-          spacing: Style.space(8)
-
-          // Regenerate snippet from (possibly hand-edited) config.
           Rectangle {
-            width: (parent.width - Style.space(8)) / 2
-            height: Style.space(30)
+            width: parent.width
+            height: Style.space(36)
             radius: Style.space(6)
-            color: genMouse.containsMouse ? root.barForeground : "transparent"
+            color: saveMouse.containsMouse ? root.barForeground : "transparent"
             border.color: root.barForeground
             border.width: 1
+            opacity: root.busy ? 0.5 : 1.0
             Text {
               anchors.centerIn: parent
-              text: "Regenerate"
-              color: genMouse.containsMouse ? root.barBackground : root.barForeground
+              text: root.busy ? "Working…" : "Save Startup App Workspaces"
+              color: saveMouse.containsMouse ? root.barBackground : root.barForeground
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: Style.font.body
+              font.bold: true
             }
             MouseArea {
-              id: genMouse
+              id: saveMouse
               anchors.fill: parent
               hoverEnabled: true
-              onClicked: { root.busy = true; genProc.running = true }
+              enabled: !root.busy
+              onClicked: {
+                root.statusText = ""
+                root.run(["save", "--json"])
+              }
             }
           }
 
-          // Apply now without a reboot.
-          Rectangle {
-            width: (parent.width - Style.space(8)) / 2
-            height: Style.space(30)
-            radius: Style.space(6)
-            color: reloadMouse.containsMouse ? root.barForeground : "transparent"
-            border.color: root.barForeground
-            border.width: 1
-            Text {
-              anchors.centerIn: parent
-              text: "Reload Hyprland"
-              color: reloadMouse.containsMouse ? root.barBackground : root.barForeground
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.bodySmall
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+            Chip {
+              label: "Regenerate"
+              onClicked: { root.statusText = "Snippet regenerated."; root.run(["generate", "--json"]) }
             }
-            MouseArea {
-              id: reloadMouse
-              anchors.fill: parent
-              hoverEnabled: true
-              onClicked: { root.busy = true; reloadProc.running = true }
+            Chip {
+              label: "Reload Hyprland"
+              onClicked: { root.statusText = "Hyprland reloaded."; root.run(["reload", "--json"]) }
             }
           }
-        }
 
-        // --- Divider ---
-        Rectangle {
-          width: parent.width
-          height: 1
-          color: root.barForeground
-          opacity: 0.2
-        }
+          Rectangle { width: parent.width; height: 1; color: root.barForeground; opacity: 0.2 }
 
-        // --- Captured apps header ---
-        Text {
-          width: parent.width
-          text: root.entries.length > 0
-            ? "Captured apps (" + root.entries.length + ")"
-            : "No apps captured yet"
-          color: root.barForeground
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          font.bold: true
-        }
-
-        // --- Table of entries ---
-        Column {
-          width: parent.width
-          spacing: Style.space(2)
+          Text {
+            width: parent.width
+            text: root.relaunchRows.length > 0
+              ? "Relaunch list (" + root.relaunchRows.length + ")"
+              : "No apps on the relaunch list yet"
+            color: root.barForeground
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+          }
 
           Repeater {
-            model: root.entries
-            delegate: Row {
+            model: root.relaunchRows
+            delegate: Column {
+              required property var modelData
               width: content.width
-              spacing: Style.space(8)
+              spacing: Style.space(4)
 
-              Text {
-                text: "ws " + modelData.workspace
-                color: root.barForeground
-                opacity: modelData.enabled ? 1.0 : 0.4
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.bodySmall
-                width: Style.space(44)
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+                Text {
+                  text: "ws " + modelData.workspace
+                  width: Style.space(44)
+                  color: root.barForeground
+                  opacity: modelData.enabled ? 1.0 : 0.4
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                }
+                Text {
+                  text: modelData.label + (modelData.kind === "both" ? "  · also a startup app" : "")
+                  width: parent.width - Style.space(52)
+                  elide: Text.ElideRight
+                  color: root.barForeground
+                  opacity: modelData.enabled ? 1.0 : 0.4
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                }
               }
-              Text {
-                text: modelData.class
-                color: root.barForeground
-                opacity: modelData.enabled ? 1.0 : 0.4
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.bodySmall
-                elide: Text.ElideRight
-                width: content.width - Style.space(44) - Style.space(8)
+
+              Flow {
+                width: parent.width
+                spacing: Style.space(6)
+                Chip {
+                  label: "Remove from relaunch"
+                  onClicked: root.run(["drop", "--class", modelData.class, "--json"])
+                }
+                Chip {
+                  visible: modelData.kind === "both" && modelData.startupId
+                  label: "Delete startup config"
+                  onClicked: root.run(["drop-startup", "--id", modelData.startupId, "--json"])
+                }
               }
             }
           }
-        }
 
-        // --- Status line ---
-        Text {
-          width: parent.width
-          visible: root.statusText.length > 0
-          text: root.statusText
-          color: root.barForeground
-          opacity: 0.75
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
-        }
+          Text {
+            visible: root.startupRows.length > 0
+            width: parent.width
+            text: "Startup apps not in relaunch"
+            color: root.barForeground
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+          }
 
-        Text {
-          width: parent.width
-          text: "Edit ~/.config/omarchy-relaunch/config.json to fine-tune, then Regenerate."
-          color: root.barForeground
-          opacity: 0.5
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
+          Repeater {
+            model: root.startupRows
+            delegate: Column {
+              id: startupRow
+              required property var modelData
+              width: content.width
+              spacing: Style.space(4)
+              property int pickWs: 1
+
+              Text {
+                width: parent.width
+                text: modelData.label + "  ·  " + modelData.exec
+                elide: Text.ElideRight
+                color: root.barForeground
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Row {
+                spacing: Style.space(6)
+                Chip {
+                  label: "−"
+                  onClicked: startupRow.pickWs = Math.max(1, startupRow.pickWs - 1)
+                }
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "ws " + startupRow.pickWs
+                  color: root.barForeground
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                }
+                Chip {
+                  label: "+"
+                  onClicked: startupRow.pickWs = Math.min(10, startupRow.pickWs + 1)
+                }
+                Chip {
+                  label: "Add to relaunch"
+                  onClicked: root.run(["import", "--exec", startupRow.modelData.exec, "--workspace", String(startupRow.pickWs), "--json"])
+                }
+                Chip {
+                  label: "Leave alone"
+                  onClicked: root.run(["ignore", "--id", startupRow.modelData.startupId, "--json"])
+                }
+              }
+            }
+          }
+
+          Text {
+            visible: root.ignoredRows.length > 0
+            width: parent.width
+            text: "Left alone (still shown here)"
+            color: root.barForeground
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+          }
+
+          Repeater {
+            model: root.ignoredRows
+            delegate: Row {
+              required property var modelData
+              width: content.width
+              spacing: Style.space(8)
+              Text {
+                width: parent.width - Style.space(90)
+                text: modelData.label
+                elide: Text.ElideRight
+                color: root.barForeground
+                opacity: 0.55
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+              Chip {
+                label: "Stop ignoring"
+                onClicked: root.run(["unignore", "--id", modelData.startupId, "--json"])
+              }
+            }
+          }
+
+          Rectangle { width: parent.width; height: 1; color: root.barForeground; opacity: 0.2 }
+
+          Text {
+            width: parent.width
+            text: "Relaunch on boot"
+            color: root.barForeground
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+          }
+
+          Text {
+            width: parent.width
+            text: root.bootLabel()
+            color: root.barForeground
+            opacity: 0.75
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          Flow {
+            width: parent.width
+            spacing: Style.space(6)
+            Chip {
+              label: "Skip next boot"
+              onClicked: { root.statusText = "Skipping the next boot."; root.run(["boot-skip", "--json"]) }
+            }
+            Chip {
+              visible: !root.boot.disabled
+              label: "Disable until re-enabled"
+              onClicked: { root.statusText = "Disabled on boot."; root.run(["boot-disable", "--json"]) }
+            }
+            Chip {
+              visible: root.boot.disabled || root.boot.skipOnce
+              label: "Enable on boot"
+              onClicked: { root.statusText = "Enabled on boot."; root.run(["boot-enable", "--json"]) }
+            }
+          }
+
+          Chip {
+            label: root.confirmRemove ? "Click again to remove permanently" : "Remove Relaunch permanently"
+            danger: true
+            onClicked: {
+              if (!root.confirmRemove) {
+                root.confirmRemove = true
+                root.statusText = "Click again to uninstall Relaunch."
+                return
+              }
+              root.confirmRemove = false
+              root.run(["uninstall", "--yes", "--json"])
+            }
+          }
+
+          Text {
+            width: parent.width
+            visible: root.statusText.length > 0
+            text: root.statusText
+            color: root.barForeground
+            opacity: 0.75
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
         }
       }
     }
