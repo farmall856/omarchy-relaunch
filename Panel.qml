@@ -139,9 +139,14 @@ Panel {
     }
   }
 
-  Process {
-    id: logProc
-    command: [root.enginePath, "last-boot", "--open"]
+  function openLog() {
+    var payload = "{}"
+    if (root.lastBoot && root.lastBoot.logPath)
+      payload = JSON.stringify({ logPath: root.lastBoot.logPath })
+    if (root.bar)
+      root.bar.run("omarchy-shell shell summon io.github.laytonf.relaunch " + Util.shellQuote(payload))
+    else
+      Quickshell.execDetached(["omarchy-shell", "shell", "summon", "io.github.laytonf.relaunch", payload])
   }
 
   component Chip: Rectangle {
@@ -513,8 +518,8 @@ Panel {
           }
 
           Chip {
-            label: "Open last boot log"
-            onClicked: logProc.running = true
+            label: "View last boot log"
+            onClicked: root.openLog()
           }
         }
       }

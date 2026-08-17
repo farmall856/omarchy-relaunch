@@ -42,7 +42,7 @@ Then validate before submitting:
   # Copy the QML side into a plugin dir and validate against the shell:
   ./install.sh
   omarchy plugin validate "\$HOME/.config/omarchy/plugins/io.github.laytonf.relaunch"
-  qmllint -I "\$OMARCHY_PATH/shell" BarWidget.qml Panel.qml
+  qmllint -I "\$OMARCHY_PATH/shell" BarWidget.qml Panel.qml Overlay.qml
 
 Finally, submit at:
   https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/new?template=submit-plugin.yml

@@ -6,9 +6,10 @@
   "author": "Layton F",
   "license": "MIT",
   "description": "Save your current app-to-workspace layout, then relaunch those apps into the right workspaces after a reboot or crash.",
-  "kinds": ["bar-widget"],
+  "kinds": ["bar-widget", "overlay"],
   "entryPoints": {
-    "barWidget": "BarWidget.qml"
+    "barWidget": "BarWidget.qml",
+    "overlay": "Overlay.qml"
   },
   "barWidget": {
     "displayName": "Relaunch",

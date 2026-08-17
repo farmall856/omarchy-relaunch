@@ -57,7 +57,8 @@ privileges; everything runs as your user, like any Hyprland command.
 1. Arrange your apps across workspaces the way you want them on boot.
 2. Click the Relaunch icon in the bar.
 3. **Save Startup App Workspaces** — captures the layout and writes the snippet.
-4. **Reload Hyprland** to apply now, or just reboot.
+4. After a reboot, **View last boot log** opens a fullscreen overlay with the
+   last `relaunch boot` diagnostic (what launched, where it landed).
 
 ## Configure
 

@@ -18,8 +18,9 @@ hook) launches the list. Workspace pins live in generated `relaunch.lua`.
 |---|---|
 | `BarWidget.qml` | Bar button. Follows the `omarchy.clock` popup contract. |
 | `Panel.qml` | Popup UI. Shells out to `relaunch`; never calls `hyprctl` itself. |
+| `Overlay.qml` | Fullscreen last-boot log. Same Item/open/close contract as `omarchy.emojis`. |
 | `relaunch` | bash + jq CLI. Inventory, list edits, boot policy, rule generation. |
-| `manifest.json` | Omarchy plugin schema v1, `kinds: ["bar-widget"]`. |
+| `manifest.json` | Omarchy plugin schema v1, `kinds: ["bar-widget", "overlay"]`. |
 
 Runtime files (user-owned, never commit):
 
@@ -47,6 +48,7 @@ relaunch drop-startup --id ID
 relaunch ignore --id ID
 relaunch unignore --id ID
 relaunch boot-skip | boot-disable | boot-enable
+relaunch last-boot [--json] [--open]
 relaunch uninstall --yes
 ```
 
@@ -91,8 +93,13 @@ Mirror `omarchy.clock` / `omarchy.weather`:
   `Style.font.*`. No hardcoded palette.
 - Use `Quickshell.Io.Process` to run `relaunch`. The script must be on `PATH`
   (`~/.local/bin` after `install.sh`).
+- Overlay is a second kind, not a replacement for the panel. Bar click still
+  toggles the small panel; "View last boot log" summons the overlay via
+  `omarchy-shell shell summon io.github.laytonf.relaunch`. There is no
+  `Overlay {}` type — copy `omarchy.emojis` (`Item` + `opened`/`open`/`close`).
 - After QML edits in a live install, `omarchy-shell shell rescanPlugins`
-  (user plugin dir hot-reloads on save; this tree does not).
+  (user plugin dir hot-reloads on save; this tree does not). A new `kinds`
+  entry needs `omarchy restart shell`.
 
 Do not edit `/usr/share/omarchy/`. Read it for the plugin contract.
 
@@ -107,7 +114,7 @@ install -m 0755 ./relaunch ~/.local/bin/relaunch
 omarchy plugin validate .
 
 # QML (qt6 qmllint; include the shell import path)
-/usr/lib/qt6/bin/qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml
+/usr/lib/qt6/bin/qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml Overlay.qml
 
 # Local install: script + plugin copy + hyprland source line
 ./install.sh

@@ -37,6 +37,7 @@ mkdir -p "$PLUGIN_DST"
 install -m 0644 "$REPO_DIR/manifest.json" "$PLUGIN_DST/manifest.json"
 install -m 0644 "$REPO_DIR/BarWidget.qml" "$PLUGIN_DST/BarWidget.qml"
 install -m 0644 "$REPO_DIR/Panel.qml"     "$PLUGIN_DST/Panel.qml"
+install -m 0644 "$REPO_DIR/Overlay.qml"   "$PLUGIN_DST/Overlay.qml"
 install -m 0755 "$REPO_DIR/relaunch"      "$PLUGIN_DST/relaunch"
 echo "    installed $PLUGIN_DST"
 

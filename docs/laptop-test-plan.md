@@ -41,7 +41,7 @@ is installed (widget glyph `\uf1da`).
 1. From the repo: `./install.sh`
 2. Confirm:
    - `command -v relaunch` → `~/.local/bin/relaunch`
-   - `~/.config/omarchy/plugins/io.github.laytonf.relaunch/{manifest.json,BarWidget.qml,Panel.qml}`
+   - `~/.config/omarchy/plugins/io.github.laytonf.relaunch/{manifest.json,BarWidget.qml,Panel.qml,Overlay.qml}`
    - `omarchy plugin validate ~/.config/omarchy/plugins/io.github.laytonf.relaunch`
    - `omarchy plugin list --json` shows `io.github.laytonf.relaunch` enabled
    - Widget appears on the **right** of the bar; glyph renders
