@@ -33,7 +33,10 @@ Panel {
   }
 
   readonly property var runningRows: rows.filter(function(r) { return r.kind === "running" })
-  readonly property var relaunchRows: rows.filter(function(r) { return r.inRelaunch })
+  readonly property var relaunchRows: rows.filter(function(r) { return r.inRelaunch }).sort(function(a, b) {
+    if (a.workspace !== b.workspace) return a.workspace - b.workspace
+    return String(a.label).localeCompare(String(b.label))
+  })
   readonly property var startupRows: rows.filter(function(r) { return r.kind === "startup" })
   readonly property var ignoredRows: rows.filter(function(r) { return r.kind === "ignored" })
 

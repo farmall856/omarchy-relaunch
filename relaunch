@@ -170,7 +170,7 @@ def dump_config:
   {
     staggerSeconds: .staggerSeconds,
     ignored: (.ignored // []),
-    entries: [.entries[] | normalize_entry]
+    entries: ([.entries[] | normalize_entry] | sort_by(.workspace, .class))
   };
 
 def capture($clients):
@@ -449,7 +449,7 @@ build_rows() {
             ignored: (if $s != null then (($ign | index($s.id)) != null) else false end),
             startupId: (if $s != null then $s.id else null end)
           }
-      ] as $fromRelaunch
+      ] | sort_by(.workspace, .class) as $fromRelaunch
     | [
         $startup[]
         | . as $s

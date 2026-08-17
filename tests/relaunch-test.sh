@@ -230,6 +230,7 @@ export RELAUNCH_HERDR_PIDS="4242"
 "$RELAUNCH" save --json | jq -e '
   ([.entries[] | select(.class == "herdr" and .workspace == 1)] | length == 1)
   and ([.entries[] | select(.class == "foot" and .workspace == 6)] | length == 1)
+  and ([.rows[] | select(.inRelaunch) | .workspace] == [1, 6])
 ' >/dev/null || fail "save splits herdr from foot"
 unset RELAUNCH_HERDR_PIDS
 
