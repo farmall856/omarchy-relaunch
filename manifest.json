@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.laytonf.relaunch",
+  "name": "Relaunch",
+  "version": "1.0.0",
+  "author": "Layton F",
+  "license": "MIT",
+  "description": "Save your current app-to-workspace layout, then relaunch those apps into the right workspaces after a reboot or crash.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Relaunch",
+    "category": "Workspace",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

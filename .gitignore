@@ -1,0 +1,16 @@
+# Go
+/engine/relaunch
+/engine/engine
+*.exe
+*.test
+*.out
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local generated artifacts (belong in ~/.config, never committed)
+relaunch.conf
+config.json
