@@ -466,18 +466,19 @@ Panel {
             width: parent.width
             spacing: Style.space(6)
             Chip {
+              visible: !root.boot.disabled && !root.boot.skipOnce
               label: "Skip next boot"
               onClicked: root.run(["boot-skip", "--json"], "Skipping the next boot.")
-            }
-            Chip {
-              visible: !root.boot.disabled
-              label: "Disable until re-enabled"
-              onClicked: root.run(["boot-disable", "--json"], "Disabled on boot.")
             }
             Chip {
               visible: root.boot.disabled || root.boot.skipOnce
               label: "Enable on boot"
               onClicked: root.run(["boot-enable", "--json"], "Enabled on boot.")
+            }
+            Chip {
+              visible: !root.boot.disabled
+              label: "Disable until re-enabled"
+              onClicked: root.run(["boot-disable", "--json"], "Disabled on boot.")
             }
           }
 
