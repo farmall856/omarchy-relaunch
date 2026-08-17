@@ -1,3 +1,3 @@
-module github.com/laytonf/omarchy-relaunch/engine
+module github.com/farmall856/omarchy-relaunch/engine
 
 go 1.23

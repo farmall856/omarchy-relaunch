@@ -3,7 +3,7 @@ package config
 import (
 	"sort"
 
-	"github.com/laytonf/omarchy-relaunch/engine/internal/hypr"
+	"github.com/farmall856/omarchy-relaunch/engine/internal/hypr"
 )
 
 // Capture inventories running windows and merges them into the config,

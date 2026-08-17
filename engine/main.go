@@ -14,7 +14,7 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/laytonf/omarchy-relaunch/engine/internal/config"
+	"github.com/farmall856/omarchy-relaunch/engine/internal/config"
 )
 
 type result struct {

@@ -4,8 +4,8 @@ Omarchy Quattro bar widget that snapshots the current app→workspace layout
 and writes a Hyprland snippet so those apps come back on the same workspaces
 after a reboot or crash.
 
-This folder is the source tree. The public repo name is `omarchy-relaunch`
-(`github.com/laytonf/omarchy-relaunch`); plugin id is
+This folder is the source tree. The public repo is
+`github.com/farmall856/omarchy-relaunch`; plugin id is
 `io.github.laytonf.relaunch`. Do not rename the id without updating
 `manifest.json`, QML `moduleName`, `install.sh`, and `git-init.sh`.
 
@@ -18,7 +18,7 @@ config sourced at startup.
 |---|---|
 | `BarWidget.qml` | Bar button. Follows the `omarchy.clock` popup contract. |
 | `Panel.qml` | Popup UI. Shells out to the `relaunch` binary; never calls `hyprctl` itself. |
-| `engine/` | Go CLI (`github.com/laytonf/omarchy-relaunch/engine`). All Hyprland I/O and snippet generation. |
+| `engine/` | Go CLI (`github.com/farmall856/omarchy-relaunch/engine`). All Hyprland I/O and snippet generation. |
 | `manifest.json` | Omarchy plugin schema v1, `kinds: ["bar-widget"]`. |
 
 Runtime files (user-owned, never commit):
@@ -97,7 +97,7 @@ omarchy bar move io.github.laytonf.relaunch --section right   # first time
 Prefer `./install.sh` over copying files by hand. Once published:
 
 ```bash
-omarchy plugin add https://github.com/laytonf/omarchy-relaunch.git --enable
+omarchy plugin add https://github.com/farmall856/omarchy-relaunch.git --enable
 ```
 
 The engine still needs a separate build onto `PATH`.
@@ -107,8 +107,8 @@ The engine still needs a separate build onto `PATH`.
 Not initialized as a git repo yet. One-time:
 
 ```bash
-./git-init.sh laytonf
-# then: gh repo create laytonf/omarchy-relaunch --public --source=. --remote=origin --push
+./git-init.sh farmall856
+# then: gh repo create farmall856/omarchy-relaunch --public --source=. --remote=origin --push
 ```
 
 Marketplace submit:

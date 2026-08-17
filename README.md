@@ -26,13 +26,13 @@ declarative config rather than live state, it survives a crash for free.
 Via Omarchy (recommended once published):
 
 ```sh
-omarchy plugin add https://github.com/laytonf/omarchy-relaunch.git --enable
+omarchy plugin add https://github.com/farmall856/omarchy-relaunch.git --enable
 ```
 
 The engine binary still needs to be built and on your PATH:
 
 ```sh
-git clone https://github.com/laytonf/omarchy-relaunch.git
+git clone https://github.com/farmall856/omarchy-relaunch.git
 cd omarchy-relaunch
 ./install.sh
 ```

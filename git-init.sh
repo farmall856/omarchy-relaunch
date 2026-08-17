@@ -10,7 +10,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
-GH_USER="${1:-laytonf}"
+GH_USER="${1:-farmall856}"
 REPO_NAME="omarchy-relaunch"
 
 if [[ -d .git ]]; then
