@@ -170,7 +170,7 @@ Panel {
     height: Style.space(22)
     width: chipLabel.implicitWidth + Style.space(12)
     radius: Style.space(4)
-    color: chipMouse.containsMouse ? root.barForeground : "transparent"
+    color: chipMouse.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent) : "transparent"
     border.color: root.barForeground
     border.width: 1
     opacity: root.busy ? 0.45 : 1
@@ -178,7 +178,7 @@ Panel {
       id: chipLabel
       anchors.centerIn: parent
       text: chip.label
-      color: chipMouse.containsMouse ? root.barBackground : root.barForeground
+      color: root.barForeground
       font.family: root.bar ? root.bar.fontFamily : Style.font.family
       font.pixelSize: Style.font.caption
     }
@@ -244,14 +244,14 @@ Panel {
             width: parent.width
             height: Style.space(36)
             radius: Style.space(6)
-            color: saveMouse.containsMouse ? root.barForeground : "transparent"
+            color: saveMouse.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent) : "transparent"
             border.color: root.barForeground
             border.width: 1
             opacity: root.busy ? 0.5 : 1.0
             Text {
               anchors.centerIn: parent
               text: root.busy ? "Working…" : "Save Startup App Workspaces"
-              color: saveMouse.containsMouse ? root.barBackground : root.barForeground
+              color: root.barForeground
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.body
               font.bold: true
@@ -265,19 +265,6 @@ Panel {
                 root.statusText = ""
                 root.run(["save", "--json"])
               }
-            }
-          }
-
-          Row {
-            width: parent.width
-            spacing: Style.space(8)
-            Chip {
-              label: "Regenerate"
-              onClicked: root.run(["generate", "--json"], "Snippet regenerated.")
-            }
-            Chip {
-              label: "Reload Hyprland"
-              onClicked: root.run(["reload", "--json"], "Hyprland reloaded.")
             }
           }
 
@@ -532,8 +519,19 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
+          Text {
+            width: parent.width
+            visible: root.lastBoot !== null && !root.showLog
+            text: root.lastBootLink()
+            color: root.barForeground
+            opacity: 0.7
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
           Chip {
-            label: root.showLog ? "Hide last boot log" : (root.lastBootLink() || "Last boot log")
+            label: root.showLog ? "Hide last boot log" : "Show last boot log"
             onClicked: {
               if (root.showLog) {
                 root.showLog = false
