@@ -37,6 +37,9 @@ chmod +x "$HYPRCTL_STUB"
 export RELAUNCH_CONFIG_DIR="$WORKDIR/cfg"
 export RELAUNCH_AUTOSTART="$WORKDIR/autostart.lua"
 export RELAUNCH_HYPRLAND_LUA="$WORKDIR/hyprland.lua"
+export RELAUNCH_PLUGIN_DIR="$WORKDIR/plugin"
+export RELAUNCH_HYPR_CONF="$WORKDIR/hyprland.conf"
+export PREFIX="$WORKDIR"
 export HYPRCTL="$HYPRCTL_STUB"
 mkdir -p "$RELAUNCH_CONFIG_DIR"
 : >"$RELAUNCH_AUTOSTART"
@@ -208,5 +211,27 @@ assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.conf")" 'Proton Mail'
 "$RELAUNCH" list --json | jq -e '.boot.active == true' >/dev/null || fail "boot re-enabled"
 
 "$RELAUNCH" reload | grep -qx 'Hyprland reloaded.' || fail "reload text"
+
+# --- env-prefixed exec is not treated as the class ---
+cat >"$RELAUNCH_AUTOSTART" <<'EOF'
+o.exec_on_start("FOO=bar signal-desktop")
+o.launch_on_start("keep-me")
+-- omarchy-relaunch (managed; hidden from the Relaunch list)
+o.exec_on_start("/tmp/relaunch boot")
+o.launch_on_start("also-keep")
+EOF
+"$RELAUNCH" list --json | jq -e '
+  [.startup[] | select(.exec == "FOO=bar signal-desktop") | .class] == ["signal"]
+' >/dev/null || fail "env-prefixed exec class"
+
+# --- uninstall must not delete adjacent user startup lines ---
+"$RELAUNCH" uninstall --yes >/dev/null
+grep -q 'o.launch_on_start("keep-me")' "$RELAUNCH_AUTOSTART" || fail "unrelated keep-me deleted"
+grep -q 'o.launch_on_start("also-keep")' "$RELAUNCH_AUTOSTART" || fail "adjacent also-keep deleted"
+grep -q 'relaunch boot' "$RELAUNCH_AUTOSTART" && fail "boot hook survived uninstall"
+grep -q 'omarchy-relaunch' "$RELAUNCH_AUTOSTART" && fail "marker survived uninstall"
+
+grep -q 'install -m 0755 "$REPO_DIR/relaunch"      "$PLUGIN_DST/relaunch"' \
+  "$ROOT/install.sh" || fail "install.sh must copy relaunch into the plugin folder"
 
 printf 'ok %s\n' "$(basename "$0")"

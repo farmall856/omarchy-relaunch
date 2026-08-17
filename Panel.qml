@@ -20,6 +20,7 @@ Panel {
   property var boot: ({ disabled: false, skipOnce: false, active: true })
   property int staggerSeconds: 0
   property string statusText: ""
+  property string pendingStatus: ""
   property bool busy: false
   property bool confirmRemove: false
 
@@ -36,6 +37,7 @@ Panel {
   readonly property var ignoredRows: rows.filter(function(r) { return r.kind === "ignored" })
 
   function open() {
+    root.confirmRemove = false
     root.controller.show()
     refresh()
   }
@@ -58,13 +60,22 @@ Panel {
     run(["list", "--json"])
   }
 
-  function run(args) {
+  function run(args, okText) {
+    root.confirmRemove = false
+    root.pendingStatus = okText || ""
+    root.statusText = ""
     root.busy = true
     actionProc.command = [root.enginePath].concat(args)
     actionProc.running = true
   }
 
   Component.onCompleted: root.run(["list", "--json"])
+
+  Timer {
+    id: disarmRemove
+    interval: 4000
+    onTriggered: root.confirmRemove = false
+  }
 
   function applyResult(text) {
     try {
@@ -103,8 +114,11 @@ Panel {
       onStreamFinished: { root.applyResult(this.text); root.busy = false }
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0 && root.statusText === "")
+      if (exitCode !== 0)
         root.statusText = "Command failed"
+      else if (root.statusText === "" && root.pendingStatus !== "")
+        root.statusText = root.pendingStatus
+      root.pendingStatus = ""
       root.busy = false
     }
   }
@@ -220,11 +234,11 @@ Panel {
             spacing: Style.space(8)
             Chip {
               label: "Regenerate"
-              onClicked: { root.statusText = "Snippet regenerated."; root.run(["generate", "--json"]) }
+              onClicked: root.run(["generate", "--json"], "Snippet regenerated.")
             }
             Chip {
               label: "Reload Hyprland"
-              onClicked: { root.statusText = "Hyprland reloaded."; root.run(["reload", "--json"]) }
+              onClicked: root.run(["reload", "--json"], "Hyprland reloaded.")
             }
           }
 
@@ -401,17 +415,17 @@ Panel {
             spacing: Style.space(6)
             Chip {
               label: "Skip next boot"
-              onClicked: { root.statusText = "Skipping the next boot."; root.run(["boot-skip", "--json"]) }
+              onClicked: root.run(["boot-skip", "--json"], "Skipping the next boot.")
             }
             Chip {
               visible: !root.boot.disabled
               label: "Disable until re-enabled"
-              onClicked: { root.statusText = "Disabled on boot."; root.run(["boot-disable", "--json"]) }
+              onClicked: root.run(["boot-disable", "--json"], "Disabled on boot.")
             }
             Chip {
               visible: root.boot.disabled || root.boot.skipOnce
               label: "Enable on boot"
-              onClicked: { root.statusText = "Enabled on boot."; root.run(["boot-enable", "--json"]) }
+              onClicked: root.run(["boot-enable", "--json"], "Enabled on boot.")
             }
           }
 
@@ -422,10 +436,12 @@ Panel {
               if (!root.confirmRemove) {
                 root.confirmRemove = true
                 root.statusText = "Click again to uninstall Relaunch."
+                disarmRemove.restart()
                 return
               }
+              disarmRemove.stop()
               root.confirmRemove = false
-              root.run(["uninstall", "--yes", "--json"])
+              root.run(["uninstall", "--yes", "--json"], "Relaunch removed.")
             }
           }
 

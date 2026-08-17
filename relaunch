@@ -323,6 +323,7 @@ class_for_startup_exec() {
   fi
   for token in $exec; do
     [[ "$token" == -* || "$token" == -- ]] && continue
+    [[ "$token" == *=* ]] && continue
     base="${token##*/}"
     case "$base" in
       setsid | env | command | nice | nohup | uwsm-app) continue ;;
@@ -681,12 +682,15 @@ remove_managed_block() {
   local file="$1" tmp
   [[ -f "$file" ]] || return 0
   tmp="$(mktemp)"
+  # Drop only our marker comment and the immediately following line when
+  # that line is our hook (relaunch boot) or our dofile. Never eat the next
+  # user launch/source line just because it sits under the comment.
   awk '
-    /omarchy-relaunch/ { skip=1; next }
-    skip && /^[[:space:]]*$/ { skip=0; next }
-    skip && /o\.(exec_on_start|launch_on_start)/ { skip=0; next }
-    skip && /dofile\(/ { skip=0; next }
-    skip && /source =/ { skip=0; next }
+    /^[[:space:]]*-- omarchy-relaunch/ { pending=1; next }
+    pending {
+      pending=0
+      if ($0 ~ /relaunch boot/ || $0 ~ /omarchy-relaunch\/relaunch\.lua/) next
+    }
     { print }
   ' "$file" >"$tmp"
   mv -f "$tmp" "$file"
@@ -704,7 +708,7 @@ cmd_uninstall() {
   if [[ -f "$hypr_conf" ]]; then
     local tmp
     tmp="$(mktemp)"
-    grep -vF "$(snippet_path)" "$hypr_conf" | grep -v 'omarchy-relaunch' >"$tmp" || true
+    grep -vF "source = $(snippet_path)" "$hypr_conf" | grep -vx '# omarchy-relaunch' >"$tmp" || true
     mv -f "$tmp" "$hypr_conf"
   fi
   rm -rf "$(config_dir)"
@@ -744,9 +748,11 @@ ensure_hooks() {
   # Plugin-manager installs do not put the script on PATH. Copy it so a
   # terminal `relaunch` works, but skip that when tests override the config dir.
   if [[ -z "${RELAUNCH_CONFIG_DIR:-}" ]]; then
-    bin="${PREFIX:-$HOME/.local}/bin"
-    mkdir -p "$bin"
-    install -m 0755 "$SELF" "$bin/relaunch"
+    bin="${PREFIX:-$HOME/.local}/bin/relaunch"
+    mkdir -p "$(dirname "$bin")"
+    if [[ ! -e "$bin" ]] || ! cmp -s "$SELF" "$bin"; then
+      install -m 0755 "$SELF" "$bin"
+    fi
   fi
 }
 
