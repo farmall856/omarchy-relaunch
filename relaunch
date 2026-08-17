@@ -87,7 +87,7 @@ def known_exec:
     "mpv": "mpv",
     "Spotify": "spotify",
     "spotify": "spotify",
-    "herdr": "herdr",
+    "herdr": "omarchy-launch-terminal-herdr",
     "Proton Mail": "proton-mail",
     "Proton Pass": "proton-pass",
     "signal": "signal-desktop"
@@ -117,6 +117,7 @@ def exec_class:
     "mpv": "mpv",
     "spotify": "Spotify",
     "herdr": "herdr",
+    "omarchy-launch-terminal-herdr": "herdr",
     "proton-mail": "Proton Mail",
     "proton-pass": "Proton Pass",
     "signal-desktop": "signal",
@@ -316,6 +317,13 @@ is_relaunch_exec() {
 
 class_for_startup_exec() {
   local exec="$1" token base mapped first=""
+  for token in $exec; do
+    base="${token##*/}"
+    if [[ "$base" == herdr || "$base" == omarchy-launch-terminal-herdr ]]; then
+      printf '%s\n' herdr
+      return
+    fi
+  done
   mapped="$(jq -r --arg e "$exec" "$jq_lib"' $e | class_for_exec' <<<"{}")"
   if [[ -n "$mapped" && "$mapped" != "$exec" ]]; then
     printf '%s\n' "$mapped"
@@ -336,6 +344,41 @@ class_for_startup_exec() {
     fi
   done
   printf '%s\n' "${first:-${exec%% *}}"
+}
+
+is_herdr_window() {
+  local pid="$1" arg
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [[ -n "${RELAUNCH_HERDR_PIDS:-}" ]]; then
+    [[ " ${RELAUNCH_HERDR_PIDS} " == *" ${pid} "* ]]
+    return
+  fi
+  [[ -r "/proc/${pid}/cmdline" ]] || return 1
+  while IFS= read -r -d '' arg; do
+    [[ "$arg" == herdr || "$arg" == omarchy-launch-terminal-herdr ]] && return 0
+  done < "/proc/${pid}/cmdline"
+  pgrep -P "$pid" -x herdr >/dev/null 2>&1
+}
+
+annotate_clients() {
+  local clients="$1" pid herdr_json
+  local -a herdr_pids=()
+  while IFS= read -r pid; do
+    [[ -z "$pid" || "$pid" == null ]] && continue
+    if is_herdr_window "$pid"; then
+      herdr_pids+=("$pid")
+    fi
+  done < <(jq -r '.[].pid // empty' <<<"$clients")
+  if [[ ${#herdr_pids[@]} -eq 0 ]]; then
+    printf '%s\n' "$clients"
+    return
+  fi
+  herdr_json="$(printf '%s\n' "${herdr_pids[@]}" | jq -R 'tonumber' | jq -s .)"
+  jq --argjson herdr "$herdr_json" '
+    map(if ((.pid as $p | $herdr | index($p)) != null)
+        then .class = "herdr" | .initialClass = "herdr"
+        else . end)
+  ' <<<"$clients"
 }
 
 scan_startup() {
@@ -380,10 +423,11 @@ boot_state_json() {
 }
 
 build_rows() {
-  local cfg startup
+  local cfg startup clients
   cfg="$1"
   startup="$2"
-  jq --argjson startup "$startup" "$jq_lib"'
+  clients="${3:-[]}"
+  jq --argjson startup "$startup" --argjson clients "$clients" "$jq_lib"'
     load_config as $cfg
     | ($cfg.ignored) as $ign
     | ([ $cfg.entries[] | {key: (.class | ascii_downcase), value: .} ] | from_entries) as $byClass
@@ -429,15 +473,40 @@ build_rows() {
             startupId: $s.id
           }
       ] as $fromStartup
-    | ($fromRelaunch + $fromStartup)
+    | (
+        $clients
+        | map(. + {match: (if (.initialClass // "") != "" then .initialClass else (.class // "") end)})
+        | map(select(.match != "" and ((.workspace.id // 0) >= 1)))
+        | sort_by(.workspace.id, .match)
+        | unique_by(.match)
+      ) as $running
+    | [
+        $running[]
+        | . as $c
+        | select($byClass[($c.match | ascii_downcase)] == null)
+        | {
+            id: ("running:" + $c.match),
+            kind: "running",
+            class: $c.match,
+            label: $c.match,
+            exec: ($c.match | guess_exec),
+            workspace: $c.workspace.id,
+            enabled: false,
+            inRelaunch: false,
+            ignored: false,
+            startupId: null
+          }
+      ] as $fromRunning
+    | ($fromRunning + $fromRelaunch + $fromStartup)
   ' <<<"$cfg"
 }
 
 emit_state() {
-  local cfg startup rows extra
+  local cfg startup rows extra clients
   cfg="$(load_config_json)"
   startup="$(scan_startup)"
-  rows="$(build_rows "$cfg" "$startup")"
+  clients="$(clients_json)"
+  rows="$(build_rows "$cfg" "$startup" "$clients")"
   extra="${1:-{\}}"
   jq -n --argjson cfg "$cfg" --argjson startup "$startup" --argjson rows "$rows" \
     --argjson boot "$(boot_state_json)" --argjson extra "$extra" \
@@ -461,7 +530,7 @@ clients_json() {
     die "hyprctl clients: command failed"
   fi
   jq -e 'type == "array"' >/dev/null <<<"$out" || die "hyprctl clients: expected a JSON array"
-  printf '%s\n' "$out"
+  annotate_clients "$out"
 }
 
 cmd_save() {

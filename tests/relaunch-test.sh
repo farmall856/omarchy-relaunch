@@ -212,6 +212,27 @@ assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.conf")" 'Proton Mail'
 
 "$RELAUNCH" reload | grep -qx 'Hyprland reloaded.' || fail "reload text"
 
+# herdr-in-foot is a distinct class; running windows appear before Save
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"class": "foot", "initialClass": "foot", "pid": 4242, "floating": false, "workspace": {"id": 1}},
+  {"class": "foot", "initialClass": "foot", "pid": 4243, "floating": false, "workspace": {"id": 6}}
+]
+EOF
+export RELAUNCH_HERDR_PIDS="4242"
+"$RELAUNCH" list --json | jq -e '
+  ([.rows[] | select(.kind == "running" and .class == "herdr" and .workspace == 1)] | length == 1)
+  and ([.rows[] | select(.kind == "running" and .class == "foot" and .workspace == 6)] | length == 1)
+' >/dev/null || fail "running herdr vs foot"
+"$RELAUNCH" save --json | jq -e '
+  ([.entries[] | select(.class == "herdr" and .workspace == 1)] | length == 1)
+  and ([.entries[] | select(.class == "foot" and .workspace == 6)] | length == 1)
+' >/dev/null || fail "save splits herdr from foot"
+unset RELAUNCH_HERDR_PIDS
+
 # --- env-prefixed exec is not treated as the class ---
 cat >"$RELAUNCH_AUTOSTART" <<'EOF'
 o.exec_on_start("FOO=bar signal-desktop")

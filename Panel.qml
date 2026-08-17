@@ -32,6 +32,7 @@ Panel {
     return "relaunch"
   }
 
+  readonly property var runningRows: rows.filter(function(r) { return r.kind === "running" })
   readonly property var relaunchRows: rows.filter(function(r) { return r.inRelaunch })
   readonly property var startupRows: rows.filter(function(r) { return r.kind === "startup" })
   readonly property var ignoredRows: rows.filter(function(r) { return r.kind === "ignored" })
@@ -243,6 +244,43 @@ Panel {
           }
 
           Rectangle { width: parent.width; height: 1; color: root.barForeground; opacity: 0.2 }
+
+          Text {
+            visible: root.runningRows.length > 0
+            width: parent.width
+            text: "Running now"
+            color: root.barForeground
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+          }
+
+          Repeater {
+            model: root.runningRows
+            delegate: Column {
+              id: runningRow
+              required property var modelData
+              width: content.width
+              spacing: Style.space(4)
+
+              Text {
+                width: parent.width
+                text: "ws " + modelData.workspace + "  ·  " + modelData.label
+                elide: Text.ElideRight
+                color: root.barForeground
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Chip {
+                label: "Add to relaunch"
+                onClicked: root.run([
+                  "import", "--exec", runningRow.modelData.exec,
+                  "--workspace", String(runningRow.modelData.workspace), "--json"
+                ])
+              }
+            }
+          }
 
           Text {
             width: parent.width
