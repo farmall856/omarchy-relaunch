@@ -201,7 +201,7 @@ def capture($clients):
               {
                 class: $cl.match,
                 workspace: $cl.workspace.id,
-                exec: ($cl.match | guess_exec),
+                exec: (if ($cl.relaunchExec // "") != "" then $cl.relaunchExec else ($cl.match | guess_exec) end),
                 enabled: true
               }
               + (if $cl.floating == true then {float: true} else {} end)
@@ -318,15 +318,121 @@ is_relaunch_exec() {
   return 1
 }
 
-class_for_startup_exec() {
-  local exec="$1" token base mapped first=""
-  for token in $exec; do
-    base="${token##*/}"
-    if [[ "$base" == herdr || "$base" == omarchy-launch-terminal-herdr ]]; then
-      printf '%s\n' herdr
-      return
-    fi
+is_wrapper_cmd() {
+  case "${1##*/}" in
+    setsid | env | command | nice | nohup | uwsm-app) return 0 ;;
+  esac
+  return 1
+}
+
+is_terminal_cmd() {
+  local b="${1##*/}"
+  case "$b" in
+    foot | alacritty | kitty | wezterm | wezterm-gui | ghostty | xdg-terminal-exec)
+      return 0
+      ;;
+  esac
+  [[ "$b" == omarchy-launch-terminal* ]]
+}
+
+is_generic_terminal_class() {
+  case "$1" in
+    foot | alacritty | kitty | wezterm | wezterm-gui | ghostty | xdg-terminal-exec)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# Print JSON {wrapped, class, exec} from argv. A terminal hosting another
+# command (foot -e herdr, omarchy-launch-terminal nvim) becomes class=that
+# command and exec=xdg-terminal-exec --app-id=<class> <command...>, so the
+# next launch has a distinct Hyprland class. No per-app special cases.
+identity_from_argv() {
+  local -a argv=("$@")
+  local i=0 n=${#argv[@]}
+  local app_id="" terminal=""
+  local -a inner=()
+
+  while ((i < n)) && { is_wrapper_cmd "${argv[i]}" || [[ "${argv[i]}" == [A-Za-z_]*[=]* && "${argv[i]}" != --* ]]; }; do
+    ((i++)) || true
   done
+
+  if ((i < n)) && is_terminal_cmd "${argv[i]}"; then
+    terminal="${argv[i]##*/}"
+    ((i++)) || true
+    while ((i < n)); do
+      local a="${argv[i]}"
+      if [[ "$a" == --app-id=* ]]; then
+        app_id="${a#--app-id=}"
+        ((i++)) || true
+      elif [[ "$a" == --app-id && $((i + 1)) -lt $n ]]; then
+        app_id="${argv[i + 1]}"
+        i=$((i + 2))
+      elif [[ "$a" == -e || "$a" == --command || "$a" == -- ]]; then
+        inner=("${argv[@]:i+1}")
+        break
+      elif [[ "$a" == --working-directory || "$a" == --dir || "$a" == -D || "$a" == --title ]]; then
+        i=$((i + 2))
+      elif [[ "$a" == --working-directory=* || "$a" == --dir=* || "$a" == --title=* ]]; then
+        ((i++)) || true
+      elif [[ "$a" == -* ]]; then
+        ((i++)) || true
+      else
+        inner=("${argv[@]:i}")
+        break
+      fi
+    done
+  fi
+
+  local class="" exec=""
+  if [[ -n "$app_id" ]] && ! is_generic_terminal_class "$app_id"; then
+    class="$app_id"
+    if ((${#inner[@]} > 0)); then
+      exec="xdg-terminal-exec --app-id=${class} ${inner[0]}"
+    else
+      exec="xdg-terminal-exec --app-id=${class}"
+    fi
+  elif ((${#inner[@]} > 0)); then
+    class="${inner[0]##*/}"
+    exec="xdg-terminal-exec --app-id=${class} ${inner[*]}"
+  fi
+
+  if [[ -n "$class" ]]; then
+    jq -n --arg class "$class" --arg exec "$exec" '{wrapped: true, class: $class, exec: $exec}'
+  else
+    jq -n '{wrapped: false}'
+  fi
+}
+
+identity_from_pid() {
+  local pid="$1" file arg
+  local -a argv=()
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { jq -n '{wrapped: false}'; return; }
+  if [[ -n "${RELAUNCH_CMDLINE_DIR:-}" ]]; then
+    file="${RELAUNCH_CMDLINE_DIR}/${pid}"
+  else
+    file="/proc/${pid}/cmdline"
+  fi
+  if [[ ! -r "$file" ]]; then
+    jq -n '{wrapped: false}'
+    return
+  fi
+  while IFS= read -r -d '' arg; do
+    argv+=("$arg")
+  done <"$file"
+  identity_from_argv "${argv[@]}"
+}
+
+class_for_startup_exec() {
+  local exec="$1" ident class mapped first="" token base
+  # shellcheck disable=SC2086
+  ident="$(identity_from_argv $exec)"
+  class="$(jq -r 'if .wrapped then .class else empty end' <<<"$ident")"
+  if [[ -n "$class" ]]; then
+    printf '%s\n' "$class"
+    return
+  fi
   mapped="$(jq -r --arg e "$exec" "$jq_lib"' $e | class_for_exec' <<<"{}")"
   if [[ -n "$mapped" && "$mapped" != "$exec" ]]; then
     printf '%s\n' "$mapped"
@@ -336,9 +442,7 @@ class_for_startup_exec() {
     [[ "$token" == -* || "$token" == -- ]] && continue
     [[ "$token" == *=* ]] && continue
     base="${token##*/}"
-    case "$base" in
-      setsid | env | command | nice | nohup | uwsm-app) continue ;;
-    esac
+    is_wrapper_cmd "$base" && continue
     [[ -z "$first" ]] && first="$base"
     mapped="$(jq -r --arg e "$base" "$jq_lib"' $e | class_for_exec' <<<"{}")"
     if [[ -n "$mapped" && "$mapped" != "$base" ]]; then
@@ -349,38 +453,30 @@ class_for_startup_exec() {
   printf '%s\n' "${first:-${exec%% *}}"
 }
 
-is_herdr_window() {
-  local pid="$1" arg
-  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
-  if [[ -n "${RELAUNCH_HERDR_PIDS:-}" ]]; then
-    [[ " ${RELAUNCH_HERDR_PIDS} " == *" ${pid} "* ]]
-    return
-  fi
-  [[ -r "/proc/${pid}/cmdline" ]] || return 1
-  while IFS= read -r -d '' arg; do
-    [[ "$arg" == herdr || "$arg" == omarchy-launch-terminal-herdr ]] && return 0
-  done < "/proc/${pid}/cmdline"
-  pgrep -P "$pid" -x herdr >/dev/null 2>&1
-}
-
 annotate_clients() {
-  local clients="$1" pid herdr_json
-  local -a herdr_pids=()
+  local clients="$1" pid ident patches
+  patches='[]'
   while IFS= read -r pid; do
     [[ -z "$pid" || "$pid" == null ]] && continue
-    if is_herdr_window "$pid"; then
-      herdr_pids+=("$pid")
-    fi
+    ident="$(identity_from_pid "$pid")"
+    jq -e '.wrapped == true' >/dev/null <<<"$ident" || continue
+    patches="$(jq --argjson pid "$pid" --argjson ident "$ident" \
+      '. + [{pid: $pid, class: $ident.class, exec: $ident.exec}]' <<<"$patches")"
   done < <(jq -r '.[].pid // empty' <<<"$clients")
-  if [[ ${#herdr_pids[@]} -eq 0 ]]; then
+  if [[ "$patches" == "[]" ]]; then
     printf '%s\n' "$clients"
     return
   fi
-  herdr_json="$(printf '%s\n' "${herdr_pids[@]}" | jq -R 'tonumber' | jq -s .)"
-  jq --argjson herdr "$herdr_json" '
-    map(if ((.pid as $p | $herdr | index($p)) != null)
-        then .class = "herdr" | .initialClass = "herdr"
-        else . end)
+  jq --argjson patches "$patches" '
+    ($patches | map({key: (.pid | tostring), value: .}) | from_entries) as $by
+    | map(
+        (($by[(.pid | tostring)]) // null) as $p
+        | if $p != null then
+            .class = $p.class
+            | .initialClass = $p.class
+            | .relaunchExec = $p.exec
+          else . end
+      )
   ' <<<"$clients"
 }
 
@@ -492,7 +588,7 @@ build_rows() {
             kind: "running",
             class: $c.match,
             label: $c.match,
-            exec: ($c.match | guess_exec),
+            exec: (if ($c.relaunchExec // "") != "" then $c.relaunchExec else ($c.match | guess_exec) end),
             workspace: $c.workspace.id,
             enabled: false,
             inRelaunch: false,

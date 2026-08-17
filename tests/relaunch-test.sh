@@ -228,27 +228,34 @@ EOF
   and (.text | contains("not_found"))
 ' >/dev/null || fail "launch not_found last-boot log"
 
-# herdr-in-foot is a distinct class; running windows appear before Save
+# Terminal-wrapped commands get their own class from argv, not the terminal.
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"
+mkdir -p "$RELAUNCH_CMDLINE_DIR"
+printf 'foot\0-e\0herdr\0' >"$RELAUNCH_CMDLINE_DIR/4242"
+printf 'foot\0\0' >"$RELAUNCH_CMDLINE_DIR/4243"
+printf 'foot\0-e\0btop\0' >"$RELAUNCH_CMDLINE_DIR/4244"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"ignored":[],"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
   {"class": "foot", "initialClass": "foot", "pid": 4242, "floating": false, "workspace": {"id": 1}},
-  {"class": "foot", "initialClass": "foot", "pid": 4243, "floating": false, "workspace": {"id": 6}}
+  {"class": "foot", "initialClass": "foot", "pid": 4243, "floating": false, "workspace": {"id": 6}},
+  {"class": "foot", "initialClass": "foot", "pid": 4244, "floating": false, "workspace": {"id": 3}}
 ]
 EOF
-export RELAUNCH_HERDR_PIDS="4242"
 "$RELAUNCH" list --json | jq -e '
   ([.rows[] | select(.kind == "running" and .class == "herdr" and .workspace == 1)] | length == 1)
   and ([.rows[] | select(.kind == "running" and .class == "foot" and .workspace == 6)] | length == 1)
-' >/dev/null || fail "running herdr vs foot"
+  and ([.rows[] | select(.kind == "running" and .class == "btop" and .workspace == 3)] | length == 1)
+' >/dev/null || fail "wrapped terminal identity"
 "$RELAUNCH" save --json | jq -e '
-  ([.entries[] | select(.class == "herdr" and .workspace == 1)] | length == 1)
+  ([.entries[] | select(.class == "herdr" and .workspace == 1 and (.exec | contains("--app-id=herdr")))] | length == 1)
+  and ([.entries[] | select(.class == "btop" and .workspace == 3 and (.exec | contains("--app-id=btop")))] | length == 1)
   and ([.entries[] | select(.class == "foot" and .workspace == 6)] | length == 1)
-  and ([.rows[] | select(.inRelaunch) | .workspace] == [1, 6])
-' >/dev/null || fail "save splits herdr from foot"
-unset RELAUNCH_HERDR_PIDS
+  and ([.rows[] | select(.inRelaunch) | .workspace] == [1, 3, 6])
+' >/dev/null || fail "save splits wrapped terminals"
+unset RELAUNCH_CMDLINE_DIR
 
 # --- env-prefixed exec is not treated as the class ---
 cat >"$RELAUNCH_AUTOSTART" <<'EOF'

@@ -59,6 +59,10 @@ stable. `Panel.qml` parses that object.
 - One entry per window class. Capture keeps the first seen (lowest workspace).
   A `class:^(brave-browser)$` rule sends every Brave window to that workspace.
 - Match `initialClass`, not `class`. Brave/Electron mutate class after launch.
+- A terminal hosting another command (`foot -e cmd`, `omarchy-launch-terminal cmd`)
+  is identified by that command, and relaunched with
+  `xdg-terminal-exec --app-id=<cmd> <cmd...>` so Hyprland gets a distinct class.
+  Do not special-case individual wrappers like herdr.
 - Launch commands come from the curated `known_exec` table in `relaunch`.
   Do not parse `/proc/<pid>/cmdline`. Unknown apps fall back to a lowercased
   class. When adding a well-known app, extend `known_exec`.
