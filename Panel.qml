@@ -19,6 +19,7 @@ Panel {
   property var rows: []
   property var boot: ({ disabled: false, skipOnce: false, active: true })
   property var lastBoot: null
+  property string lastBootText: ""
   property bool showLog: false
   property int staggerSeconds: 0
   property string statusText: ""
@@ -100,7 +101,10 @@ Panel {
       if (r.entries !== undefined) root.entries = r.entries
       if (r.rows !== undefined) root.rows = r.rows
       if (r.boot !== undefined) root.boot = r.boot
-      if (r.lastBoot !== undefined) root.lastBoot = r.lastBoot
+      if (r.lastBoot !== undefined) {
+        root.lastBoot = r.lastBoot
+        root.lastBootText = (r.lastBoot && r.lastBoot.text) ? String(r.lastBoot.text) : ""
+      }
       if (r.staggerSeconds !== undefined) root.staggerSeconds = r.staggerSeconds
       if (r.added !== undefined)
         root.statusText = "Saved: " + r.added + " new, " + r.updated + " updated."
@@ -178,7 +182,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(Math.min(content.implicitHeight, Style.space(520)))
+    contentHeight: panel.fittedContentHeight(Math.min(content.implicitHeight, root.showLog ? Style.space(640) : Style.space(520)))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -513,7 +517,7 @@ Panel {
 
           Text {
             width: parent.width
-            visible: root.lastBoot !== null
+            visible: root.lastBootText.length > 0 || root.lastBoot
             text: root.lastBootLink()
             color: root.barForeground
             opacity: lastBootMouse.containsMouse ? 1.0 : 0.75
@@ -526,19 +530,25 @@ Panel {
               anchors.fill: parent
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
-              onClicked: root.showLog = !root.showLog
+              onClicked: {
+                root.showLog = !root.showLog
+                if (root.showLog)
+                  Qt.callLater(function() {
+                    scroller.contentY = Math.max(0, scroller.contentHeight - scroller.height)
+                  })
+              }
             }
           }
 
           Text {
             width: parent.width
-            visible: root.showLog && root.lastBoot && root.lastBoot.text
-            text: root.lastBoot ? (root.lastBoot.text || "") : ""
+            visible: root.showLog && root.lastBootText.length > 0
+            text: root.lastBootText
             color: root.barForeground
             opacity: 0.8
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.caption
-            wrapMode: Text.WrapAnywhere
+            wrapMode: Text.WordWrap
           }
         }
       }
