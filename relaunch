@@ -844,8 +844,22 @@ cmd_boot() {
 }
 
 cmd_last_boot() {
-  if [[ ! -f "$(last_boot_json_path)" ]]; then
+  local open=false a
+  for a in "$@"; do
+    [[ "$a" == --open ]] && open=true
+  done
+  if [[ ! -f "$(last_boot_log_path)" ]]; then
     die "no last-boot log yet (reboot or run: relaunch boot)"
+  fi
+  if $open; then
+    command -v omarchy-launch-editor >/dev/null 2>&1 || die "omarchy-launch-editor not found"
+    omarchy-launch-editor "$(last_boot_log_path)" &
+    if $json_out; then
+      emit_state
+    else
+      printf 'Opened %s\n' "$(last_boot_log_path)"
+    fi
+    return
   fi
   if $json_out; then
     last_boot_state_json
@@ -1059,7 +1073,7 @@ relaunch — engine for omarchy-relaunch
   relaunch list [--json]                 relaunch + startup inventory
   relaunch reload                        hyprctl reload
   relaunch boot                          hidden autostart hook
-  relaunch last-boot [--json]            show the last boot log
+  relaunch last-boot [--json] [--open]   show or open the last boot log
   relaunch import --exec CMD --workspace N
   relaunch drop --class CLASS            remove from relaunch list
   relaunch drop-startup --id ID          delete the Hyprland startup line
@@ -1092,7 +1106,7 @@ main() {
     list) cmd_list ;;
     reload) cmd_reload ;;
     boot) cmd_boot ;;
-    last-boot) cmd_last_boot ;;
+    last-boot) cmd_last_boot "$@" ;;
     import) cmd_import "$@" ;;
     drop) cmd_drop "$@" ;;
     drop-startup) cmd_drop_startup "$@" ;;

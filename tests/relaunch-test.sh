@@ -228,6 +228,21 @@ EOF
   and (.text | contains("not_found"))
 ' >/dev/null || fail "launch not_found last-boot log"
 
+mkdir -p "$WORKDIR/bin"
+cat >"$WORKDIR/bin/omarchy-launch-editor" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >"${OPENED_FILE:?}"
+EOF
+chmod +x "$WORKDIR/bin/omarchy-launch-editor"
+export OPENED_FILE="$WORKDIR/opened-log"
+PATH="$WORKDIR/bin:$PATH" "$RELAUNCH" last-boot --open >/dev/null
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ -f "$OPENED_FILE" ]] && break
+  sleep 0.05
+done
+[[ "$(cat "$OPENED_FILE")" == "$RELAUNCH_CONFIG_DIR/last-boot.log" ]] \
+  || fail "last-boot --open did not pass the log path"
+
 # Terminal-wrapped commands get their own class from argv, not the terminal.
 export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"
 mkdir -p "$RELAUNCH_CMDLINE_DIR"

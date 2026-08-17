@@ -19,8 +19,6 @@ Panel {
   property var rows: []
   property var boot: ({ disabled: false, skipOnce: false, active: true })
   property var lastBoot: null
-  property string lastBootText: ""
-  property bool showLog: false
   property int staggerSeconds: 0
   property string statusText: ""
   property string pendingStatus: ""
@@ -50,7 +48,6 @@ Panel {
   }
   function close() {
     root.confirmRemove = false
-    root.showLog = false
     root.controller.hide()
   }
   function toggle() {
@@ -101,10 +98,7 @@ Panel {
       if (r.entries !== undefined) root.entries = r.entries
       if (r.rows !== undefined) root.rows = r.rows
       if (r.boot !== undefined) root.boot = r.boot
-      if (r.lastBoot !== undefined) {
-        root.lastBoot = r.lastBoot
-        root.lastBootText = (r.lastBoot && r.lastBoot.text) ? String(r.lastBoot.text) : ""
-      }
+      if (r.lastBoot !== undefined) root.lastBoot = r.lastBoot
       if (r.staggerSeconds !== undefined) root.staggerSeconds = r.staggerSeconds
       if (r.added !== undefined)
         root.statusText = "Saved: " + r.added + " new, " + r.updated + " updated."
@@ -147,19 +141,7 @@ Panel {
 
   Process {
     id: logProc
-    command: [root.enginePath, "last-boot"]
-    stdout: StdioCollector {
-      onStreamFinished: {
-        root.lastBootText = String(this.text || "")
-        root.showLog = root.lastBootText.length > 0
-        if (!root.showLog)
-          root.statusText = "No last-boot log yet."
-      }
-    }
-    onExited: function(exitCode) {
-      if (exitCode !== 0 && root.lastBootText.length === 0)
-        root.statusText = "Could not read last-boot log."
-    }
+    command: [root.enginePath, "last-boot", "--open"]
   }
 
   component Chip: Rectangle {
@@ -199,7 +181,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(Math.min(content.implicitHeight, root.showLog ? Style.space(640) : Style.space(520)))
+    contentHeight: panel.fittedContentHeight(Math.min(content.implicitHeight, Style.space(520)))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -521,7 +503,7 @@ Panel {
 
           Text {
             width: parent.width
-            visible: root.lastBoot !== null && !root.showLog
+            visible: root.lastBoot !== null
             text: root.lastBootLink()
             color: root.barForeground
             opacity: 0.7
@@ -531,36 +513,8 @@ Panel {
           }
 
           Chip {
-            label: root.showLog ? "Hide last boot log" : "Show last boot log"
-            onClicked: {
-              if (root.showLog) {
-                root.showLog = false
-                return
-              }
-              logProc.running = true
-            }
-          }
-
-          Flickable {
-            visible: root.showLog
-            width: parent.width
-            height: root.showLog ? Style.space(160) : 0
-            clip: true
-            contentWidth: width
-            contentHeight: logBody.implicitHeight
-            boundsBehavior: Flickable.StopAtBounds
-            interactive: contentHeight > height
-
-            Text {
-              id: logBody
-              width: parent.width
-              text: root.lastBootText
-              color: root.barForeground
-              opacity: 0.85
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
+            label: "Open last boot log"
+            onClicked: logProc.running = true
           }
         }
       }
