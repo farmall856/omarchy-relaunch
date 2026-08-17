@@ -199,10 +199,19 @@ grep -q 'o.launch_on_start("brave")' "$RELAUNCH_AUTOSTART" && fail "startup brav
 "$RELAUNCH" import --exec proton-mail --workspace 3 >/dev/null
 "$RELAUNCH" boot-skip
 [[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] || fail "skip-once file"
+jq -e '.skipOnce == true' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "skipOnce not persisted in config"
 assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.conf")" 'Proton Mail'
+assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window'
+"$RELAUNCH" save >/dev/null
+jq -e '.skipOnce == true' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "save dropped skipOnce"
+[[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] || fail "save removed skip-once file"
+assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window'
+rm -f "$RELAUNCH_CONFIG_DIR/skip-once"
 "$RELAUNCH" boot
 [[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] && fail "skip-once not consumed"
+jq -e '.skipOnce == true' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null && fail "skipOnce left armed after boot"
 assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.conf")" 'Proton Mail'
+assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window'
 "$RELAUNCH" last-boot --json | jq -e '.outcome == "skipped" and (.text | length) > 0' >/dev/null \
   || fail "skip last-boot log"
 

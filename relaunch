@@ -171,6 +171,7 @@ def load_config:
   {
     staggerSeconds: ((.staggerSeconds // 0) | tonumber),
     ignored: ((.ignored // []) | map(tostring)),
+    skipOnce: (.skipOnce == true),
     entries: ((.entries // []) | map(normalize_entry))
   };
 
@@ -178,6 +179,7 @@ def dump_config:
   {
     staggerSeconds: .staggerSeconds,
     ignored: (.ignored // []),
+    skipOnce: (.skipOnce == true),
     entries: ([.entries[] | normalize_entry] | sort_by(.workspace, .class))
   };
 
@@ -219,6 +221,7 @@ def capture($clients):
   | {
       staggerSeconds: $cfg.staggerSeconds,
       ignored: $cfg.ignored,
+      skipOnce: $cfg.skipOnce,
       entries: [ .order[] as $c | .by[$c] ],
       added, updated
     };
@@ -275,8 +278,28 @@ atomic_write() {
   mv -f "$tmp" "$dest"
 }
 
+config_skip_once() {
+  local p
+  p="$(config_path)"
+  [[ -f "$p" ]] && jq -e '.skipOnce == true' "$p" >/dev/null 2>&1
+}
+
 boot_gated() {
-  [[ -f "$(disabled_path)" || -f "$(skip_path)" ]]
+  [[ -f "$(disabled_path)" || -f "$(skip_path)" ]] && return 0
+  config_skip_once
+}
+
+set_skip_once() {
+  local on="$1" cfg
+  mkdir -p "$(config_dir)"
+  if [[ "$on" == true ]]; then
+    : >"$(skip_path)"
+  else
+    rm -f "$(skip_path)"
+  fi
+  cfg="$(load_config_json)"
+  cfg="$(jq --argjson on "$on" '.skipOnce = $on' <<<"$cfg")"
+  jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
 }
 
 write_config_from_json() {
@@ -306,7 +329,11 @@ if exists(dir .. "/disabled") or exists(dir .. "/skip-once") then
   return
 end
 LUA
-    jq -r "$jq_lib"' lua_rules' <<<"$cfg"
+    if $gated; then
+      printf '%s\n' '-- skip/disable armed; relaunch boot restores rules when the flag is cleared'
+    else
+      jq -r "$jq_lib"' lua_rules' <<<"$cfg"
+    fi
   } | atomic_write "$(lua_path)"
 }
 
@@ -522,6 +549,7 @@ boot_state_json() {
   local disabled=false skip=false
   [[ -f "$(disabled_path)" ]] && disabled=true
   [[ -f "$(skip_path)" ]] && skip=true
+  config_skip_once && skip=true
   jq -n --argjson disabled "$disabled" --argjson skip "$skip" \
     '{disabled: $disabled, skipOnce: $skip, active: (($disabled or $skip) | not)}'
 }
@@ -796,8 +824,8 @@ cmd_boot() {
     write_last_boot "$started" disabled "disabled flag present" "[]" 0
     exit 0
   fi
-  if [[ -f "$(skip_path)" ]]; then
-    rm -f "$(skip_path)"
+  if [[ -f "$(skip_path)" ]] || config_skip_once; then
+    set_skip_once false
     load_config_json | write_generated
     write_last_boot "$started" skipped "skip-once consumed; rules restored for the next boot" "[]" 0
     exit 0
@@ -971,8 +999,7 @@ cmd_unignore() {
 }
 
 cmd_boot_skip() {
-  mkdir -p "$(config_dir)"
-  : >"$(skip_path)"
+  set_skip_once true
   load_config_json | write_generated
   if $json_out; then emit_state; else printf 'Relaunch will skip the next boot.\n'; fi
 }
@@ -980,13 +1007,14 @@ cmd_boot_skip() {
 cmd_boot_disable() {
   mkdir -p "$(config_dir)"
   : >"$(disabled_path)"
-  rm -f "$(skip_path)"
+  set_skip_once false
   load_config_json | write_generated
   if $json_out; then emit_state; else printf 'Relaunch disabled until re-enabled.\n'; fi
 }
 
 cmd_boot_enable() {
-  rm -f "$(disabled_path)" "$(skip_path)"
+  rm -f "$(disabled_path)"
+  set_skip_once false
   load_config_json | write_generated
   if $json_out; then emit_state; else printf 'Relaunch enabled on boot.\n'; fi
 }

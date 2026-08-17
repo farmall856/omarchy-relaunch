@@ -24,9 +24,9 @@ hook) launches the list. Workspace pins live in generated `relaunch.lua`.
 
 Runtime files (user-owned, never commit):
 
-- `~/.config/omarchy-relaunch/config.json` — entries + ignored startup ids
+- `~/.config/omarchy-relaunch/config.json` — entries, ignored startup ids, `skipOnce`
 - `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
-- `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags
+- `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags (skip is also in config.json so Save cannot drop it)
 - `~/.config/omarchy-relaunch/last-boot.log` — last `relaunch boot` diagnostic
 - `~/.config/omarchy/plugins/io.github.laytonf.relaunch/` — installed QML copy
 
