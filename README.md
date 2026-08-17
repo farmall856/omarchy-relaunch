@@ -107,7 +107,7 @@ Runtime files (not in git):
 - `~/.config/omarchy-relaunch/config.json` — entries and skip/ignore state
 - `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
 - `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags
-- `~/.config/omarchy-relaunch/last-boot.log` — last `relaunch boot` diagnostic
+- `~/.config/omarchy-relaunch/last-boot.log` / `last-boot.json` — last `relaunch boot` diagnostic
 
 ## Remove
 

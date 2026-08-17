@@ -65,24 +65,28 @@ grep -q 'omarchy-relaunch' "$RELAUNCH_AUTOSTART" || fail "ensure_hooks did not m
 grep -Fq "${RELAUNCH} boot" "$RELAUNCH_AUTOSTART" || fail "boot hook must use the script path, not PATH"
 grep -q 'io.open(_rl)' "$RELAUNCH_HYPRLAND_LUA" || fail "hyprland hook must skip a missing relaunch.lua"
 [[ -f "$RELAUNCH_CONFIG_DIR/relaunch.lua" ]] || fail "ensure_hooks must create relaunch.lua before the hyprland hook"
-snippet="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.conf")"
+[[ -e "$RELAUNCH_CONFIG_DIR/relaunch.conf" ]] && fail "must not write the leftover windowrulev2 relaunch.conf"
 lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
 
-assert_contains "$snippet" 'windowrulev2 = workspace 1 silent, class:^(herdr)$'
-assert_contains "$snippet" 'windowrulev2 = workspace 2 silent, class:^(brave-browser)$'
-assert_contains "$snippet" 'windowrulev2 = workspace 6 silent, class:^(org\.wezfurlong\.wezterm)$'
-assert_contains "$snippet" 'windowrulev2 = float, class:^(org\.wezfurlong\.wezterm)$'
-assert_not_contains "$snippet" 'exec-once'
-assert_not_contains "$snippet" 'disabled'
 assert_contains "$lua" 'o.window({ class = "^(herdr)$" }, { workspace = "1 silent" })'
+assert_contains "$lua" 'o.window({ class = "^(brave-browser)$" }, { workspace = "2 silent" })'
 assert_contains "$lua" 'o.window({ class = "^(org\\.wezfurlong\\.wezterm)$" }, { workspace = "6 silent", float = true })'
+assert_not_contains "$lua" 'windowrulev2'
+assert_not_contains "$lua" 'exec-once'
+printf '%s\n' 'windowrulev2 leftover' >"$RELAUNCH_CONFIG_DIR/relaunch.conf"
+printf '%s\n' '# keep' '# omarchy-relaunch' "source = $RELAUNCH_CONFIG_DIR/relaunch.conf" '# after' \
+  >"$RELAUNCH_HYPR_CONF"
+"$RELAUNCH" generate >/dev/null
+[[ -e "$RELAUNCH_CONFIG_DIR/relaunch.conf" ]] && fail "generate must delete leftover relaunch.conf"
+grep -q 'relaunch.conf' "$RELAUNCH_HYPR_CONF" && fail "generate must unsource leftover relaunch.conf"
+grep -q '# keep' "$RELAUNCH_HYPR_CONF" || fail "legacy conf cleanup ate unrelated hyprland.conf"
 
 # unknown class with empty exec still gets a rule
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[{"class":"SomeApp","workspace":3,"exec":"","enabled":true}]}
 EOF
 "$RELAUNCH" generate >/dev/null
-assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.conf")" 'class:^(SomeApp)$'
+assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window({ class = "^(SomeApp)$" }'
 
 # knownExec guesses still used by boot command list
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
@@ -94,11 +98,11 @@ cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 ]}
 EOF
 "$RELAUNCH" generate >/dev/null
-got="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.conf")"
-assert_contains "$got" 'class:^(brave-browser)$'
-assert_contains "$got" 'class:^(Alacritty)$'
-assert_contains "$got" 'class:^(VSCodium)$'
-assert_contains "$got" 'class:^(herdr)$'
+got="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+assert_contains "$got" 'o.window({ class = "^(brave-browser)$"'
+assert_contains "$got" 'o.window({ class = "^(Alacritty)$"'
+assert_contains "$got" 'o.window({ class = "^(VSCodium)$"'
+assert_contains "$got" 'o.window({ class = "^(herdr)$"'
 
 # --- capture merge ---
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
@@ -126,6 +130,8 @@ EOF
 out="$("$RELAUNCH" save --json)"
 echo "$out" | jq -e '.ok == true and .added == 1 and .updated == 2' >/dev/null \
   || fail "save json counts: $out"
+echo "$out" | jq -e --arg p "$RELAUNCH_CONFIG_DIR/relaunch.lua" '.snippetPath == $p' >/dev/null \
+  || fail "snippetPath should be relaunch.lua"
 
 cfg="$(cat "$RELAUNCH_CONFIG_DIR/config.json")"
 echo "$cfg" | jq -e '
@@ -200,7 +206,6 @@ grep -q 'o.launch_on_start("brave")' "$RELAUNCH_AUTOSTART" && fail "startup brav
 "$RELAUNCH" boot-skip
 [[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] || fail "skip-once file"
 jq -e '.skipOnce == true' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "skipOnce not persisted in config"
-assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.conf")" 'Proton Mail'
 assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window'
 "$RELAUNCH" save >/dev/null
 jq -e '.skipOnce == true' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "save dropped skipOnce"
@@ -210,7 +215,6 @@ rm -f "$RELAUNCH_CONFIG_DIR/skip-once"
 "$RELAUNCH" boot
 [[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] && fail "skip-once not consumed"
 jq -e '.skipOnce == true' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null && fail "skipOnce left armed after boot"
-assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.conf")" 'Proton Mail'
 assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window'
 "$RELAUNCH" last-boot --json | jq -e '.outcome == "skipped" and (.text | length) > 0' >/dev/null \
   || fail "skip last-boot log"

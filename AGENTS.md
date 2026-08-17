@@ -1,7 +1,7 @@
 # Relaunch
 
 Omarchy Quattro bar widget that snapshots the current app→workspace layout
-and writes a Hyprland snippet so those apps come back on the same workspaces
+and writes Hyprland Lua pins so those apps come back on the same workspaces
 after a reboot or crash.
 
 This folder is the source tree. The public repo is
@@ -27,12 +27,17 @@ Runtime files (user-owned, never commit):
 - `~/.config/omarchy-relaunch/config.json` — entries, ignored startup ids, `skipOnce`
 - `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
 - `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags (skip is also in config.json so Save cannot drop it)
-- `~/.config/omarchy-relaunch/last-boot.log` — last `relaunch boot` diagnostic
+- `~/.config/omarchy-relaunch/last-boot.log` / `last-boot.json` — last `relaunch boot` diagnostic
 - `~/.config/omarchy/plugins/io.github.laytonf.relaunch/` — installed QML copy
 
-`install.sh` adds a hidden `o.exec_on_start("relaunch boot")` to
-`autostart.lua` and a `dofile(.../relaunch.lua)` to `hyprland.lua`. Never
-show that hook in the inventory.
+Do not generate `relaunch.conf` / `windowrulev2`. Pins are Lua only.
+`ensure_hooks` and `write_generated` delete a leftover `relaunch.conf` and
+any `source = …/relaunch.conf` line in `hyprland.conf`.
+
+`install.sh` copies the engine and plugin files, then runs `ensure-hooks`
+(hidden `o.exec_on_start("relaunch boot")` in `autostart.lua` and
+`dofile(.../relaunch.lua)` in `hyprland.lua`). It does not touch
+`hyprland.conf`. Never show that hook in the inventory.
 
 ## Engine CLI
 
@@ -71,8 +76,9 @@ stable. `Panel.qml` parses that object.
 - Recapture refreshes workspace only. Preserve user `exec`, `enabled`, and
   `float` edits.
 - Skip special/negative workspaces (`Workspace.ID < 1`) and empty classes.
-- Regex-escape class names in generated `windowrulev2` lines.
-- Persist with temp-file + rename (`config.json.tmp`, `relaunch.conf.tmp`).
+- Regex-escape class names in generated `o.window` lines, then Lua-escape
+  backslashes so dotted classes (`org.omarchy.agent`) are valid Lua strings.
+- Persist with temp-file + rename (`config.json.tmp`, `relaunch.lua.tmp`).
 - Everything runs as the user. No sudo, no IPC beyond `hyprctl` and the
   `relaunch` script on `PATH`.
 - Inventory only the user's `~/.config/hypr/autostart.lua`. Never list or
@@ -116,7 +122,7 @@ omarchy plugin validate .
 # QML (qt6 qmllint; include the shell import path)
 /usr/lib/qt6/bin/qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml Overlay.qml
 
-# Local install: script + plugin copy + hyprland source line
+# Local install: script + plugin copy + ensure-hooks
 ./install.sh
 omarchy bar move io.github.laytonf.relaunch --section right   # first time
 ```
@@ -144,8 +150,8 @@ Not initialized as a git repo yet. One-time:
 Marketplace submit:
 https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/new?template=submit-plugin.yml
 
-`.gitignore` already excludes generated `relaunch.conf` / `config.json`.
-Keep it that way.
+`.gitignore` already excludes generated `config.json` (and a leftover
+`relaunch.conf` name from older installs). Keep it that way.
 
 ## Out of scope unless asked
 

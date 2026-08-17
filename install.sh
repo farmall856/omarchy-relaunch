@@ -4,8 +4,8 @@
 # Two parts:
 #   1. Install the `relaunch` engine (bash + jq) onto your PATH. The QML bar
 #      widget shells out to it.
-#   2. Install the plugin folder into ~/.config/omarchy/plugins/ and ensure the
-#      generated Hyprland snippet is sourced.
+#   2. Install the plugin folder into ~/.config/omarchy/plugins/ and wire
+#      the hidden boot hook plus relaunch.lua pins (via `relaunch ensure-hooks`).
 #
 # Prefer `omarchy plugin add <repo-url> --enable` for the QML side once this is
 # published; this script is for local development / manual installs.
@@ -15,9 +15,6 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ID="io.github.laytonf.relaunch"
 PLUGIN_DST="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 BIN_DIR="${PREFIX:-$HOME/.local}/bin"
-HYPR_CONF="$HOME/.config/hypr/hyprland.conf"
-SNIPPET="$HOME/.config/omarchy-relaunch/relaunch.conf"
-SOURCE_LINE="source = $SNIPPET"
 
 echo "==> installing relaunch engine"
 if ! command -v jq >/dev/null 2>&1; then
@@ -42,16 +39,9 @@ install -m 0755 "$REPO_DIR/relaunch"      "$PLUGIN_DST/relaunch"
 echo "    installed $PLUGIN_DST"
 
 echo "==> wiring hidden boot hook (not shown in the Relaunch list)"
-mkdir -p "$(dirname "$SNIPPET")"
-[[ -f "$SNIPPET" ]] || echo "# populated by: relaunch save" > "$SNIPPET"
 "$BIN_DIR/relaunch" ensure-hooks
 echo "    autostart.lua -> relaunch boot"
 echo "    hyprland.lua  -> dofile relaunch.lua"
-
-if [[ -f "$HYPR_CONF" ]] && ! grep -qF "$SOURCE_LINE" "$HYPR_CONF"; then
-  { echo ""; echo "# omarchy-relaunch"; echo "$SOURCE_LINE"; } >> "$HYPR_CONF"
-  echo "    added source line to $HYPR_CONF"
-fi
 
 echo "==> discovering plugin in the shell"
 if command -v omarchy-shell >/dev/null 2>&1; then
@@ -67,9 +57,10 @@ Done.
        omarchy bar move $PLUGIN_ID --section right
   3. Arrange your apps across workspaces, click the Relaunch bar icon,
      and hit "Save Startup App Workspaces".
-  4. Reboot, or click "Reload Hyprland".
+  4. Reboot to restore.
 
 Remove with:
+  relaunch uninstall --yes
   omarchy plugin remove $PLUGIN_ID   # (if installed via omarchy)
   rm -rf $PLUGIN_DST                  # (manual install)
 EOF

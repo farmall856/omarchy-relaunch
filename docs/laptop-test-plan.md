@@ -45,11 +45,9 @@ is installed (widget glyph `\uf1da`).
    - `omarchy plugin validate ~/.config/omarchy/plugins/io.github.laytonf.relaunch`
    - `omarchy plugin list --json` shows `io.github.laytonf.relaunch` enabled
    - Widget appears on the **right** of the bar; glyph renders
-3. **Expected fail:** `install.sh` appends
-   `source = ~/.config/omarchy-relaunch/relaunch.conf` to
-   `~/.config/hypr/hyprland.conf`. That file does not exist on this machine.
-   Record whether the script created a stray `.conf`, whether Hyprland reads
-   it, and `hyprctl configerrors`.
+3. Pins are Lua only (`relaunch.lua` dofile'd from `hyprland.lua`).
+   `install.sh` must **not** append a `source = …/relaunch.conf` line.
+   Confirm no leftover `relaunch.conf` and `hyprctl configerrors` is empty.
 4. Until that is fixed, apply snippets by a **manual Lua bridge** for later
    phases, or restore will look broken when the snippet was never sourced.
    Do not also add `exec-once` copies into `autostart.lua` unless labeled as
