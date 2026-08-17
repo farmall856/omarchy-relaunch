@@ -120,7 +120,6 @@ def exec_class:
     "spotify": "Spotify",
     "herdr": "herdr",
     "omarchy-launch-terminal-herdr": "herdr",
-    "xdg-terminal-exec": "foot",
     "proton-mail": "Proton Mail",
     "proton-pass": "Proton Pass",
     "signal-desktop": "signal",
@@ -139,7 +138,8 @@ def match_class:
   if ((.initialClass // "") != "") then .initialClass else (.class // "") end;
 
 def regex_escape:
-  gsub("\\."; "\\.")
+  gsub("\\\\"; "\\\\")
+  | gsub("\\."; "\\.")
   | gsub("\\+"; "\\+")
   | gsub("\\*"; "\\*")
   | gsub("\\?"; "\\?")
@@ -333,13 +333,25 @@ LUA
   } | atomic_write "$(lua_path)"
 }
 
+split_exec_words() {
+  # Split an exec string on IFS without pathname expansion.
+  local _s="$1"
+  local -n _out="$2"
+  set -f
+  # shellcheck disable=SC2206
+  _out=($_s)
+  set +f
+}
+
 is_relaunch_exec() {
   local exec="$1" token base
+  local -a words=()
   [[ "$exec" == *omarchy-relaunch* ]] && return 0
-  token="${exec%% *}"
+  split_exec_words "$exec" words
+  token="${words[0]:-}"
   token="${token##*/}"
   [[ "$token" == relaunch ]] && return 0
-  for token in $exec; do
+  for token in "${words[@]}"; do
     base="${token##*/}"
     [[ "$base" == relaunch ]] && return 0
   done
@@ -417,7 +429,7 @@ identity_from_argv() {
   if [[ -n "$app_id" ]] && ! is_generic_terminal_class "$app_id"; then
     class="$app_id"
     if ((${#inner[@]} > 0)); then
-      exec="xdg-terminal-exec --app-id=${class} ${inner[0]}"
+      exec="xdg-terminal-exec --app-id=${class} ${inner[*]}"
     else
       exec="xdg-terminal-exec --app-id=${class}"
     fi
@@ -454,8 +466,9 @@ identity_from_pid() {
 
 class_for_startup_exec() {
   local exec="$1" ident class mapped first="" token base
-  # shellcheck disable=SC2086
-  ident="$(identity_from_argv $exec)"
+  local -a argv=()
+  split_exec_words "$exec" argv
+  ident="$(identity_from_argv "${argv[@]}")"
   class="$(jq -r 'if .wrapped then .class else empty end' <<<"$ident")"
   if [[ -n "$class" ]]; then
     printf '%s\n' "$class"
@@ -466,7 +479,7 @@ class_for_startup_exec() {
     printf '%s\n' "$mapped"
     return
   fi
-  for token in $exec; do
+  for token in "${argv[@]}"; do
     [[ "$token" == -* || "$token" == -- ]] && continue
     [[ "$token" == *=* ]] && continue
     base="${token##*/}"
@@ -478,7 +491,7 @@ class_for_startup_exec() {
       return
     fi
   done
-  printf '%s\n' "${first:-${exec%% *}}"
+  printf '%s\n' "${first:-${argv[0]:-}}"
 }
 
 annotate_clients() {
@@ -813,7 +826,7 @@ cmd_reload() {
 
 cmd_boot() {
   # Hidden autostart hook. Never listed as a startup app.
-  local started cfg stagger line class ws exec token status pid err launches
+  local started cfg stagger line class ws exec token status pid err launches first_launch
   started="$(date -Iseconds)"
   mkdir -p "$(config_dir)"
   if [[ -f "$(disabled_path)" ]]; then
@@ -829,10 +842,19 @@ cmd_boot() {
   cfg="$(load_config_json)"
   stagger="$(jq -r '.staggerSeconds' <<<"$cfg")"
   launches='[]'
+  first_launch=true
   while IFS=$'\t' read -r class ws exec; do
     [[ -z "$exec" ]] && continue
     if [[ "$stagger" =~ ^[1-9][0-9]*$ ]]; then
-      sleep "$stagger"
+      if $first_launch; then
+        first_launch=false
+      else
+        if [[ -n "${RELAUNCH_SLEEP:-}" ]]; then
+          "$RELAUNCH_SLEEP" "$stagger"
+        else
+          sleep "$stagger"
+        fi
+      fi
     fi
     token="${exec%% *}"
     token="${token##*/}"

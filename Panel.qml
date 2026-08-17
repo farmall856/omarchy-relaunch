@@ -159,15 +159,15 @@ Panel {
     height: Style.space(22)
     width: chipLabel.implicitWidth + Style.space(12)
     radius: Style.space(4)
-    color: chipMouse.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent) : "transparent"
-    border.color: root.barForeground
+    color: chipMouse.containsMouse ? Style.hoverFillFor(chip.danger ? Color.urgent : root.barForeground, chip.danger ? Color.urgent : Color.accent) : "transparent"
+    border.color: chip.danger ? Color.urgent : root.barForeground
     border.width: 1
     opacity: root.busy ? 0.45 : 1
     Text {
       id: chipLabel
       anchors.centerIn: parent
       text: chip.label
-      color: root.barForeground
+      color: chip.danger ? Color.urgent : root.barForeground
       font.family: root.bar ? root.bar.fontFamily : Style.font.family
       font.pixelSize: Style.font.caption
     }

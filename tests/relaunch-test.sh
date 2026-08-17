@@ -285,7 +285,64 @@ EOF
   and ([.entries[] | select(.class == "foot" and .workspace == 6)] | length == 1)
   and ([.rows[] | select(.inRelaunch) | .workspace] == [1, 3, 6])
 ' >/dev/null || fail "save splits wrapped terminals"
+
+printf 'foot\0--app-id=mytool\0-e\0mytool\0--flag\0value\0' >"$RELAUNCH_CMDLINE_DIR/4300"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class": "mytool", "initialClass": "mytool", "pid": 4300, "floating": false, "workspace": {"id": 2}}]
+EOF
+"$RELAUNCH" save --json | jq -e '
+  [.entries[] | select(.class == "mytool") | .exec] ==
+    ["xdg-terminal-exec --app-id=mytool mytool --flag value"]
+' >/dev/null || fail "explicit --app-id must keep trailing hosted args"
 unset RELAUNCH_CMDLINE_DIR
+
+# --- startup exec with glob chars stays literal ---
+mkdir -p "$WORKDIR/globdir"
+printf '' >"$WORKDIR/globdir/not-the-class"
+cat >"$RELAUNCH_AUTOSTART" <<'EOF'
+o.launch_on_start("*")
+-- omarchy-relaunch (managed; hidden from the Relaunch list)
+o.exec_on_start("/tmp/relaunch boot")
+EOF
+(
+  cd "$WORKDIR/globdir"
+  "$RELAUNCH" list --json
+) | jq -e '
+  [.startup[] | select(.exec == "*") | .class] == ["*"]
+' >/dev/null || fail "startup exec glob chars must not expand against CWD"
+
+# --- stagger waits between launches, not before the first ---
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{
+  "staggerSeconds": 5,
+  "ignored": [],
+  "entries": [
+    {"class": "a", "workspace": 1, "exec": "true", "enabled": true},
+    {"class": "b", "workspace": 2, "exec": "true", "enabled": true},
+    {"class": "c", "workspace": 3, "exec": "true", "enabled": true}
+  ]
+}
+EOF
+SLEEP_LOG="$WORKDIR/sleeps"
+: >"$SLEEP_LOG"
+cat >"$WORKDIR/bin/record-sleep" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$1" >>"$SLEEP_LOG"
+EOF
+chmod +x "$WORKDIR/bin/record-sleep"
+RELAUNCH_SLEEP="$WORKDIR/bin/record-sleep" "$RELAUNCH" boot
+[[ "$(wc -l <"$SLEEP_LOG")" -eq 2 ]] || fail "stagger should sleep between launches only, got $(cat "$SLEEP_LOG")"
+[[ "$(tr '\n' ' ' <"$SLEEP_LOG")" == "5 5 " ]] || fail "stagger sleep args: $(cat "$SLEEP_LOG")"
+
+# --- class backslash is escaped for Lua ---
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"entries":[{"class":"foo\\bar","workspace":1,"exec":"foo","enabled":true}]}
+EOF
+"$RELAUNCH" generate >/dev/null
+assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window({ class = "^(foo\\\\bar)$"'
 
 # --- env-prefixed exec is not treated as the class ---
 cat >"$RELAUNCH_AUTOSTART" <<'EOF'
