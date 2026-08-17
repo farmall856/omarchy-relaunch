@@ -145,6 +145,23 @@ Panel {
     }
   }
 
+  Process {
+    id: logProc
+    command: [root.enginePath, "last-boot"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        root.lastBootText = String(this.text || "")
+        root.showLog = root.lastBootText.length > 0
+        if (!root.showLog)
+          root.statusText = "No last-boot log yet."
+      }
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0 && root.lastBootText.length === 0)
+        root.statusText = "Could not read last-boot log."
+    }
+  }
+
   component Chip: Rectangle {
     id: chip
     property string label: ""
@@ -515,40 +532,37 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          Text {
-            width: parent.width
-            visible: root.lastBootText.length > 0 || root.lastBoot
-            text: root.lastBootLink()
-            color: root.barForeground
-            opacity: lastBootMouse.containsMouse ? 1.0 : 0.75
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            font.underline: true
-            wrapMode: Text.WordWrap
-            MouseArea {
-              id: lastBootMouse
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: {
-                root.showLog = !root.showLog
-                if (root.showLog)
-                  Qt.callLater(function() {
-                    scroller.contentY = Math.max(0, scroller.contentHeight - scroller.height)
-                  })
+          Chip {
+            label: root.showLog ? "Hide last boot log" : (root.lastBootLink() || "Last boot log")
+            onClicked: {
+              if (root.showLog) {
+                root.showLog = false
+                return
               }
+              logProc.running = true
             }
           }
 
-          Text {
+          Flickable {
+            visible: root.showLog
             width: parent.width
-            visible: root.showLog && root.lastBootText.length > 0
-            text: root.lastBootText
-            color: root.barForeground
-            opacity: 0.8
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
+            height: root.showLog ? Style.space(160) : 0
+            clip: true
+            contentWidth: width
+            contentHeight: logBody.implicitHeight
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
+
+            Text {
+              id: logBody
+              width: parent.width
+              text: root.lastBootText
+              color: root.barForeground
+              opacity: 0.85
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
           }
         }
       }
