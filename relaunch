@@ -1020,14 +1020,18 @@ cmd_uninstall() {
     mv -f "$tmp" "$hypr_conf"
   fi
   rm -rf "$(config_dir)"
-  rm -rf "$(plugin_dir)"
   local bin="${PREFIX:-$HOME/.local}/bin/relaunch"
   if [[ -f "$bin" ]] && grep -q 'omarchy-relaunch bar widget' "$bin"; then
     rm -f "$bin"
   fi
+  # Emit the result before unlinking the plugin checkout. The bar panel
+  # loads these QML files; deleting them first makes the popup vanish
+  # with no "removed" message.
   if $json_out; then
     jq -n '{ok: true, uninstalled: true}'
+    ( sleep 2; rm -rf "$(plugin_dir)" ) &
   else
+    rm -rf "$(plugin_dir)"
     printf 'Relaunch removed.\n'
   fi
 }

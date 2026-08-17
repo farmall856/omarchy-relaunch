@@ -93,6 +93,8 @@ Panel {
         root.statusText = "Relaunch removed."
         root.rows = []
         root.entries = []
+        root.close()
+        Quickshell.execDetached(["omarchy-notification-send", "Relaunch", "Removed from this system."])
         return
       }
       if (r.entries !== undefined) root.entries = r.entries
