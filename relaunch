@@ -89,7 +89,7 @@ def known_exec:
     "mpv": "mpv",
     "Spotify": "spotify",
     "spotify": "spotify",
-    "herdr": "omarchy-launch-terminal-herdr",
+    "herdr": "xdg-terminal-exec --app-id=herdr herdr",
     "Proton Mail": "proton-mail",
     "Proton Pass": "proton-pass",
     "signal": "signal-desktop"
@@ -120,6 +120,7 @@ def exec_class:
     "spotify": "Spotify",
     "herdr": "herdr",
     "omarchy-launch-terminal-herdr": "herdr",
+    "xdg-terminal-exec": "foot",
     "proton-mail": "Proton Mail",
     "proton-pass": "Proton Pass",
     "signal-desktop": "signal",
@@ -566,9 +567,43 @@ write_last_boot() {
     printf 'stagger: %ss\n' "$stagger"
     if [[ "$launches" != "[]" ]]; then
       printf '\nlaunches:\n'
-      jq -r '.[] | "  ws \(.workspace)  \(.class)\t\(.status)\tpid=\(.pid // "-")\t\(.exec)\(if .error then "  (\(.error))" else "" end)"' <<<"$launches"
+      jq -r '
+        .[] |
+        "  ws \(.workspace)  \(.class)  \(.status)  pid=\(.pid // "-")"
+        + (if .actualWorkspace != null then "  landed=ws \(.actualWorkspace) class=\(.actualClass // "?")" else "" end)
+        + (if .placed == false then "  MISPLACED" else "" end)
+        + "  \(.exec)"
+        + (if .error then "  (\(.error))" else "" end)
+      ' <<<"$launches"
     fi
   } | atomic_write "$(last_boot_log_path)"
+}
+
+verify_launches() {
+  local launches="$1" clients
+  sleep 2
+  if ! clients="$(clients_json)"; then
+    printf '%s\n' "$launches"
+    return
+  fi
+  jq --argjson clients "$clients" '
+    map(
+      . as $l
+      | (
+          $clients
+          | map(select(
+              (.pid == $l.pid)
+              or ((.initialClass // .class // "") == $l.class)
+            ))
+          | .[0] // null
+        ) as $w
+      | . + {
+          actualClass: (if $w == null then null else ($w.initialClass // $w.class) end),
+          actualWorkspace: (if $w == null then null else $w.workspace.id end),
+          placed: (if $w == null then false else ($w.workspace.id == $l.workspace) end)
+        }
+    )
+  ' <<<"$launches"
 }
 
 clients_json() {
@@ -708,6 +743,7 @@ cmd_boot() {
     | [ .class, (.workspace | tostring), (if .exec != "" then .exec else (.class | guess_exec) end) ]
     | @tsv
   ' <<<"$cfg")
+  launches="$(verify_launches "$launches")"
   write_last_boot "$started" launched "" "$launches" "$stagger"
 }
 
