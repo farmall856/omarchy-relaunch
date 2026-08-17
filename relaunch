@@ -986,6 +986,12 @@ cmd_boot_enable() {
   if $json_out; then emit_state; else printf 'Relaunch enabled on boot.\n'; fi
 }
 
+# One-line Hyprland hook. io.open-then-dofile so a missing relaunch.lua
+# (uninstall, first boot before generate) is not a Hyprland config error.
+hyprland_hook_line() {
+  printf '%s\n' 'local _rl = (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/omarchy-relaunch/relaunch.lua"; local _f = io.open(_rl); if _f then _f:close(); dofile(_rl) end'
+}
+
 remove_managed_block() {
   local file="$1" tmp
   [[ -f "$file" ]] || return 0
@@ -1037,10 +1043,14 @@ cmd_uninstall() {
 }
 
 ensure_hooks() {
-  local auto lua bin
+  local auto lua bin hook
   auto="$(autostart_path)"
   lua="$(hyprland_lua_path)"
+  hook="$(hyprland_hook_line)"
   mkdir -p "$(dirname "$auto")" "$(config_dir)"
+  # Create the rules file before touching hyprland.lua. Hyprland reloads
+  # as soon as that file changes; dofile of a missing path is a hard error.
+  [[ -f "$(lua_path)" ]] || printf 'return\n' >"$(lua_path)"
   if [[ -f "$auto" ]] && ! grep -q 'omarchy-relaunch' "$auto"; then
     {
       printf '\n'
@@ -1048,14 +1058,14 @@ ensure_hooks() {
       printf '%s\n' "o.exec_on_start(\"${SELF} boot\")"
     } >>"$auto"
   fi
-  if [[ -f "$lua" ]] && ! grep -q 'omarchy-relaunch' "$lua"; then
+  if [[ -f "$lua" ]] && ! grep -Fq "$hook" "$lua"; then
+    remove_managed_block "$lua"
     {
       printf '\n'
       printf '%s\n' '-- omarchy-relaunch'
-      printf '%s\n' 'dofile((os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/omarchy-relaunch/relaunch.lua")'
+      printf '%s\n' "$hook"
     } >>"$lua"
   fi
-  [[ -f "$(lua_path)" ]] || printf 'return\n' >"$(lua_path)"
 
   # Plugin-manager installs do not put the script on PATH. Copy it so a
   # terminal `relaunch` works, but skip that when tests override the config dir.

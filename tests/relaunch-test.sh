@@ -63,6 +63,8 @@ EOF
 "$RELAUNCH" generate >/dev/null
 grep -q 'omarchy-relaunch' "$RELAUNCH_AUTOSTART" || fail "ensure_hooks did not mark autostart"
 grep -Fq "${RELAUNCH} boot" "$RELAUNCH_AUTOSTART" || fail "boot hook must use the script path, not PATH"
+grep -q 'io.open(_rl)' "$RELAUNCH_HYPRLAND_LUA" || fail "hyprland hook must skip a missing relaunch.lua"
+[[ -f "$RELAUNCH_CONFIG_DIR/relaunch.lua" ]] || fail "ensure_hooks must create relaunch.lua before the hyprland hook"
 snippet="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.conf")"
 lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
 
@@ -285,11 +287,16 @@ EOF
 ' >/dev/null || fail "env-prefixed exec class"
 
 # --- uninstall must not delete adjacent user startup lines ---
+printf '%s\n' '-- keep' '-- omarchy-relaunch' 'local _rl = "/tmp/omarchy-relaunch/relaunch.lua"; dofile(_rl)' '-- after' >"$RELAUNCH_HYPRLAND_LUA"
 "$RELAUNCH" uninstall --yes >/dev/null
 grep -q 'o.launch_on_start("keep-me")' "$RELAUNCH_AUTOSTART" || fail "unrelated keep-me deleted"
 grep -q 'o.launch_on_start("also-keep")' "$RELAUNCH_AUTOSTART" || fail "adjacent also-keep deleted"
 grep -q 'relaunch boot' "$RELAUNCH_AUTOSTART" && fail "boot hook survived uninstall"
 grep -q 'omarchy-relaunch' "$RELAUNCH_AUTOSTART" && fail "marker survived uninstall"
+grep -q 'omarchy-relaunch' "$RELAUNCH_HYPRLAND_LUA" && fail "hyprland marker survived uninstall"
+grep -q 'dofile' "$RELAUNCH_HYPRLAND_LUA" && fail "hyprland dofile survived uninstall"
+grep -q -- '-- keep' "$RELAUNCH_HYPRLAND_LUA" || fail "unrelated hyprland comment deleted"
+grep -q -- '-- after' "$RELAUNCH_HYPRLAND_LUA" || fail "adjacent hyprland comment deleted"
 
 grep -q 'install -m 0755 "$REPO_DIR/relaunch"      "$PLUGIN_DST/relaunch"' \
   "$ROOT/install.sh" || fail "install.sh must copy relaunch into the plugin folder"
