@@ -153,6 +153,11 @@ def regex_escape:
   | gsub("\\$"; "\\$")
   | gsub("\\|"; "\\|");
 
+# Hyprland regex backslashes must be doubled again for Lua "..." strings.
+# Otherwise org.omarchy.agent becomes "org\.omarchy" and Lua errors on \o.
+def lua_regex:
+  regex_escape | gsub("\\\\"; "\\\\") | gsub("\""; "\\\"");
+
 def normalize_entry:
   {
     class: (.class // ""),
@@ -245,7 +250,7 @@ def snippet($gated):
 def lua_rules:
   enabled_entries
   | map(
-      "o.window({ class = \"^(\(.class | regex_escape))$\" }, { workspace = \"\(.workspace) silent\""
+      "o.window({ class = \"^(\(.class | lua_regex))$\" }, { workspace = \"\(.workspace) silent\""
       + (if .float == true then ", float = true" else "" end)
       + " })\n"
     )

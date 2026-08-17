@@ -75,7 +75,7 @@ assert_contains "$snippet" 'windowrulev2 = float, class:^(org\.wezfurlong\.wezte
 assert_not_contains "$snippet" 'exec-once'
 assert_not_contains "$snippet" 'disabled'
 assert_contains "$lua" 'o.window({ class = "^(herdr)$" }, { workspace = "1 silent" })'
-assert_contains "$lua" 'workspace = "6 silent", float = true'
+assert_contains "$lua" 'o.window({ class = "^(org\\.wezfurlong\\.wezterm)$" }, { workspace = "6 silent", float = true })'
 
 # unknown class with empty exec still gets a rule
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
