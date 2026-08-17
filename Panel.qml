@@ -18,6 +18,8 @@ Panel {
   property var entries: []
   property var rows: []
   property var boot: ({ disabled: false, skipOnce: false, active: true })
+  property var lastBoot: null
+  property bool showLog: false
   property int staggerSeconds: 0
   property string statusText: ""
   property string pendingStatus: ""
@@ -47,6 +49,7 @@ Panel {
   }
   function close() {
     root.confirmRemove = false
+    root.showLog = false
     root.controller.hide()
   }
   function toggle() {
@@ -97,6 +100,7 @@ Panel {
       if (r.entries !== undefined) root.entries = r.entries
       if (r.rows !== undefined) root.rows = r.rows
       if (r.boot !== undefined) root.boot = r.boot
+      if (r.lastBoot !== undefined) root.lastBoot = r.lastBoot
       if (r.staggerSeconds !== undefined) root.staggerSeconds = r.staggerSeconds
       if (r.added !== undefined)
         root.statusText = "Saved: " + r.added + " new, " + r.updated + " updated."
@@ -109,6 +113,16 @@ Panel {
     if (root.boot.disabled) return "Disabled until you re-enable it."
     if (root.boot.skipOnce) return "Will skip the next boot only."
     return "Runs on boot."
+  }
+
+  function lastBootLink() {
+    if (!root.lastBoot) return ""
+    var when = String(root.lastBoot.startedAt || "").replace("T", " ")
+    var n = (root.lastBoot.launches || []).length
+    var extra = ""
+    if (root.lastBoot.outcome === "launched") extra = " · " + n + " app" + (n === 1 ? "" : "s")
+    else if (root.lastBoot.outcome) extra = " · " + root.lastBoot.outcome
+    return "Last boot log" + extra + (when ? " · " + when : "")
   }
 
   Process {
@@ -495,6 +509,36 @@ Panel {
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
+          }
+
+          Text {
+            width: parent.width
+            visible: root.lastBoot !== null
+            text: root.lastBootLink()
+            color: root.barForeground
+            opacity: lastBootMouse.containsMouse ? 1.0 : 0.75
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            font.underline: true
+            wrapMode: Text.WordWrap
+            MouseArea {
+              id: lastBootMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.showLog = !root.showLog
+            }
+          }
+
+          Text {
+            width: parent.width
+            visible: root.showLog && root.lastBoot && root.lastBoot.text
+            text: root.lastBoot ? (root.lastBoot.text || "") : ""
+            color: root.barForeground
+            opacity: 0.8
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WrapAnywhere
           }
         }
       }

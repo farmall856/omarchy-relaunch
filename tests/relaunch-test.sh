@@ -201,16 +201,32 @@ assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.conf")" 'Proton Mail'
 "$RELAUNCH" boot
 [[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] && fail "skip-once not consumed"
 assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.conf")" 'Proton Mail'
+"$RELAUNCH" last-boot --json | jq -e '.outcome == "skipped" and (.text | length) > 0' >/dev/null \
+  || fail "skip last-boot log"
 
 "$RELAUNCH" boot-disable
 [[ -f "$RELAUNCH_CONFIG_DIR/disabled" ]] || fail "disabled file"
-"$RELAUNCH" list --json | jq -e '.boot.disabled == true and .boot.active == false' >/dev/null \
+"$RELAUNCH" boot
+"$RELAUNCH" last-boot --json | jq -e '.outcome == "disabled"' >/dev/null || fail "disabled last-boot log"
+"$RELAUNCH" list --json | jq -e '.boot.disabled == true and .boot.active == false and .lastBoot.outcome == "disabled"' >/dev/null \
   || fail "boot disabled state"
 "$RELAUNCH" boot-enable
 [[ -f "$RELAUNCH_CONFIG_DIR/disabled" ]] && fail "disabled not cleared"
 "$RELAUNCH" list --json | jq -e '.boot.active == true' >/dev/null || fail "boot re-enabled"
 
 "$RELAUNCH" reload | grep -qx 'Hyprland reloaded.' || fail "reload text"
+
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"NoSuch","workspace":1,"exec":"/no/such/relaunch-test-cmd","enabled":true}
+]}
+EOF
+"$RELAUNCH" boot
+"$RELAUNCH" last-boot --json | jq -e '
+  .outcome == "launched"
+  and .launches[0].status == "not_found"
+  and (.text | contains("not_found"))
+' >/dev/null || fail "launch not_found last-boot log"
 
 # herdr-in-foot is a distinct class; running windows appear before Save
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'

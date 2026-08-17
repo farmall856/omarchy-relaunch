@@ -21,6 +21,8 @@ snippet_path() { printf '%s\n' "$(config_dir)/relaunch.conf"; }
 lua_path() { printf '%s\n' "$(config_dir)/relaunch.lua"; }
 disabled_path() { printf '%s\n' "$(config_dir)/disabled"; }
 skip_path() { printf '%s\n' "$(config_dir)/skip-once"; }
+last_boot_log_path() { printf '%s\n' "$(config_dir)/last-boot.log"; }
+last_boot_json_path() { printf '%s\n' "$(config_dir)/last-boot.json"; }
 
 autostart_path() {
   printf '%s\n' "${RELAUNCH_AUTOSTART:-$HOME/.config/hypr/autostart.lua}"
@@ -509,7 +511,8 @@ emit_state() {
   rows="$(build_rows "$cfg" "$startup" "$clients")"
   extra="${1:-{\}}"
   jq -n --argjson cfg "$cfg" --argjson startup "$startup" --argjson rows "$rows" \
-    --argjson boot "$(boot_state_json)" --argjson extra "$extra" \
+    --argjson boot "$(boot_state_json)" --argjson lastBoot "$(last_boot_state_json)" \
+    --argjson extra "$extra" \
     --arg snippet "$(snippet_path)" --arg config "$(config_path)" \
     '{
       ok: true,
@@ -519,9 +522,53 @@ emit_state() {
       startup: $startup,
       rows: $rows,
       boot: $boot,
+      lastBoot: $lastBoot,
       snippetPath: $snippet,
       configPath: $config
     } + $extra'
+}
+
+last_boot_state_json() {
+  local p text
+  p="$(last_boot_json_path)"
+  if [[ ! -f "$p" ]]; then
+    printf 'null\n'
+    return
+  fi
+  text=""
+  [[ -f "$(last_boot_log_path)" ]] && text="$(cat "$(last_boot_log_path)")"
+  jq --arg text "$text" --arg logPath "$(last_boot_log_path)" \
+    '. + {text: $text, logPath: $logPath}' "$p"
+}
+
+write_last_boot() {
+  local started="$1" outcome="$2" reason="$3" launches="${4:-[]}" stagger="${5:-0}"
+  local json
+  mkdir -p "$(config_dir)"
+  json="$(jq -n \
+    --arg startedAt "$started" \
+    --arg outcome "$outcome" \
+    --arg reason "$reason" \
+    --argjson launches "$launches" \
+    --argjson stagger "$stagger" \
+    '{
+      startedAt: $startedAt,
+      outcome: $outcome,
+      reason: $reason,
+      staggerSeconds: $stagger,
+      launches: $launches
+    }')"
+  printf '%s\n' "$json" | atomic_write "$(last_boot_json_path)"
+  {
+    printf 'relaunch boot  %s\n' "$started"
+    printf 'outcome: %s\n' "$outcome"
+    [[ -n "$reason" ]] && printf 'reason:  %s\n' "$reason"
+    printf 'stagger: %ss\n' "$stagger"
+    if [[ "$launches" != "[]" ]]; then
+      printf '\nlaunches:\n'
+      jq -r '.[] | "  ws \(.workspace)  \(.class)\t\(.status)\tpid=\(.pid // "-")\t\(.exec)\(if .error then "  (\(.error))" else "" end)"' <<<"$launches"
+    fi
+  } | atomic_write "$(last_boot_log_path)"
 }
 
 clients_json() {
@@ -606,27 +653,73 @@ cmd_reload() {
 
 cmd_boot() {
   # Hidden autostart hook. Never listed as a startup app.
+  local started cfg stagger line class ws exec token status pid err launches
+  started="$(date -Iseconds)"
+  mkdir -p "$(config_dir)"
   if [[ -f "$(disabled_path)" ]]; then
+    write_last_boot "$started" disabled "disabled flag present" "[]" 0
     exit 0
   fi
   if [[ -f "$(skip_path)" ]]; then
     rm -f "$(skip_path)"
     load_config_json | write_generated
+    write_last_boot "$started" skipped "skip-once consumed; rules restored for the next boot" "[]" 0
     exit 0
   fi
-  local cfg stagger exec
   cfg="$(load_config_json)"
   stagger="$(jq -r '.staggerSeconds' <<<"$cfg")"
-  while IFS= read -r exec; do
+  launches='[]'
+  while IFS=$'\t' read -r class ws exec; do
     [[ -z "$exec" ]] && continue
     if [[ "$stagger" =~ ^[1-9][0-9]*$ ]]; then
       sleep "$stagger"
     fi
-    bash -c "$exec" &
+    token="${exec%% *}"
+    token="${token##*/}"
+    pid=""
+    err=""
+    if [[ "$token" != *=* ]] && ! command -v "${exec%% *}" >/dev/null 2>&1 && [[ ! -x "${exec%% *}" ]]; then
+      status="not_found"
+      err="command not found: ${exec%% *}"
+    else
+      bash -c "$exec" &
+      pid=$!
+      if kill -0 "$pid" 2>/dev/null; then
+        status="started"
+      else
+        status="failed"
+        err="process exited immediately"
+        pid=""
+      fi
+    fi
+    launches="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" \
+      --arg status "$status" --arg pid "$pid" --arg error "$err" '
+        . + [{
+          class: $class,
+          workspace: $ws,
+          exec: $exec,
+          status: $status,
+          pid: (if $pid == "" then null else ($pid | tonumber) end),
+          error: (if $error == "" then null else $error end)
+        }]
+      ' <<<"$launches")"
   done < <(jq -r "$jq_lib"'
     enabled_entries[]
-    | if .exec != "" then .exec else (.class | guess_exec) end
+    | [ .class, (.workspace | tostring), (if .exec != "" then .exec else (.class | guess_exec) end) ]
+    | @tsv
   ' <<<"$cfg")
+  write_last_boot "$started" launched "" "$launches" "$stagger"
+}
+
+cmd_last_boot() {
+  if [[ ! -f "$(last_boot_json_path)" ]]; then
+    die "no last-boot log yet (reboot or run: relaunch boot)"
+  fi
+  if $json_out; then
+    last_boot_state_json
+    return
+  fi
+  cat "$(last_boot_log_path)"
 }
 
 arg_value() {
@@ -834,6 +927,7 @@ relaunch — engine for omarchy-relaunch
   relaunch list [--json]                 relaunch + startup inventory
   relaunch reload                        hyprctl reload
   relaunch boot                          hidden autostart hook
+  relaunch last-boot [--json]            show the last boot log
   relaunch import --exec CMD --workspace N
   relaunch drop --class CLASS            remove from relaunch list
   relaunch drop-startup --id ID          delete the Hyprland startup line
@@ -866,6 +960,7 @@ main() {
     list) cmd_list ;;
     reload) cmd_reload ;;
     boot) cmd_boot ;;
+    last-boot) cmd_last_boot ;;
     import) cmd_import "$@" ;;
     drop) cmd_drop "$@" ;;
     drop-startup) cmd_drop_startup "$@" ;;
