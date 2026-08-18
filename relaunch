@@ -149,8 +149,15 @@ def capture($clients):
                 | (($cl.relaunchExec // "") != "")
                   and ($nsrc == "terminal" or $nsrc == "overrides-table" or $nsrc == "desktop-file")
                   and (
+                    # A fallback value always yields to a resolved one.
                     $src == "guess" or $src == "cmdline"
                     or ($src == "" and .by[$cl.match].exec == ($cl.match | ascii_downcase))
+                    # An engine-derived value re-heals when live resolution
+                    # disagrees, so a stale entry written by an older version
+                    # cannot survive forever. Only "overrides-table" holds
+                    # text the user typed, and it is never overwritten here.
+                    or (($src == "terminal" or $src == "desktop-file")
+                        and .by[$cl.match].exec != $cl.relaunchExec)
                   )
               ) as $heal
             | if $heal then

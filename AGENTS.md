@@ -91,8 +91,12 @@ stable. `Panel.qml` parses that object.
 - `list` (panel display) must not index `.desktop` files or resolve
   launchers. It reads saved rows, cheap terminal identity, and startup
   lines. Resolve only on `save` and `import`.
-- Recapture refreshes workspace only (and heals a fallback exec). Preserve
-  user `exec`, `enabled`, and `float` edits.
+- Recapture refreshes workspace and re-heals the exec. A `guess`/`cmdline`
+  fallback yields to any resolved value, and a `terminal` or `desktop-file`
+  exec is rewritten whenever live resolution disagrees with it — otherwise a
+  broken value written by an older engine is sticky forever and reinstalling
+  never repairs it. `overrides-table` is the only source the user typed, so it
+  is never healed away; `enabled` and `float` edits are always preserved.
 - Skip special/negative workspaces (`Workspace.ID < 1`) and empty classes.
 - Regex-escape class names in generated `o.window` lines, then Lua-escape
   backslashes so dotted classes (`org.omarchy.agent`) are valid Lua strings.

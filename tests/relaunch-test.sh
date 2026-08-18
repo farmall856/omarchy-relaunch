@@ -542,6 +542,53 @@ eval "set -- ${saved#xdg-terminal-exec }"
 [[ "$1" == "--app-id=TUI.float" ]] || fail "hosted TUI must keep its app-id, got $1"
 [[ "$2" == "-e" ]] || fail "hosted TUI must keep -e, got $2"
 [[ "$5" == "dua i /" ]] || fail "hosted TUI must keep 'dua i /' as one argument, got [$5]"
+
+# --- a stale terminal-source entry re-heals on recapture ---
+# Entries written by an older engine carry execSource "terminal" with a
+# flattened, -e-less command. That is not a fallback source, so the old heal
+# rule skipped it and the broken value was sticky forever. Terminal identity
+# is re-derived from live /proc on every save, and the user's own text lives
+# in overrides.json, so a differing resolution must win.
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"TUI.float","workspace":4,"exec":"xdg-terminal-exec --app-id=TUI.float bash -c dua i /","execSource":"terminal","enabled":true,"float":true}
+]}
+EOF
+out="$("$RELAUNCH" save --json)"
+echo "$out" | jq -e --arg want "$saved" '
+  ([.entries[] | select(.class == "TUI.float") | .exec] == [$want])
+  and ([.entries[] | select(.class == "TUI.float") | .execSource] == ["terminal"])
+  and ([.entries[] | select(.class == "TUI.float") | .float] == [true])
+' >/dev/null || fail "stale terminal entry must re-heal: $out"
+echo "$out" | jq -e '.updated >= 1' >/dev/null   || fail "re-healing a stale terminal entry must count as an update"
+
+# A healed entry is stable: a second save with the same window is a no-op.
+"$RELAUNCH" save --json | jq -e '.updated == 0' >/dev/null   || fail "recapturing an already-correct terminal entry must not churn"
+
+# The user's own command still wins. set-exec records "overrides-table", and
+# resolve_launch checks the terminal host first, so only the stored source
+# keeps the edit from being healed away.
+"$RELAUNCH" set-exec --class TUI.float --exec "xdg-terminal-exec --app-id=TUI.float -e dua i /home" --json >/dev/null
+"$RELAUNCH" save --json | jq -e '
+  ([.entries[] | select(.class == "TUI.float") | .exec] == ["xdg-terminal-exec --app-id=TUI.float -e dua i /home"])
+  and ([.entries[] | select(.class == "TUI.float") | .execSource] == ["overrides-table"])
+' >/dev/null || fail "a user set-exec must survive recapture of a terminal-hosted window"
+"$RELAUNCH" drop --class TUI.float --json >/dev/null
+
+# A stale desktop-file entry re-heals the same way.
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"libreoffice-calc","workspace":7,"exec":"gio launch /gone/libreoffice-calc.desktop","execSource":"desktop-file","enabled":true}
+]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"libreoffice-calc","initialClass":"libreoffice-calc","pid":71,"floating":false,"workspace":{"id":7}}]
+EOF
+"$RELAUNCH" save --json | jq -e --arg calc "gio launch $CALC_DESK" '
+  [.entries[] | select(.class == "libreoffice-calc") | .exec] == [$calc]
+' >/dev/null || fail "stale desktop-file entry must re-heal to the indexed .desktop"
+unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
 # --- startup exec with glob chars stays literal ---
