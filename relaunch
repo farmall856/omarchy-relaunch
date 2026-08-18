@@ -2107,8 +2107,9 @@ cmd_snapshot() {
         )
       }
   ')"
-  # Labels are the stored ones, never resolved here: this can run at shutdown,
-  # where indexing .desktop files would be both slow and pointless.
+  # Labels are the stored ones, never resolved here. Indexing .desktop files
+  # would be slow and pointless for a diagnostic the user invoked by hand and
+  # is waiting on.
   out="$(jq --argjson cfg "$(load_config_json)" '
     (
       $cfg.entries
@@ -2128,14 +2129,14 @@ cmd_snapshot() {
   fi
 }
 
-# Diff the pre-shutdown snapshot against what the last boot actually produced.
+# Diff the manual snapshot against what the last boot actually produced.
 cmd_last_session() {
   local diff_mode=false a
   for a in "$@"; do
     [[ "$a" == --diff ]] && diff_mode=true
   done
   [[ -f "$(last_session_path)" ]] \
-    || die "no session snapshot yet (enable it: relaunch snapshot-hook --enable)"
+    || die "no session snapshot yet (take one with: relaunch snapshot)"
   if ! $diff_mode; then
     if $json_out; then cat "$(last_session_path)"; else
       jq -r '"session snapshot \(.capturedAt)\n", (.windows[] | "  ws \(.workspace)  \(.label)  class=\(.class)")' \
@@ -2232,66 +2233,17 @@ cmd_last_session() {
   ' <<<"$report"
 }
 
-# Opt-in trigger. See docs: ExecStop of a unit ordered After= the graphical
-# session runs while Hyprland is still alive, which is verified below.
-# Best-effort on purpose: teardown must never block on systemd.
+# The hook can no longer be created -- see "Session snapshot -- removed" in
+# AGENTS.md -- but it must still be destroyable. An older install may have an
+# enabled unit on disk whose ExecStop points at this script; uninstall and
+# ensure_hooks both call this to clear it. Best-effort: teardown must never
+# block on systemd.
 remove_snapshot_hook() {
   local unit
   unit="$(snapshot_unit_path)"
   systemctl --user disable --now omarchy-relaunch-snapshot.service >/dev/null 2>&1 || true
   rm -f "$unit"
   systemctl --user daemon-reload >/dev/null 2>&1 || true
-}
-
-cmd_snapshot_hook() {
-  local mode="" a unit
-  for a in "$@"; do
-    case "$a" in
-      --enable) mode=enable ;;
-      --disable) mode=disable ;;
-    esac
-  done
-  [[ -n "$mode" ]] || die "snapshot-hook requires --enable or --disable"
-  unit="$(snapshot_unit_path)"
-  if [[ "$mode" == disable ]]; then
-    remove_snapshot_hook
-    if $json_out; then emit_state; else printf 'Session snapshot hook removed.\n'; fi
-    return
-  fi
-  mkdir -p "$(dirname "$unit")"
-  cat >"$unit" <<EOF
-[Unit]
-Description=Relaunch pre-shutdown window snapshot
-Documentation=https://github.com/farmall856/omarchy-relaunch
-# Stop ordering is the reverse of start ordering, so After= here means this
-# unit stops BEFORE graphical-session.target. wayland-wm@.service declares
-# Before=graphical-session.target, so the compositor stops after the target --
-# and therefore after this ExecStop. hyprctl is still answering.
-PartOf=graphical-session.target
-After=graphical-session.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/bin/true
-ExecStop=${SELF} snapshot
-# The snapshot is a diagnostic. If the Hyprland socket hangs, logout must not
-# wait on it.
-TimeoutStopSec=5
-
-[Install]
-WantedBy=graphical-session.target
-EOF
-  # No `|| true` here: silently leaving the feature inactive is worse than
-  # failing. Best-effort suppression belongs on disable/uninstall only.
-  systemctl --user daemon-reload >/dev/null 2>&1 \
-    || die "systemctl --user daemon-reload failed; is the user manager running?"
-  systemctl --user enable --now omarchy-relaunch-snapshot.service >/dev/null 2>&1 \
-    || die "systemctl --user enable --now omarchy-relaunch-snapshot.service failed"
-  if $json_out; then emit_state; else
-    printf 'Session snapshot hook installed: %s\n' "$unit"
-    printf 'It writes %s when the graphical session stops.\n' "$(last_session_path)"
-  fi
 }
 
 arg_value() {
@@ -2539,6 +2491,20 @@ ensure_hooks() {
     } >>"$lua"
   fi
 
+  # Upgrade path for the withdrawn snapshot hook. An install that ran
+  # `snapshot-hook --enable` before it was removed still has an enabled unit
+  # whose ExecStop fires at every logout, and that user will never run
+  # `uninstall`. Clear it here instead.
+  #
+  # The `[[ -f ]]` guard is the whole point: ensure_hooks runs on every list
+  # and save, and remove_snapshot_hook shells out to systemctl twice. Without
+  # the guard this would put two forks back on the hot path that #13 spent a
+  # PR clearing. With it, the normal case is one stat of a file that does not
+  # exist.
+  if [[ -f "$(snapshot_unit_path)" ]]; then
+    remove_snapshot_hook
+  fi
+
   # Plugin-manager installs do not put the script on PATH. Copy it so a
   # terminal `relaunch` works, but skip that when tests override the config dir.
   if [[ -z "${RELAUNCH_CONFIG_DIR:-}" ]]; then
@@ -2562,7 +2528,6 @@ relaunch — engine for omarchy-relaunch
   relaunch last-boot [--json] [--open]
   relaunch snapshot                      capture the layout now (diagnostic)
   relaunch last-session [--json] [--diff]   compare that snapshot with the boot
-  relaunch snapshot-hook --enable | --disable   opt-in pre-shutdown snapshot
   relaunch import --class CLASS --workspace N
   relaunch import --exec CMD --workspace N
   relaunch set-exec --class CLASS --exec CMD
@@ -2600,7 +2565,6 @@ main() {
     last-boot) cmd_last_boot "$@" ;;
     snapshot) cmd_snapshot ;;
     last-session) cmd_last_session "$@" ;;
-    snapshot-hook) cmd_snapshot_hook "$@" ;;
     import) cmd_import "$@" ;;
     set-exec) cmd_set_exec "$@" ;;
     drop) cmd_drop "$@" ;;

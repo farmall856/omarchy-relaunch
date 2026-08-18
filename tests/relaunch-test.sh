@@ -792,7 +792,7 @@ jq -e '[.entries[] | select(.class == "brave-browser") | .label] == ["Brave Web 
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
-# --- pre-shutdown session snapshot (diagnostic; opt-in; changes nothing) ---
+# --- manual session snapshot (diagnostic; user-invoked; changes nothing) ---
 export FAKE_MONITORS="$WORKDIR/monitors.json"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"ignored":[],"entries":[
@@ -1308,31 +1308,62 @@ grep -q 'CONFIG_DIR_GONE' "$SYSTEMCTL_LOG" \
   || fail "uninstall must remove the snapshot unit file"
 mkdir -p "$RELAUNCH_CONFIG_DIR"
 
-# (8) Install must fail loudly rather than reporting success.
-cat >"$WORKDIR/systemctl" <<'EOF'
-#!/usr/bin/env bash
-exit 1
+# (8) The hook can no longer be created: snapshot-hook is gone. It was
+# withdrawn because it captured 1 of 11 windows on a real reboot and, more
+# importantly, wrote window titles to disk on a schedule the user could not
+# see or control. Only the teardown survives.
+"$RELAUNCH" snapshot-hook --enable >/dev/null 2>&1 \
+  && fail "snapshot-hook must no longer be a valid subcommand"
+"$RELAUNCH" snapshot-hook --disable >/dev/null 2>&1 \
+  && fail "snapshot-hook --disable must be gone too"
+"$RELAUNCH" --help 2>&1 | grep -q 'snapshot-hook' \
+  && fail "usage must not advertise snapshot-hook"
+# Manual capture is explicitly fine and must keep working.
+export FAKE_MONITORS="$WORKDIR/monitors.json"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
 EOF
-chmod +x "$WORKDIR/systemctl"
-( export PATH="$WORKDIR:$PATH" XDG_CONFIG_HOME="$WORKDIR/xdgconf"
-  "$RELAUNCH" snapshot-hook --enable >/dev/null 2>&1 ) \
-  && fail "snapshot-hook --enable must fail when systemctl rejects it"
-# …while teardown stays best-effort.
-( export PATH="$WORKDIR:$PATH" XDG_CONFIG_HOME="$WORKDIR/xdgconf"
-  "$RELAUNCH" snapshot-hook --disable >/dev/null 2>&1 ) \
-  || fail "snapshot-hook --disable must stay best-effort when systemctl fails"
-# The generated unit bounds its own stop so a hung hyprctl cannot stall logout.
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"address":"0x1","class":"stillhere","initialClass":"stillhere","pid":5000,"floating":false,"monitor":0,"workspace":{"id":2},"title":"t"}]
+EOF
+"$RELAUNCH" snapshot >/dev/null || fail "relaunch snapshot must survive the hook removal"
+jq -e '.windows | length == 1' "$RELAUNCH_CONFIG_DIR/last-session.json" >/dev/null \
+  || fail "manual snapshot must still write last-session.json"
+cat >"$RELAUNCH_CONFIG_DIR/last-boot.json" <<'EOF'
+{"startedAt":"2026-01-01T00:00:00-00:00","outcome":"launched","launches":[]}
+EOF
+"$RELAUNCH" last-session --diff --json | jq -e '.classes | length == 1' >/dev/null \
+  || fail "last-session --diff must survive the hook removal"
+unset FAKE_MONITORS
+# With no snapshot at all, the error must point at a command that exists.
+rm -f "$RELAUNCH_CONFIG_DIR/last-session.json"
+err="$("$RELAUNCH" last-session 2>&1 || true)"
+assert_not_contains "$err" "snapshot-hook"
+assert_contains "$err" "relaunch snapshot"
+
+# (8b) ensure_hooks clears a unit left by an older install -- that user will
+# never run uninstall -- but must not shell out when there is none, because
+# ensure_hooks is on the hot path for list and save.
+: >"$SYSTEMCTL_LOG"
 cat >"$WORKDIR/systemctl" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG_PATH"
 exit 0
 EOF
 chmod +x "$WORKDIR/systemctl"
-( export PATH="$WORKDIR:$PATH" XDG_CONFIG_HOME="$WORKDIR/xdgconf"
-  "$RELAUNCH" snapshot-hook --enable >/dev/null 2>&1 )
-grep -q '^TimeoutStopSec=' "$UNIT_DIR/omarchy-relaunch-snapshot.service" \
-  || fail "the snapshot unit needs a TimeoutStopSec"
-grep -q 'After=graphical-session.target' "$UNIT_DIR/omarchy-relaunch-snapshot.service" \
-  || fail "the snapshot unit must stop before the graphical session"
+printf 'stale unit\n' >"$UNIT_DIR/omarchy-relaunch-snapshot.service"
+( export PATH="$WORKDIR:$PATH" XDG_CONFIG_HOME="$WORKDIR/xdgconf" SYSTEMCTL_LOG_PATH="$SYSTEMCTL_LOG"
+  "$RELAUNCH" list --json >/dev/null 2>&1 )
+[[ ! -e "$UNIT_DIR/omarchy-relaunch-snapshot.service" ]] \
+  || fail "ensure_hooks must delete a stray snapshot unit"
+grep -q 'disable --now omarchy-relaunch-snapshot.service' "$SYSTEMCTL_LOG" \
+  || fail "ensure_hooks must disable a stray snapshot unit, not just unlink it"
+# No unit: no systemctl at all. This is the hot path.
+: >"$SYSTEMCTL_LOG"
+( export PATH="$WORKDIR:$PATH" XDG_CONFIG_HOME="$WORKDIR/xdgconf" SYSTEMCTL_LOG_PATH="$SYSTEMCTL_LOG"
+  "$RELAUNCH" list --json >/dev/null 2>&1 )
+[[ ! -s "$SYSTEMCTL_LOG" ]] \
+  || fail "ensure_hooks must not fork systemctl when no unit exists: $(cat "$SYSTEMCTL_LOG")"
 
 # (9) last-session --diff must compare workspace and float, not just counts.
 export FAKE_MONITORS="$WORKDIR/monitors.json"
