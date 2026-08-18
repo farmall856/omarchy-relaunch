@@ -24,7 +24,7 @@ hook) launches the list. Workspace pins live in generated `relaunch.lua`.
 
 Runtime files (user-owned, never commit):
 
-- `~/.config/omarchy-relaunch/config.json` — entries, ignored startup ids, `skipOnce`, `windows`
+- `~/.config/omarchy-relaunch/config.json` — entries, ignored startup ids, `skipOnce`
 - `~/.config/omarchy-relaunch/overrides.json` — user `class → exec` exceptions (starts empty)
 - `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
 - `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags (skip is also in config.json so Save cannot drop it)
@@ -93,16 +93,6 @@ stable. `Panel.qml` parses that object.
   `overrides.json` starts empty and only grows when the user saves a
   command. `--json` includes `execSource`, `execOk`, `unverified`, and
   `warnings`.
-- `config.json` carries a `windows` snapshot: every window seen at the last
-  save, with class, workspace, floating, and monitor id/name/description.
-  Rewritten by `save`, carried through untouched by every other command.
-  Nothing reads it yet — it exists so a future per-window feature has real
-  data. It is deliberately unfiltered (no first-per-class dedupe, special and
-  negative workspaces kept) because a snapshot loses information by applying
-  capture's filters. Store both monitor name and description: output names
-  (`DP-1`) are reassigned across reboots, descriptions (`BOE 0x0BCA`) identify
-  the panel. `hyprctl monitors` failing degrades to empty names, never a save
-  failure. It must never feed `entries[]` or the generated pins.
 - Entries carry a `label`: a human-readable display name, resolved at
   `save`/`import` time and stored, never resolved at `list` time. Recomputed
   on recapture so it self-heals; it is not a user field, so a hand-edited
@@ -228,6 +218,18 @@ stable. `Panel.qml` parses that object.
 - Persist with temp-file + rename (`config.json.tmp`, `relaunch.lua.tmp`).
 - Everything runs as the user. No sudo, no IPC beyond `hyprctl` and the
   `relaunch` script on `PATH`.
+- **No speculative persistence.** If no defined feature consumes a field, it
+  is not stored. `config.json` briefly carried a `windows` array recording
+  every observed window, written on every save and read by nothing, kept only
+  so a hypothetical per-window feature would find data waiting. It was
+  removed. A field nobody reads still has to be normalized, carried through
+  every command that rewrites the config, kept out of the pins, migrated, and
+  tested — all to guarantee behaviour for a consumer that may never exist,
+  and whose real requirements would probably not match the guess. Add the
+  field back when the feature is scoped; the data is cheap to recapture and
+  the invariants are not. This is the write-side counterpart to the rule
+  above: do not store what nothing reads, and do not resolve at display time
+  what should have been resolved at save time.
 - Inventory only the user's `~/.config/hypr/autostart.lua`. Never list or
   edit packaged Omarchy autostart. Hide any `relaunch` / `omarchy-relaunch`
   hook from every list.

@@ -35,6 +35,16 @@ esac
 EOF
 chmod +x "$HYPRCTL_STUB"
 
+# Monitor fixture for the hyprctl stub. Shared by the session-snapshot and
+# diff blocks below, so it lives in the harness rather than inside whichever
+# test happens to run first.
+cat >"$WORKDIR/monitors.json" <<'EOF'
+[
+  {"id": 0, "name": "eDP-1", "description": "BOE 0x0BCA"},
+  {"id": 1, "name": "DP-3", "description": "Dell Inc. DELL U2720Q ABCD123"}
+]
+EOF
+
 export RELAUNCH_VERIFY_SLEEP=0
 # No bounded re-sampling in the suite: fixtures never grow a window, so every
 # boot would otherwise wait out the full deadline. The re-sampling behaviour
@@ -670,84 +680,6 @@ assert_not_contains "$lua" 'legacy)$" }, { workspace = "2 silent", tile'
 # …and import, which has no window to read, leaves it unknown too.
 "$RELAUNCH" import --exec legacy2 --workspace 5 --json >/dev/null
 jq -e '[.entries[] | select(.class == "legacy2") | has("float")] == [false]'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "import has no live window, so float must stay unknown"
-
-# --- per-window snapshot (recorded for future use; changes nothing today) ---
-# entries[] stays one-per-class and the pins stay identical. windows[] is a
-# raw record of every observed window, so a future per-window feature has
-# real data to work from.
-cat >"$WORKDIR/monitors.json" <<'EOF'
-[
-  {"id": 0, "name": "eDP-1", "description": "BOE 0x0BCA"},
-  {"id": 1, "name": "DP-3", "description": "Dell Inc. DELL U2720Q ABCD123"}
-]
-EOF
-export FAKE_MONITORS="$WORKDIR/monitors.json"
-cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
-EOF
-cat >"$FAKE_CLIENTS" <<'EOF'
-[
-  {"class":"foot","initialClass":"foot","pid":600,"floating":false,"monitor":0,"workspace":{"id":1}},
-  {"class":"foot","initialClass":"foot","pid":601,"floating":true,"monitor":1,"workspace":{"id":5}},
-  {"class":"brave-browser","initialClass":"brave-browser","pid":602,"floating":false,"monitor":1,"workspace":{"id":2}},
-  {"class":"scratchpad","initialClass":"scratchpad","pid":603,"floating":true,"monitor":0,"workspace":{"id":-98}}
-]
-EOF
-"$RELAUNCH" save >/dev/null
-snap="$(jq -c '.windows' "$RELAUNCH_CONFIG_DIR/config.json")"
-
-# Every window, not just the first of each class.
-jq -e '(.windows | length) == 4' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "snapshot must record every window, got: $snap"
-jq -e '[.windows[] | select(.class == "foot")] | length == 2' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "snapshot must not dedupe by class: $snap"
-
-# …while entries[] and the pins keep the one-entry-per-class model.
-jq -e '[.entries[] | select(.class == "foot")] | length == 1' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "snapshot must not change the one-entry-per-class model"
-jq -e '[.entries[] | select(.class == "foot") | .workspace] == [1]' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "first-seen lowest workspace still wins for the entry"
-lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
-# Count placement rules only: a tiled entry also emits a tag-removal line.
-[[ "$(grep -c 'class = "\^(foot)\$" }, { workspace' <<<"$lua")" -eq 1 ]]   || fail "snapshot must not add pins; expected exactly one foot placement rule"
-assert_not_contains "$lua" 'scratchpad'
-
-# Monitor id, name and description all land. Output names are reassigned
-# across reboots, so the description is what identifies the physical panel.
-jq -e '
-  ([.windows[] | select(.class == "brave-browser")]
-    | .[0]
-    | .monitor == 1
-      and .monitorName == "DP-3"
-      and .monitorDescription == "Dell Inc. DELL U2720Q ABCD123")
-' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "snapshot must record monitor id, name and description: $snap"
-jq -e '
-  ([.windows[] | select(.class == "foot" and .monitor == 0)]
-    | .[0] | .monitorName == "eDP-1" and .monitorDescription == "BOE 0x0BCA")
-' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "per-window monitor lookup must not collapse to one monitor: $snap"
-
-# Float state is per window here, not per class.
-jq -e '[.windows[] | select(.class == "foot") | .floating] | sort == [false, true]'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "snapshot must record per-window float: $snap"
-
-# A snapshot loses information if it applies capture's filters, so special
-# and negative workspaces are kept even though they can never be pinned.
-jq -e '[.windows[] | select(.workspace == -98) | .class] == ["scratchpad"]'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "snapshot must keep special workspaces: $snap"
-jq -e '[.entries[] | select(.class == "scratchpad")] | length == 0'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "special workspaces must still be excluded from entries"
-
-# Commands that rewrite config.json must carry the snapshot through.
-"$RELAUNCH" import --exec somethingelse --workspace 8 --json >/dev/null
-jq -e --argjson want "$snap" '.windows == $want' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "import must not drop the window snapshot"
-"$RELAUNCH" drop --class somethingelse --json >/dev/null
-jq -e --argjson want "$snap" '.windows == $want' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "drop must not drop the window snapshot"
-"$RELAUNCH" generate >/dev/null
-jq -e --argjson want "$snap" '.windows == $want' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "generate must not drop the window snapshot"
-
-# hyprctl monitors failing is not a save failure: names degrade to empty.
-unset FAKE_MONITORS
-cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
-EOF
-"$RELAUNCH" save >/dev/null || fail "save must survive hyprctl monitors failing"
-jq -e '
-  ([.windows[] | select(.class == "brave-browser")]
-    | .[0] | .monitor == 1 and .monitorName == "" and .monitorDescription == "")
-' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "unreadable monitors must degrade to empty names, keeping the id"
 
 # --- display labels: stored at save time, one tier at a time ---
 # class stays the identity and the only lookup key; label is display only.

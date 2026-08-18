@@ -169,10 +169,6 @@ Fine-tune by editing `~/.config/omarchy-relaunch/config.json`:
   consumes it.
 - `ignored` is startup-app ids you chose to leave alone.
 - `staggerSeconds` waits N seconds between launches if apps race the pins.
-- `windows` is a snapshot of every window seen at the last save — class,
-  workspace, float, and monitor id/name/description. Nothing reads it yet; it
-  is recorded so a future per-window feature has real data. Editing it changes
-  nothing.
 
 After a manual edit, run `relaunch generate` (or Save again from the panel).
 
