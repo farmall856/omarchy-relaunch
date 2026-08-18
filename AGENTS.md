@@ -133,7 +133,11 @@ stable. `Panel.qml` parses that object.
 - Float/tile follows the live window, like workspace. Capture stores `float`
   as a real boolean and recapture refreshes it — it is not a preserved user
   edit. Generated rules must say which they want: `float = true` when true,
-  `tile = true` when false. Silence is not neutral, because
+  `tile = true` when false, **plus `tag = "-floating-window"` for a tiled
+  entry**. `tile = true` alone is not enough: a direct per-class float rule is
+  overridden by a later `tile = true`, but a tag-driven one is not, so a
+  tagged class comes back floating at 875×600 with the tile rule present.
+  Verified on hardware. Silence is not neutral either, because
   `default/hypr/apps/system.lua` tags `TUI.float` (and friends)
   `+floating-window`, so an unqualified pin lets a tiled window come back
   floating at 875×600. `tile` is a first-class rule; Omarchy uses it in

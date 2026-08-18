@@ -274,7 +274,16 @@ def enabled_entries:
 def lua_rules:
   enabled_entries
   | map(
-      "o.window({ class = \"^(\(.class | lua_regex))$\" }, { workspace = \"\(.workspace) silent\""
+      # tile = true alone does NOT beat the Omarchy floating-window tag.
+      # Verified: default/hypr/apps/system.lua tags TUI.float +floating-window
+      # and floats it via o.window({ tag = "floating-window" }, ...). A later
+      # tile = true still came back floating at 875x600; removing the tag first
+      # does work. A direct per-class float rule (steam, screensaver) IS beaten
+      # by a later tile = true, so only the tag path needs this extra line.
+      (if .float == false then
+         "o.window({ class = \"^(\(.class | lua_regex))$\" }, { tag = \"-floating-window\" })\n"
+       else "" end)
+      + "o.window({ class = \"^(\(.class | lua_regex))$\" }, { workspace = \"\(.workspace) silent\""
       + (
           # Omarchy tags TUI.float etc. +floating-window in
           # default/hypr/apps/system.lua, so silence means "float" for those

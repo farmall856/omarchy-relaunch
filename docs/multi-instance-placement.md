@@ -74,6 +74,18 @@ class=RL-SAME ws=10 pid=1134473
 Both windows share one class and hold different workspaces, which per-class
 pins cannot express. Focus never moved.
 
+### Rule precedence is not uniform (verified)
+
+Worth knowing before relying on "a later rule wins": it depends on how the
+earlier rule was applied. A direct per-class rule *is* overridden by a later
+one — `o.window("RL-DIRECT", { float = true })` followed by our
+`tile = true` produced a tiled window. A **tag-driven** rule is not:
+`+floating-window` plus a later `tile = true` still produced a floating
+875x600 window. Removing the tag first (`tag = "-floating-window"`) works.
+
+This bit the float/tile feature in production and is now handled by the
+generator. Any design that assumes load order determines the winner is wrong.
+
 ### Backslashes must be doubled for Lua (verified)
 
 The stored `exec` is `printf %q` output, so a hosted TUI command contains
@@ -243,14 +255,15 @@ scope.
 
 ## Open questions
 
-1. **Pin vs dispatch precedence — untested.** If both a standing pin and a
-   dispatch rule name a workspace for the same window, which wins? The obvious
-   test failed because Hyprland 0.56 rejects `hyprctl keyword`
-   (*"keyword can't work with non-legacy parsers. Use eval."*), so the pin was
-   never actually set and the run proved nothing. This must be settled before
-   the hybrid in decision 3 is built, because the whole hybrid rests on the two
-   mechanisms not fighting. Test by generating a real `relaunch.lua` pin in a
-   sandboxed config dir, reloading, then dispatching that class elsewhere.
+1. **Pin vs dispatch precedence — dispatch wins (verified).** Settled while
+   fixing the float regression. With the real generated pin
+   `o.window({ class = "^(TUI\\.float)$" }, { workspace = "3 silent", ... })`
+   loaded, a window dispatched with `[workspace 9 silent]` landed on **9**, not
+   3. The dispatch-scoped rule beats the standing pin for workspace, which is
+   what decision 3 needs: the two mechanisms can coexist without the pin
+   dragging a dispatched window back.
+   Still unverified: precedence for *float/tile* between the two, and what
+   happens when a pin exists for a class with several dispatched entries.
 2. **Does `silent` hold under load?** Verified with a handful of probes. Boot
    dispatches every entry at once on a cold start; whether focus stays put
    under that is not tested.
