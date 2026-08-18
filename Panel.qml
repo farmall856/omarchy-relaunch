@@ -43,6 +43,22 @@ Panel {
   readonly property var startupRows: rows.filter(function(r) { return r.kind === "startup" })
   readonly property var ignoredRows: rows.filter(function(r) { return r.kind === "ignored" })
 
+  // One bordered box per workspace. relaunchRows is already sorted by
+  // workspace, so a run of equal workspace numbers is one group.
+  readonly property var relaunchGroups: {
+    var groups = []
+    var current = null
+    for (var i = 0; i < root.relaunchRows.length; i++) {
+      var row = root.relaunchRows[i]
+      if (current === null || current.workspace !== row.workspace) {
+        current = { workspace: row.workspace, apps: [] }
+        groups.push(current)
+      }
+      current.apps.push(row)
+    }
+    return groups
+  }
+
   function open() {
     root.confirmRemove = false
     root.controller.show()
@@ -207,6 +223,45 @@ Panel {
     }
   }
 
+  // Square, glyph-only variant of Chip. An icon-only control needs a name,
+  // so `hint` is required reading for anyone adding one.
+  component IconChip: Rectangle {
+    id: iconChip
+    property string glyph: ""
+    property string hint: ""
+    property bool danger: false
+    property bool active: false
+    signal clicked
+    readonly property color tint: iconChip.danger ? Color.urgent : root.barForeground
+    height: Style.space(22)
+    width: Style.space(26)
+    radius: Style.space(4)
+    color: iconChipMouse.containsMouse || iconChip.active
+      ? Style.hoverFillFor(iconChip.tint, iconChip.danger ? Color.urgent : Color.accent)
+      : "transparent"
+    border.color: iconChip.tint
+    border.width: 1
+    opacity: root.busy ? 0.45 : 1
+    Text {
+      anchors.centerIn: parent
+      text: iconChip.glyph
+      color: iconChip.tint
+      font.family: root.bar ? root.bar.fontFamily : Style.font.family
+      font.pixelSize: Style.font.bodySmall
+    }
+    MouseArea {
+      id: iconChipMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      enabled: !root.busy
+      onClicked: iconChip.clicked()
+      PanelToolTip {
+        visible: iconChipMouse.containsMouse && iconChip.hint !== ""
+        text: iconChip.hint
+      }
+    }
+  }
+
   KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
@@ -336,99 +391,137 @@ Panel {
           }
 
           Repeater {
-            model: root.relaunchRows
-            delegate: Column {
-              id: relaunchRow
+            model: root.relaunchGroups
+            delegate: Rectangle {
+              id: wsGroup
               required property var modelData
               width: content.width
-              spacing: Style.space(4)
+              height: wsBody.implicitHeight + Style.space(20)
+              radius: Style.space(6)
+              color: "transparent"
+              border.color: root.barForeground
+              border.width: 1
 
-              Row {
-                width: parent.width
-                spacing: Style.space(8)
+              Column {
+                id: wsBody
+                x: Style.space(10)
+                y: Style.space(10)
+                width: parent.width - Style.space(20)
+                spacing: Style.space(6)
+
                 Text {
-                  text: "ws " + relaunchRow.modelData.workspace
-                  width: Style.space(44)
+                  text: "ws " + wsGroup.modelData.workspace
                   color: root.barForeground
-                  opacity: relaunchRow.modelData.enabled ? 1.0 : 0.4
+                  opacity: 0.75
                   font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                  font.pixelSize: Style.font.bodySmall
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
                 }
-                Text {
-                  text: relaunchRow.modelData.label
-                    + (relaunchRow.modelData.kind === "both" ? "  · also a startup app" : "")
-                    + (root.rowUnverified(relaunchRow.modelData) ? "  (unverified)" : "")
-                  width: parent.width - Style.space(52)
-                  elide: Text.ElideRight
-                  color: root.rowBroken(relaunchRow.modelData) ? Color.urgent : root.barForeground
-                  opacity: relaunchRow.modelData.enabled ? 1.0 : 0.4
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                }
-              }
 
-              Text {
-                visible: String(relaunchRow.modelData.exec || "") !== ""
-                width: parent.width
-                text: String(relaunchRow.modelData.exec || "")
-                wrapMode: Text.WrapAnywhere
-                color: root.barForeground
-                opacity: relaunchRow.modelData.enabled ? 0.75 : 0.4
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.bodySmall
-              }
+                Repeater {
+                  model: wsGroup.modelData.apps
+                  delegate: Column {
+                    id: relaunchRow
+                    required property var modelData
+                    // A broken row opens its editor unprompted: there is
+                    // nothing on the collapsed line to fix it with.
+                    property bool expanded: root.rowBroken(modelData)
+                    width: wsBody.width
+                    spacing: Style.space(4)
 
-              Text {
-                visible: root.rowBroken(modelData)
-                width: parent.width
-                text: "Launch command not found. Type the command that starts this app."
-                wrapMode: Text.WordWrap
-                color: Color.urgent
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.caption
-              }
+                    // One app is one line: the name, then the two actions.
+                    Item {
+                      width: parent.width
+                      height: rowActions.height
 
-              Row {
-                visible: root.rowBroken(modelData)
-                width: parent.width
-                spacing: Style.space(6)
-                TextField {
-                  id: execField
-                  width: parent.width - Style.space(70)
-                  text: modelData.exec || ""
-                  placeholderText: "launch command"
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  foreground: root.barForeground
-                  horizontalPadding: Style.spacing.controlGap
-                  verticalPadding: Style.spacing.controlPaddingY
-                  onActiveFocusChanged: {
-                    if (activeFocus) root.execEditClass = modelData.class
-                    else if (root.execEditClass === modelData.class) root.execEditClass = ""
+                      Text {
+                        anchors.left: parent.left
+                        anchors.right: rowActions.left
+                        anchors.rightMargin: Style.space(6)
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: relaunchRow.modelData.label
+                          + (relaunchRow.modelData.kind === "both" ? "  · also a startup app" : "")
+                          + (root.rowUnverified(relaunchRow.modelData) ? "  (unverified)" : "")
+                        elide: Text.ElideRight
+                        color: root.rowBroken(relaunchRow.modelData) ? Color.urgent : root.barForeground
+                        opacity: relaunchRow.modelData.enabled ? 1.0 : 0.4
+                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                        font.pixelSize: Style.font.bodySmall
+                      }
+
+                      Row {
+                        id: rowActions
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.space(6)
+                        IconChip {
+                          glyph: "\uf135"  // nf-fa-rocket
+                          hint: relaunchRow.expanded ? "Hide launch command" : "View or edit launch command"
+                          active: relaunchRow.expanded
+                          danger: root.rowBroken(relaunchRow.modelData)
+                          onClicked: relaunchRow.expanded = !relaunchRow.expanded
+                        }
+                        IconChip {
+                          glyph: "\uf1f8"  // nf-fa-trash
+                          hint: "Remove " + relaunchRow.modelData.label + " from relaunch"
+                          onClicked: root.run(["drop", "--class", relaunchRow.modelData.class, "--json"])
+                        }
+                      }
+                    }
+
+                    Text {
+                      visible: relaunchRow.expanded && root.rowBroken(relaunchRow.modelData)
+                      width: parent.width
+                      text: "Launch command not found. Type the command that starts this app."
+                      wrapMode: Text.WordWrap
+                      color: Color.urgent
+                      font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    Row {
+                      visible: relaunchRow.expanded
+                      width: parent.width
+                      spacing: Style.space(6)
+                      TextField {
+                        id: execField
+                        width: parent.width - Style.space(70)
+                        text: relaunchRow.modelData.exec || ""
+                        placeholderText: "launch command"
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.bodySmall
+                        foreground: root.barForeground
+                        horizontalPadding: Style.spacing.controlGap
+                        verticalPadding: Style.spacing.controlPaddingY
+                        onActiveFocusChanged: {
+                          if (activeFocus) root.execEditClass = relaunchRow.modelData.class
+                          else if (root.execEditClass === relaunchRow.modelData.class) root.execEditClass = ""
+                        }
+                        onAccepted: root.saveExec(relaunchRow.modelData.class, text)
+                        Keys.onEscapePressed: {
+                          root.execEditClass = ""
+                          focus = false
+                          relaunchRow.expanded = false
+                        }
+                      }
+                      Chip {
+                        label: "Save"
+                        onClicked: root.saveExec(relaunchRow.modelData.class, execField.text)
+                      }
+                    }
+
+                    Flow {
+                      visible: relaunchRow.expanded
+                        && relaunchRow.modelData.kind === "both"
+                        && relaunchRow.modelData.startupId
+                      width: parent.width
+                      spacing: Style.space(6)
+                      Chip {
+                        label: "Delete startup config"
+                        onClicked: root.run(["drop-startup", "--id", relaunchRow.modelData.startupId, "--json"])
+                      }
+                    }
                   }
-                  onAccepted: root.saveExec(modelData.class, text)
-                  Keys.onEscapePressed: {
-                    root.execEditClass = ""
-                    focus = false
-                  }
-                }
-                Chip {
-                  label: "Save"
-                  onClicked: root.saveExec(modelData.class, execField.text)
-                }
-              }
-
-              Flow {
-                width: parent.width
-                spacing: Style.space(6)
-                Chip {
-                  label: "Remove from relaunch"
-                  onClicked: root.run(["drop", "--class", modelData.class, "--json"])
-                }
-                Chip {
-                  visible: modelData.kind === "both" && modelData.startupId
-                  label: "Delete startup config"
-                  onClicked: root.run(["drop-startup", "--id", modelData.startupId, "--json"])
                 }
               }
             }
