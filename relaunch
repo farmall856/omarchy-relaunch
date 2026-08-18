@@ -709,6 +709,15 @@ identity_from_pid() {
 # when the callee is pure builtins, and the index calls this six times per
 # .desktop file, so the fork is the cost, not the work.
 nkey() {
+  # LC_ALL=C is load-bearing, not tidiness. ${v,,} is locale-aware Unicode
+  # case folding, while the tr '[:upper:]' '[:lower:]' this replaced folded
+  # ASCII only: under en_US.UTF-8, "Apps" stayed "Apps" before and would
+  # become "apps" now. Key derivation decides which .desktop a class resolves
+  # to, so a changed key can collapse formerly distinct entries in
+  # DESKTOP_EXEC_BY_* and let the first-indexed launcher win. Byte semantics
+  # keep this a pure performance change. `local` restores the previous value
+  # on return, so nothing else in the script sees C.
+  local LC_ALL=C
   local v="${1,,}"
   v="${v//[ _.]/-}"
   # tr -s squeezed runs of the replaced characters into one dash.
@@ -944,19 +953,24 @@ index_desktop_file() {
   # line we do not want. Also stops at the first section after
   # [Desktop Entry], since nothing after it is read.
   while IFS= read -r line || [[ -n "$line" ]]; do
+    # Strip CR before anything else. The old parser did, and matching the
+    # section header first meant "[Desktop Entry]\r" matched nothing, so a
+    # CRLF file contributed no Exec, Name or StartupWMClass -- and a web app
+    # could still claim its desktop id while registering no launcher, masking
+    # a valid lower-priority file.
+    line="${line%$'\r'}"
     case "$line" in
       \[*])
         if [[ "$section" == "[Desktop Entry]" ]]; then
           break
         fi
-        section="${line%$'\r'}"
+        section="$line"
         continue
         ;;
       Exec=* | Name=* | StartupWMClass=* | Hidden=* | hidden=*) ;;
       *) continue ;;
     esac
     [[ "$section" == "[Desktop Entry]" ]] || continue
-    line="${line%$'\r'}"
     key="${line%%=*}"
     val="${line#*=}"
     case "$key" in

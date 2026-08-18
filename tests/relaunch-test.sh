@@ -1519,6 +1519,22 @@ keycheck "-"               "___"
 keycheck "a-b-c-d"         "a..b__c  d"
 keycheck "brave-browser"   "brave-browser"
 keycheck "org-gnome-nautilus" "org.gnome.Nautilus"
+# Non-ASCII: the builtin ${v,,} is locale-aware Unicode folding, while the
+# tr '[:upper:]' '[:lower:]' it replaced folded ASCII only. Under a UTF-8
+# locale those disagree, and a changed key can collapse formerly distinct
+# entries in DESKTOP_EXEC_BY_*. The expected values here are what the old
+# pipeline produced: multibyte uppercase is left alone.
+keycheck "Äpp"             "Äpp"
+keycheck "ÉΣЖ"             "ÉΣЖ"
+keycheck "Ä-Ö-Ü"           "Ä_Ö.Ü"
+keycheck "naïve-app"       "naïve App"
+# ASCII letters still fold, multibyte ones do not -- the old pipeline gives
+# "Ünïcödé-näme", not "Ünïcödé-Näme".
+keycheck "Ünïcödé-näme"    "Ünïcödé-Näme"
+# …and the folding must not depend on the caller's locale.
+( export LC_ALL=en_US.UTF-8
+  keycheck "Äpp" "Äpp"
+  keycheck "foo" "Foo" ) || fail "key derivation must not vary with locale"
 
 # --- boot placement has three outcomes (github issue #15) ---
 # A single immediate sample cannot tell a wrong workspace from a window that
@@ -1605,6 +1621,47 @@ HYPRCTL="$WORKDIR/hyprctl-grow" RELAUNCH_VERIFY_DEADLINE=4 RELAUNCH_VERIFY_INTER
 jq -e '[.launches[] | select(.class == "slowapp") | .outcome] == ["landed"]' "$lb" >/dev/null \
   || fail "a slow-starting app that restores correctly must not be reported misplaced"
 assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/last-boot.log")" "MISPLACED"
+
+# --- CRLF .desktop files parse (PR #16 review) ---
+# The optimized parser matched the section header before stripping the
+# trailing \r, so "[Desktop Entry]\r" matched nothing and the whole file
+# contributed no Exec, Name or StartupWMClass. For a web app that is worse
+# than losing the file: it can still claim its case-sensitive desktop id and
+# then register no launcher, masking a valid lower-priority file.
+CRLF="$WORKDIR/crlf/applications"
+mkdir -p "$CRLF"
+printf '[Desktop Entry]\r\nName=CRLF App\r\nExec=crlf-app %%U\r\nStartupWMClass=crlf-app\r\nType=Application\r\n' \
+  >"$CRLF/crlf-app.desktop"
+printf '[Desktop Entry]\nName=LF App\nExec=lf-app %%U\nStartupWMClass=lf-app\nType=Application\n' \
+  >"$CRLF/lf-app.desktop"
+printf '[Desktop Entry]\r\nName=CRLF Web\r\nExec=omarchy-launch-webapp https://crlf.example.com\r\nType=Application\r\n' \
+  >"$CRLF/crlf-web.desktop"
+export RELAUNCH_DATA_DIRS="$WORKDIR/crlf"
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/crlfcmd"
+mkdir -p "$RELAUNCH_CMDLINE_DIR"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"address":"0x1","class":"crlf-app","initialClass":"crlf-app","pid":4000,"floating":false,"workspace":{"id":1}},
+  {"address":"0x2","class":"lf-app","initialClass":"lf-app","pid":4001,"floating":false,"workspace":{"id":2}},
+  {"address":"0x3","class":"brave-crlf.example.com__-Default","initialClass":"brave-crlf.example.com__-Default","pid":4002,"floating":false,"workspace":{"id":3}}
+]
+EOF
+out="$("$RELAUNCH" save --json)"
+cex() { jq -r --arg c "$1" '[.entries[] | select(.class == $c) | .exec] | .[0] // "(none)"' <<<"$out"; }
+[[ "$(cex crlf-app)" == "gio launch $CRLF/crlf-app.desktop" ]] \
+  || fail "a CRLF .desktop must resolve by StartupWMClass, got $(cex crlf-app)"
+[[ "$(cex lf-app)" == "gio launch $CRLF/lf-app.desktop" ]] \
+  || fail "an LF .desktop must still resolve, got $(cex lf-app)"
+[[ "$(cex 'brave-crlf.example.com__-Default')" == "gio launch $CRLF/crlf-web.desktop" ]] \
+  || fail "a CRLF web-app .desktop must resolve, got $(cex 'brave-crlf.example.com__-Default')"
+# The Name= from a CRLF file must not carry the carriage return into a label.
+jq -e '[.entries[] | select(.class == "crlf-app") | .label] == ["CRLF App"]' <<<"$out" >/dev/null \
+  || fail "a CRLF Name= must not keep its carriage return"
+unset RELAUNCH_DATA_DIRS
+unset RELAUNCH_CMDLINE_DIR
 
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"

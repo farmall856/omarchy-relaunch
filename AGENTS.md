@@ -209,6 +209,18 @@ stable. `Panel.qml` parses that object.
   `_desktop_indexed` and the index arrays, so a cold parent rebuilds the
   whole index once per window and throws it away. That alone was 1.7s of a
   2.2s save.
+- Key derivation folds **ASCII only**, under `LC_ALL=C`. `${v,,}` is
+  locale-aware Unicode folding while the `tr '[:upper:]' '[:lower:]'` it
+  replaced was byte-wise, so under a UTF-8 locale they disagree on any
+  multibyte capital — a changed key can collapse formerly distinct entries in
+  `DESKTOP_EXEC_BY_*` and let the first-indexed launcher win. The suite pins
+  non-ASCII inputs, and pins that the result does not vary with the caller's
+  locale.
+- Strip `\r` before anything else when parsing a `.desktop` file. Matching a
+  section header first means `[Desktop Entry]\r` matches nothing and a CRLF
+  file contributes no `Exec`, `Name` or `StartupWMClass`. For a web app that
+  is worse than losing the file: it still claims its desktop id and registers
+  no launcher, masking a valid lower-priority one.
 - Key derivation and the indexing hot path use bash builtins, not
   `printf | tr | tr`, `basename` or `$(...)` around pure-builtin helpers. A
   command substitution forks even when the callee forks nothing, and these
