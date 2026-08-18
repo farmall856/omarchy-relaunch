@@ -70,11 +70,14 @@ stable. `Panel.qml` parses that object.
   is identified by that command, and relaunched with
   `xdg-terminal-exec --app-id=<cmd> <cmd...>` so Hyprland gets a distinct class.
   Do not special-case individual wrappers like herdr.
-- Launch commands come from the curated `known_exec` table in `relaunch`.
-  Do not parse `/proc/<pid>/cmdline`. Unknown apps fall back to a lowercased
-  class. When adding a well-known app, extend `known_exec`.
-- Recapture refreshes workspace only. Preserve user `exec`, `enabled`, and
-  `float` edits.
+- Launch commands are resolved from the running window. Order: terminal-hosted
+  argv (including a parent `foot -e` / `--app-id`); then the `.desktop` `Exec`
+  matching `StartupWMClass`, then `Name=`, then the desktop-file id; then
+  `/proc/<pid>/cmdline`; then `known_exec`; then a lowercased class.
+  Recapture may replace that last-resort fallback when a real launcher is
+  found; a user-edited `exec` is preserved.
+- Recapture refreshes workspace only (and heals a fallback exec). Preserve
+  user `exec`, `enabled`, and `float` edits.
 - Skip special/negative workspaces (`Workspace.ID < 1`) and empty classes.
 - Regex-escape class names in generated `o.window` lines, then Lua-escape
   backslashes so dotted classes (`org.omarchy.agent`) are valid Lua strings.

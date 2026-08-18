@@ -131,9 +131,10 @@ use the panel action or `relaunch uninstall --yes` for a full teardown.
 - One instance per app: an `o.window` class match sends every window of that
   class to its workspace, which is correct for a one-pinned-instance-per-app
   setup.
-- Launch commands come from a small curated table because `/proc/<pid>/cmdline`
-  is unreliable for Electron/flatpak/wrapped apps. Unknown apps fall back to a
-  lowercased class; check `exec` in the config if one doesn't relaunch.
+- Launch commands come from the app's `.desktop` `Exec` (StartupWMClass,
+  then Name, then desktop-file id), then the process command line. A small
+  `known_exec` table is only the last fallback when those do not exist
+  (some TUI hosts). An `exec` you set in `config.json` always wins.
 - A terminal hosting another command (`foot -e cmd`, `omarchy-launch-terminal cmd`)
   is identified by that command and relaunched with
   `xdg-terminal-exec --app-id=<cmd> <cmd...>` so Hyprland gets a distinct class.

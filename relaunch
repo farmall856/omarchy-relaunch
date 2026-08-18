@@ -60,7 +60,8 @@ need_jq() {
   command -v jq >/dev/null 2>&1 || die "jq not found (required; ships with Omarchy)"
 }
 
-# Shared jq helpers. Keep known_exec in sync with AGENTS.md.
+# Shared jq helpers. known_exec is a last-resort fallback when no .desktop
+# file and no process cmdline can name a launcher (e.g. some TUI hosts).
 jq_lib='
 def known_exec:
   {
@@ -102,50 +103,8 @@ def known_exec:
     "libreoffice-startcenter": "libreoffice"
   };
 
-def exec_class:
-  {
-    "brave": "brave-browser",
-    "google-chrome-stable": "google-chrome",
-    "chromium": "chromium",
-    "firefox": "firefox",
-    "zen-browser": "zen",
-    "alacritty": "Alacritty",
-    "kitty": "kitty",
-    "wezterm": "org.wezfurlong.wezterm",
-    "foot": "foot",
-    "code": "code",
-    "codium": "VSCodium",
-    "telegram-desktop": "org.telegram.desktop",
-    "slack": "Slack",
-    "discord": "discord",
-    "vesktop": "vesktop",
-    "obsidian": "obsidian",
-    "thunderbird": "thunderbird",
-    "nautilus": "org.gnome.Nautilus",
-    "thunar": "thunar",
-    "mpv": "mpv",
-    "spotify": "Spotify",
-    "herdr": "herdr",
-    "omarchy-launch-terminal-herdr": "herdr",
-    "proton-mail": "Proton Mail",
-    "proton-pass": "Proton Pass",
-    "signal-desktop": "signal",
-    "signal": "signal",
-    "omarchy-launch-terminal": "foot",
-    "xdg-terminal-exec": "foot",
-    "localc": "libreoffice-calc",
-    "lowriter": "libreoffice-writer",
-    "loimpress": "libreoffice-impress",
-    "lodraw": "libreoffice-draw",
-    "lobase": "libreoffice-base",
-    "lomath": "libreoffice-math"
-  };
-
 def guess_exec:
   known_exec[.] // ascii_downcase;
-
-def class_for_exec:
-  exec_class[.] // .;
 
 def match_class:
   if ((.initialClass // "") != "") then .initialClass else (.class // "") end;
@@ -216,12 +175,11 @@ def capture($clients):
               .by[$cl.match].workspace = $cl.workspace.id
               | .updated += 1
             else . end
-            | (known_exec[$cl.match] // empty) as $known
-            | if ($known != "")
-                and (.by[$cl.match].exec == ($cl.match | ascii_downcase))
-                and ($known != ($cl.match | ascii_downcase))
+            | if (.by[$cl.match].exec == ($cl.match | ascii_downcase))
+                and (($cl.relaunchExec // "") != "")
+                and ($cl.relaunchExec != .by[$cl.match].exec)
               then
-                .by[$cl.match].exec = $known
+                .by[$cl.match].exec = $cl.relaunchExec
                 | .updated += 1
               else . end
           else
@@ -415,7 +373,7 @@ identity_from_argv() {
   local app_id="" terminal=""
   local -a inner=()
 
-  while ((i < n)) && { is_wrapper_cmd "${argv[i]}" || [[ "${argv[i]}" == [A-Za-z_]*[=]* && "${argv[i]}" != --* ]]; }; do
+  while ((i < n)) && { is_wrapper_cmd "${argv[i]}" || [[ "${argv[i]}" == -- ]] || [[ "${argv[i]}" == [A-Za-z_]*[=]* && "${argv[i]}" != --* ]]; }; do
     ((i++)) || true
   done
 
@@ -466,23 +424,185 @@ identity_from_argv() {
   fi
 }
 
-identity_from_pid() {
+read_pid_argv() {
   local pid="$1" file arg
-  local -a argv=()
-  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { jq -n '{wrapped: false}'; return; }
+  local -n _argv="$2"
+  _argv=()
   if [[ -n "${RELAUNCH_CMDLINE_DIR:-}" ]]; then
     file="${RELAUNCH_CMDLINE_DIR}/${pid}"
   else
     file="/proc/${pid}/cmdline"
   fi
-  if [[ ! -r "$file" ]]; then
-    jq -n '{wrapped: false}'
+  [[ -r "$file" ]] || return 1
+  while IFS= read -r -d '' arg; do
+    _argv+=("$arg")
+  done <"$file"
+  ((${#_argv[@]} > 0))
+}
+
+ppid_of() {
+  local pid="$1" file
+  if [[ -n "${RELAUNCH_CMDLINE_DIR:-}" ]]; then
+    file="${RELAUNCH_CMDLINE_DIR}/${pid}.ppid"
+    if [[ -r "$file" ]]; then
+      tr -d '[:space:]' <"$file"
+      return
+    fi
+    printf '0\n'
     return
   fi
-  while IFS= read -r -d '' arg; do
-    argv+=("$arg")
+  awk '/^PPid:/{print $2; exit}' "/proc/${pid}/status" 2>/dev/null || printf '0\n'
+}
+
+identity_from_pid() {
+  local pid="$1" hops=0 next
+  local -a argv=()
+  local ident
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { jq -n '{wrapped: false}'; return; }
+  while [[ "$pid" =~ ^[1-9][0-9]*$ ]] && ((hops < 8)); do
+    if read_pid_argv "$pid" argv; then
+      ident="$(identity_from_argv "${argv[@]}")"
+      if jq -e '.wrapped == true' >/dev/null <<<"$ident"; then
+        printf '%s\n' "$ident"
+        return
+      fi
+    fi
+    next="$(ppid_of "$pid")"
+    [[ "$next" == "$pid" || "$next" == 0 ]] && break
+    pid="$next"
+    hops=$((hops + 1))
+  done
+  jq -n '{wrapped: false}'
+}
+
+normalize_desktop_key() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -s ' _.' '-'
+}
+
+clean_desktop_exec() {
+  local e="$1"
+  # Desktop Entry spec: %% is a literal percent; %f %F %u %U %i %c %k are codes.
+  e="${e//%%/$'\x01'}"
+  e="${e//%[fFuUdDnNickvm]/}"
+  e="${e//$'\x01'/%}"
+  e="$(printf '%s' "$e" | sed 's/[[:space:]]\{1,\}/ /g; s/^[[:space:]]*//; s/[[:space:]]*$//; s/ --$//')"
+  printf '%s\n' "$e"
+}
+
+xdg_application_dirs() {
+  local d xdg
+  local -a dirs=()
+  if [[ -n "${RELAUNCH_DATA_DIRS:-}" ]]; then
+    IFS=: read -r -a dirs <<<"$RELAUNCH_DATA_DIRS"
+    for d in "${dirs[@]}"; do
+      [[ -d "$d/applications" ]] && printf '%s\n' "$d/applications"
+      [[ -d "$d" && "${d##*/}" == applications ]] && printf '%s\n' "$d"
+    done
+    return
+  fi
+  printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  xdg="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  IFS=: read -r -a dirs <<<"$xdg"
+  for d in "${dirs[@]}"; do
+    [[ -d "$d/applications" ]] && printf '%s\n' "$d/applications"
+  done
+}
+
+declare -A DESKTOP_EXEC_BY_CLASS=()
+declare -A DESKTOP_EXEC_BY_ID=()
+declare -A DESKTOP_EXEC_BY_NAME=()
+declare -A DESKTOP_CLASS_BY_EXEC=()
+_desktop_indexed=0
+
+index_desktop_file() {
+  local file="$1"
+  local section="" exec="" wmclass="" name="" hidden=false
+  local line key val id
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    if [[ "$line" == \[*] ]]; then
+      section="$line"
+      continue
+    fi
+    [[ "$section" == "[Desktop Entry]" ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    case "$key" in
+      Hidden|hidden) [[ "${val,,}" == true ]] && hidden=true ;;
+      Exec) [[ -z "$exec" ]] && exec="$val" ;;
+      StartupWMClass) wmclass="$val" ;;
+      Name) [[ -z "$name" ]] && name="$val" ;;
+    esac
   done <"$file"
-  identity_from_argv "${argv[@]}"
+  $hidden && return 0
+  [[ -n "$exec" ]] || return 0
+  exec="$(clean_desktop_exec "$exec")"
+  [[ -n "$exec" ]] || return 0
+  id="$(basename "$file" .desktop)"
+  [[ -n "$wmclass" ]] && DESKTOP_EXEC_BY_CLASS["$(normalize_desktop_key "$wmclass")"]="$exec"
+  DESKTOP_EXEC_BY_ID["$(normalize_desktop_key "$id")"]="$exec"
+  [[ -n "$name" ]] && DESKTOP_EXEC_BY_NAME["$(normalize_desktop_key "$name")"]="$exec"
+  DESKTOP_CLASS_BY_EXEC["$(normalize_desktop_key "$exec")"]="${wmclass:-$id}"
+  DESKTOP_CLASS_BY_EXEC["$(normalize_desktop_key "${exec%% *}")"]="${wmclass:-$id}"
+}
+
+ensure_desktop_index() {
+  local dir f
+  ((_desktop_indexed)) && return 0
+  _desktop_indexed=1
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r -d '' f; do
+      index_desktop_file "$f"
+    done < <(find "$dir" -maxdepth 2 -type f -name '*.desktop' -print0 2>/dev/null)
+  done < <(xdg_application_dirs)
+}
+
+desktop_exec_for_class() {
+  local k
+  ensure_desktop_index
+  k="$(normalize_desktop_key "$1")"
+  # Spec order: StartupWMClass, then Name, then desktop-file id.
+  printf '%s\n' "${DESKTOP_EXEC_BY_CLASS[$k]:-${DESKTOP_EXEC_BY_NAME[$k]:-${DESKTOP_EXEC_BY_ID[$k]:-}}}"
+}
+
+desktop_class_for_exec() {
+  local k
+  ensure_desktop_index
+  k="$(normalize_desktop_key "$1")"
+  printf '%s\n' "${DESKTOP_CLASS_BY_EXEC[$k]:-${DESKTOP_CLASS_BY_EXEC[$(normalize_desktop_key "${1%% *}")]:-}}"
+}
+
+is_helper_argv() {
+  local a
+  [[ "${1##*/}" == *crashpad* || "${1##*/}" == oosplash ]] && return 0
+  for a in "$@"; do
+    case "$a" in
+      --type=renderer|--type=zygote|--type=gpu-process|--type=utility|--type=plugin)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+cmdline_exec_for_pid() {
+  local pid="$1" hops=0 next
+  local -a argv=()
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  while [[ "$pid" =~ ^[1-9][0-9]*$ ]] && ((hops < 8)); do
+    if read_pid_argv "$pid" argv && ((${#argv[@]} > 0)); then
+      if ! is_helper_argv "${argv[@]}"; then
+        printf '%s\n' "${argv[*]}"
+        return 0
+      fi
+    fi
+    next="$(ppid_of "$pid")"
+    [[ "$next" == "$pid" || "$next" == 0 ]] && break
+    pid="$next"
+    hops=$((hops + 1))
+  done
+  return 1
 }
 
 class_for_startup_exec() {
@@ -495,8 +615,8 @@ class_for_startup_exec() {
     printf '%s\n' "$class"
     return
   fi
-  mapped="$(jq -r --arg e "$exec" "$jq_lib"' $e | class_for_exec' <<<"{}")"
-  if [[ -n "$mapped" && "$mapped" != "$exec" ]]; then
+  mapped="$(desktop_class_for_exec "$exec")"
+  if [[ -n "$mapped" ]]; then
     printf '%s\n' "$mapped"
     return
   fi
@@ -506,7 +626,7 @@ class_for_startup_exec() {
     base="${token##*/}"
     is_wrapper_cmd "$base" && continue
     [[ -z "$first" ]] && first="$base"
-    mapped="$(jq -r --arg e "$base" "$jq_lib"' $e | class_for_exec' <<<"{}")"
+    mapped="$(desktop_class_for_exec "$base")"
     if [[ -n "$mapped" && "$mapped" != "$base" ]]; then
       printf '%s\n' "$mapped"
       return
@@ -516,15 +636,30 @@ class_for_startup_exec() {
 }
 
 annotate_clients() {
-  local clients="$1" pid ident patches
+  local clients="$1" pid class ident exec patches
   patches='[]'
-  while IFS= read -r pid; do
+  while IFS=$'\t' read -r pid class; do
     [[ -z "$pid" || "$pid" == null ]] && continue
     ident="$(identity_from_pid "$pid")"
-    jq -e '.wrapped == true' >/dev/null <<<"$ident" || continue
-    patches="$(jq --argjson pid "$pid" --argjson ident "$ident" \
-      '. + [{pid: $pid, class: $ident.class, exec: $ident.exec}]' <<<"$patches")"
-  done < <(jq -r '.[].pid // empty' <<<"$clients")
+    if jq -e '.wrapped == true' >/dev/null <<<"$ident"; then
+      patches="$(jq --argjson pid "$pid" --argjson ident "$ident" \
+        '. + [{pid: $pid, wrapped: true, class: $ident.class, exec: $ident.exec}]' <<<"$patches")"
+      continue
+    fi
+    exec="$(desktop_exec_for_class "$class")"
+    [[ -n "$exec" ]] || exec="$(cmdline_exec_for_pid "$pid" || true)"
+    if [[ -z "$exec" ]]; then
+      exec="$(jq -r --arg c "$class" "$jq_lib" '$c | guess_exec')"
+    fi
+    patches="$(jq --argjson pid "$pid" --arg class "$class" --arg exec "$exec" \
+      '. + [{pid: $pid, wrapped: false, class: $class, exec: $exec}]' <<<"$patches")"
+  done < <(jq -r '
+    .[] | select(.pid != null)
+    | [
+        (.pid | tostring),
+        (if (.initialClass // "") != "" then .initialClass else (.class // "") end)
+      ] | @tsv
+  ' <<<"$clients")
   if [[ "$patches" == "[]" ]]; then
     printf '%s\n' "$clients"
     return
@@ -533,11 +668,14 @@ annotate_clients() {
     ($patches | map({key: (.pid | tostring), value: .}) | from_entries) as $by
     | map(
         (($by[(.pid | tostring)]) // null) as $p
-        | if $p != null then
+        | if $p == null then .
+          elif $p.wrapped == true then
             .class = $p.class
             | .initialClass = $p.class
             | .relaunchExec = $p.exec
-          else . end
+          else
+            .relaunchExec = $p.exec
+          end
       )
   ' <<<"$clients"
 }
@@ -740,7 +878,9 @@ write_last_boot() {
 
 verify_launches() {
   local launches="$1" clients
-  sleep 2
+  if [[ "${RELAUNCH_VERIFY_SLEEP:-2}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !(${RELAUNCH_VERIFY_SLEEP:-2} > 0)}"; then
+    sleep "${RELAUNCH_VERIFY_SLEEP:-2}"
+  fi
   if ! clients="$(clients_json)"; then
     printf '%s\n' "$launches"
     return
@@ -866,6 +1006,7 @@ cmd_boot() {
   first_launch=true
   while IFS=$'\t' read -r class ws exec; do
     [[ -z "$exec" ]] && continue
+    is_relaunch_exec "$exec" && continue
     if [[ "$stagger" =~ ^[1-9][0-9]*$ ]]; then
       if $first_launch; then
         first_launch=false

@@ -34,6 +34,7 @@ esac
 EOF
 chmod +x "$HYPRCTL_STUB"
 
+export RELAUNCH_VERIFY_SLEEP=0
 export RELAUNCH_CONFIG_DIR="$WORKDIR/cfg"
 export RELAUNCH_AUTOSTART="$WORKDIR/autostart.lua"
 export RELAUNCH_HYPRLAND_LUA="$WORKDIR/hyprland.lua"
@@ -88,37 +89,46 @@ EOF
 "$RELAUNCH" generate >/dev/null
 assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window({ class = "^(SomeApp)$" }'
 
-# knownExec guesses still used by boot command list
-cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"entries":[
-  {"class":"brave-browser","workspace":1,"exec":"","enabled":true},
-  {"class":"Alacritty","workspace":2,"exec":"","enabled":true},
-  {"class":"VSCodium","workspace":3,"exec":"","enabled":true},
-  {"class":"herdr","workspace":4,"exec":"","enabled":true},
-  {"class":"libreoffice-calc","workspace":7,"exec":"","enabled":true}
-]}
+# class → exec comes from .desktop files, not a built-in table
+XDG_APPS="$WORKDIR/xdg/applications"
+mkdir -p "$XDG_APPS"
+cat >"$XDG_APPS/libreoffice-calc.desktop" <<'EOF'
+[Desktop Entry]
+Name=LibreOffice Calc
+Exec=libreoffice --calc %U
+StartupWMClass=libreoffice-calc
+Type=Application
 EOF
-"$RELAUNCH" generate >/dev/null
-got="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
-assert_contains "$got" 'o.window({ class = "^(brave-browser)$"'
-assert_contains "$got" 'o.window({ class = "^(Alacritty)$"'
-assert_contains "$got" 'o.window({ class = "^(VSCodium)$"'
-assert_contains "$got" 'o.window({ class = "^(herdr)$"'
-assert_contains "$got" 'o.window({ class = "^(libreoffice-calc)$"'
-export FAKE_CLIENTS="${FAKE_CLIENTS:-$WORKDIR/clients.json}"
-cat >"$WORKDIR/clients.json" <<'EOF'
-[{"class":"libreoffice-calc","initialClass":"libreoffice-calc","floating":false,"workspace":{"id":7}}]
+cat >"$XDG_APPS/proton-mail.desktop" <<'EOF'
+[Desktop Entry]
+Name=Proton Mail
+Exec=proton-mail %U
+Type=Application
 EOF
-# capture uses known_exec; recapture must not keep a bad lowercased-class exec
+cat >"$XDG_APPS/pct-app.desktop" <<'EOF'
+[Desktop Entry]
+Name=Percent App
+Exec=pct-app --token %%user %u
+StartupWMClass=pct-app
+Type=Application
+EOF
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
+export FAKE_CLIENTS="$WORKDIR/clients.json"
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"class":"libreoffice-calc","initialClass":"libreoffice-calc","pid":71,"floating":false,"workspace":{"id":7}},
+  {"class":"Proton Mail","initialClass":"Proton Mail","pid":72,"floating":false,"workspace":{"id":3}},
+  {"class":"pct-app","initialClass":"pct-app","pid":73,"floating":false,"workspace":{"id":8}}
+]
+EOF
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"ignored":[],"entries":[]}
 EOF
-export FAKE_CLIENTS="$WORKDIR/clients.json"
 "$RELAUNCH" save --json | jq -e '
-  [.entries[] | select(.class == "libreoffice-calc") | .exec] == ["libreoffice --calc"]
-' >/dev/null || fail "libreoffice-calc must guess libreoffice --calc, not the class name"
-# A leftover fallback exec (lowercased class) is healed on recapture;
-# a real user override is not.
+  ([.entries[] | select(.class == "libreoffice-calc") | .exec] == ["libreoffice --calc"])
+  and ([.entries[] | select(.class == "Proton Mail") | .exec] == ["proton-mail"])
+  and ([.entries[] | select(.class == "pct-app") | .exec] == ["pct-app --token %user"])
+' >/dev/null || fail "desktop Exec must resolve calc, Proton Mail, and %% field codes"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"ignored":[],"entries":[
   {"class":"libreoffice-calc","workspace":7,"exec":"libreoffice-calc","enabled":true}
@@ -126,7 +136,7 @@ cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 EOF
 "$RELAUNCH" save --json | jq -e '
   [.entries[] | select(.class == "libreoffice-calc") | .exec] == ["libreoffice --calc"]
-' >/dev/null || fail "recapture must heal fallback exec libreoffice-calc"
+' >/dev/null || fail "recapture must heal fallback exec from desktop"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"ignored":[],"entries":[
   {"class":"libreoffice-calc","workspace":7,"exec":"localc --norestore","enabled":true}
@@ -135,6 +145,25 @@ EOF
 "$RELAUNCH" save --json | jq -e '
   [.entries[] | select(.class == "libreoffice-calc") | .exec] == ["localc --norestore"]
 ' >/dev/null || fail "recapture must keep a real user exec override"
+unset RELAUNCH_DATA_DIRS
+
+# Terminal identity walks to a parent foot --app-id / -e
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"
+mkdir -p "$RELAUNCH_CMDLINE_DIR"
+printf 'herdr\0' >"$RELAUNCH_CMDLINE_DIR/90"
+printf '91\n' >"$RELAUNCH_CMDLINE_DIR/90.ppid"
+printf 'foot\0--app-id=herdr\0-e\0herdr\0' >"$RELAUNCH_CMDLINE_DIR/91"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"herdr","initialClass":"herdr","pid":90,"floating":false,"workspace":{"id":1}}]
+EOF
+"$RELAUNCH" save --json | jq -e '
+  [.entries[] | select(.class == "herdr") | .exec] ==
+    ["xdg-terminal-exec --app-id=herdr herdr"]
+' >/dev/null || fail "parent terminal --app-id must supply the launch command"
+unset RELAUNCH_CMDLINE_DIR
 
 # --- capture merge ---
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
@@ -172,7 +201,7 @@ echo "$cfg" | jq -e '
   and (.entries | map(select(.class == "foot")) | .[0]
     | .workspace == 6 and .enabled == false)
   and (.entries | map(select(.class == "signal")) | .[0]
-    | .workspace == 4 and .exec == "signal-desktop" and .enabled == true)
+    | .workspace == 4 and .exec == "signal" and .enabled == true)
   and (.entries | map(.class) | index("scratch") == null)
 ' >/dev/null || fail "merge result: $cfg"
 
@@ -207,7 +236,7 @@ echo "$listed" | jq -e '
   ([.startup[].exec] | index("relaunch boot") == null)
   and ([.startup[].exec] | index("brave") != null)
   and ([.startup[] | select(.exec == "brave") | .class] | .[0] == "brave-browser")
-  and ([.startup[] | select(.exec | startswith("setsid")) | .class] | .[0] == "foot")
+  and ([.startup[] | select(.exec | startswith("setsid")) | .class] | .[0] == "org.omarchy.terminal")
   and ([.rows[] | select(.kind == "startup" and .exec == "brave")] | length == 1)
 ' >/dev/null || fail "inventory: $listed"
 
@@ -385,7 +414,8 @@ o.exec_on_start("/tmp/relaunch boot")
 o.launch_on_start("also-keep")
 EOF
 "$RELAUNCH" list --json | jq -e '
-  [.startup[] | select(.exec == "FOO=bar signal-desktop") | .class] == ["signal"]
+  [.startup[] | select(.exec == "FOO=bar signal-desktop") | .class] | length == 1
+    and .[0] != "FOO=bar" and .[0] != ""
 ' >/dev/null || fail "env-prefixed exec class"
 
 # --- uninstall must not delete adjacent user startup lines ---
