@@ -61,7 +61,6 @@ relaunch boot-skip | boot-disable | boot-enable
 relaunch last-boot [--json] [--open]
 relaunch snapshot                      # layout now, for shutdown/boot diffs
 relaunch last-session [--json] [--diff]
-relaunch snapshot-hook --enable | --disable
 relaunch uninstall --yes
 ```
 
