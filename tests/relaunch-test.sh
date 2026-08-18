@@ -845,6 +845,64 @@ jq -e '[.entries[] | select(.class == "brave-browser") | .label] == ["Brave Web 
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
+# --- pre-shutdown session snapshot (diagnostic; opt-in; changes nothing) ---
+export FAKE_MONITORS="$WORKDIR/monitors.json"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"brave-browser","workspace":2,"exec":"brave","execSource":"guess","label":"Brave","enabled":true}
+]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"class":"brave-browser","initialClass":"brave-browser","pid":800,"floating":false,"monitor":0,"workspace":{"id":2},"title":"Home - Brave"},
+  {"class":"foot","initialClass":"foot","pid":801,"floating":true,"monitor":1,"workspace":{"id":6},"title":"~"},
+  {"class":"foot","initialClass":"foot","pid":802,"floating":false,"monitor":1,"workspace":{"id":8},"title":"logs"}
+]
+EOF
+"$RELAUNCH" snapshot >/dev/null || fail "snapshot must succeed"
+SNAP="$RELAUNCH_CONFIG_DIR/last-session.json"
+[[ -f "$SNAP" ]] || fail "snapshot must write last-session.json"
+jq -e '.windows | length == 3' "$SNAP" >/dev/null \
+  || fail "snapshot records every window, not one per class"
+jq -e '
+  [.windows[] | select(.pid == 800)] | .[0]
+  | .class == "brave-browser" and .label == "Brave" and .workspace == 2
+    and .floating == false and .monitor == 0 and .monitorName == "eDP-1"
+    and .title == "Home - Brave"
+' "$SNAP" >/dev/null || fail "snapshot must record class, label, workspace, float, monitor, pid and title"
+jq -e '[.windows[] | select(.class == "foot") | .workspace] | sort == [6, 8]' "$SNAP" >/dev/null \
+  || fail "two windows of one class must both appear in the snapshot"
+# A class with no stored label falls back to its class, not to an empty string.
+jq -e '[.windows[] | select(.class == "foot") | .label] | unique == ["foot"]' "$SNAP" >/dev/null \
+  || fail "an unlabelled class must fall back to the class name"
+jq -e '.capturedAt | test("^[0-9]{4}-")' "$SNAP" >/dev/null || fail "snapshot must be timestamped"
+
+# The snapshot is diagnostic: it must not touch entries or the pins.
+jq -e '.entries | length == 1' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null \
+  || fail "snapshot must not rewrite entries"
+[[ -f "$RELAUNCH_CONFIG_DIR/last-session.json" ]] || fail "snapshot path"
+
+# Diff: a class that did not come back is reported, not silently dropped.
+cat >"$RELAUNCH_CONFIG_DIR/last-boot.json" <<'EOF'
+{"startedAt":"2026-01-01T00:00:00-00:00","outcome":"launched","launches":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"class":"brave-browser","initialClass":"brave-browser","pid":900,"floating":false,"monitor":0,"workspace":{"id":2},"title":"Home - Brave"},
+  {"class":"foot","initialClass":"foot","pid":901,"floating":false,"monitor":1,"workspace":{"id":6},"title":"~"}
+]
+EOF
+report="$("$RELAUNCH" last-session --diff --json)"
+echo "$report" | jq -e '
+  [.classes[] | select(.class == "foot") | {want, live, missing}] == [{want: 2, live: 1, missing: 1}]
+' >/dev/null || fail "diff must report a window that did not come back: $report"
+echo "$report" | jq -e '
+  [.classes[] | select(.class == "brave-browser") | .missing] == [0]
+' >/dev/null || fail "diff must not report a class that came back intact: $report"
+"$RELAUNCH" last-session --diff | grep -q "MISSING" \
+  || fail "human diff must show a MISSING row"
+unset FAKE_MONITORS
+
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"
 printf '' >"$WORKDIR/globdir/not-the-class"

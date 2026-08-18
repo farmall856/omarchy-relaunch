@@ -29,6 +29,8 @@ Runtime files (user-owned, never commit):
 - `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
 - `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags (skip is also in config.json so Save cannot drop it)
 - `~/.config/omarchy-relaunch/last-boot.log` / `last-boot.json` — last `relaunch boot` diagnostic
+- `~/.config/omarchy-relaunch/last-session.json` — pre-shutdown window
+  snapshot, written only when the opt-in hook is enabled
 - `~/.config/omarchy/plugins/io.github.laytonf.relaunch/` — installed QML copy
 
 Do not generate `relaunch.conf` / `windowrulev2`. Pins are Lua only.
@@ -57,6 +59,9 @@ relaunch ignore --id ID
 relaunch unignore --id ID
 relaunch boot-skip | boot-disable | boot-enable
 relaunch last-boot [--json] [--open]
+relaunch snapshot                      # layout now, for shutdown/boot diffs
+relaunch last-session [--json] [--diff]
+relaunch snapshot-hook --enable | --disable
 relaunch uninstall --yes
 ```
 
@@ -219,6 +224,30 @@ https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/new?template=
 
 `.gitignore` already excludes generated `config.json` (and a leftover
 `relaunch.conf` name from older installs). Keep it that way.
+
+## Session snapshot (opt-in, diagnostic)
+
+`relaunch snapshot` writes `last-session.json`: every window with class,
+label, workspace, floating, monitor, pid and title. Nothing in `save`,
+`generate` or `boot` reads it — it exists so `relaunch last-session --diff`
+can show what did not come back, or came back wrong.
+
+The trigger is a user unit installed by `relaunch snapshot-hook --enable`
+and removed by `--disable`. It is `PartOf=`/`After=graphical-session.target`,
+and stop ordering is the reverse of start ordering, so its `ExecStop` runs
+*before* the target goes down. `wayland-wm@.service` declares
+`Before=graphical-session.target`, so the compositor stops *after* the target
+— and therefore after this `ExecStop`, with `hyprctl` still answering.
+
+Verified on this machine: the systemd user environment carries
+`HYPRLAND_INSTANCE_SIGNATURE` and `WAYLAND_DISPLAY`, and an `ExecStop` of such
+a unit read 9 windows through `hyprctl`. **Not** verified: a real
+logout/reboot. If the compositor exits first — Hyprland's own exit dispatcher
+rather than a systemd-initiated teardown — `wayland-wm@.service` fires
+`OnSuccess=wayland-session-shutdown.target` with Hyprland already gone, and
+the snapshot would be empty. One reboot with the hook enabled settles it. A
+systemd user *timer* is the fallback if ordering turns out unreliable; a timer
+plus a oneshot is not a daemon, and staleness is bounded by the interval.
 
 ## Known limitations
 
