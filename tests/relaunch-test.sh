@@ -956,6 +956,217 @@ mapfile -t got < <(PATH="$WORKDIR/argvstub:$PATH" bash -c "$saved" 2>/dev/null)
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
+# --- Omarchy web-app windows resolve to their launchers (github issue #11) ---
+# Chromium encodes an --app=URL class as brave-<host>_<path with / as _>-Default.
+# No StartupWMClass, desktop-file id or Name can match that, so resolution used
+# to fall through to the generic browser cmdline and boot started plain Brave.
+WA_USER="$WORKDIR/wa-user/applications"
+WA_SYS="$WORKDIR/wa-sys/applications"
+mkdir -p "$WA_USER" "$WA_SYS"
+cat >"$WA_USER/Google Maps.desktop" <<'EOF'
+[Desktop Entry]
+Name=Google Maps
+Exec=omarchy-launch-webapp https://maps.google.com
+Type=Application
+EOF
+cat >"$WA_USER/Deep App.desktop" <<'EOF'
+[Desktop Entry]
+Name=Deep App
+Exec=omarchy-launch-webapp https://example.com/foo/bar
+Type=Application
+EOF
+cat >"$WA_USER/Query App.desktop" <<'EOF'
+[Desktop Entry]
+Name=Query App
+Exec=omarchy-launch-webapp https://queried.example.com/?view=a&x=2
+Type=Application
+EOF
+cat >"$WA_USER/Hyphen App.desktop" <<'EOF'
+[Desktop Entry]
+Name=Hyphen App
+Exec=omarchy-launch-webapp https://my-site.com/a-b
+Type=Application
+EOF
+cat >"$WA_SYS/brave-browser.desktop" <<'EOF'
+[Desktop Entry]
+Name=Brave Web Browser
+Exec=brave %U
+StartupWMClass=brave-browser
+Type=Application
+EOF
+export RELAUNCH_DATA_DIRS="$WORKDIR/wa-user:$WORKDIR/wa-sys"
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/wacmd"
+mkdir -p "$RELAUNCH_CMDLINE_DIR"
+# Every web-app window reports the MAIN browser argv: Chromium merges an
+# --app= request into its existing process, so cmdline can never recover it.
+BRAVE_ARGV='/opt/brave-bin/brave\0--ozone-platform=wayland\0'
+printf "$BRAVE_ARGV" >"$RELAUNCH_CMDLINE_DIR/1000"
+printf "$BRAVE_ARGV" >"$RELAUNCH_CMDLINE_DIR/1001"
+printf "$BRAVE_ARGV" >"$RELAUNCH_CMDLINE_DIR/1002"
+printf "$BRAVE_ARGV" >"$RELAUNCH_CMDLINE_DIR/1003"
+printf "$BRAVE_ARGV" >"$RELAUNCH_CMDLINE_DIR/1004"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"class":"brave-maps.google.com__-Default","initialClass":"brave-maps.google.com__-Default","pid":1000,"floating":false,"workspace":{"id":8}},
+  {"class":"brave-example.com__foo_bar-Default","initialClass":"brave-example.com__foo_bar-Default","pid":1001,"floating":false,"workspace":{"id":9}},
+  {"class":"brave-queried.example.com__-Default","initialClass":"brave-queried.example.com__-Default","pid":1002,"floating":false,"workspace":{"id":10}},
+  {"class":"brave-my-site.com__a-b-Default","initialClass":"brave-my-site.com__a-b-Default","pid":1003,"floating":false,"workspace":{"id":6}},
+  {"class":"brave-browser","initialClass":"brave-browser","pid":1004,"floating":false,"workspace":{"id":2}}
+]
+EOF
+out="$("$RELAUNCH" save --json)"
+wex() { jq -r --arg c "$1" '[.entries[] | select(.class == $c) | .exec] | .[0] // "(none)"' <<<"$out"; }
+wsrc() { jq -r --arg c "$1" '[.entries[] | select(.class == $c) | .execSource] | .[0] // "(none)"' <<<"$out"; }
+
+# Root URL: the Maps case from the issue.
+[[ "$(wex 'brave-maps.google.com__-Default')" == "gio launch $WA_USER/Google\ Maps.desktop" ]] \
+  || fail "root-URL web app must resolve to its desktop file, got $(wex 'brave-maps.google.com__-Default')"
+[[ "$(wsrc 'brave-maps.google.com__-Default')" == "desktop-file" ]] \
+  || fail "web-app resolution must record execSource desktop-file, got $(wsrc 'brave-maps.google.com__-Default')"
+# A meaningful path.
+[[ "$(wex 'brave-example.com__foo_bar-Default')" == "gio launch $WA_USER/Deep\ App.desktop" ]] \
+  || fail "path URL must resolve, got $(wex 'brave-example.com__foo_bar-Default')"
+# Query strings are discarded by Chromium, so identity must ignore them.
+[[ "$(wex 'brave-queried.example.com__-Default')" == "gio launch $WA_USER/Query\ App.desktop" ]] \
+  || fail "query string must be excluded from identity, got $(wex 'brave-queried.example.com__-Default')"
+# Hosts and paths containing hyphens must survive anchored parsing.
+[[ "$(wex 'brave-my-site.com__a-b-Default')" == "gio launch $WA_USER/Hyphen\ App.desktop" ]] \
+  || fail "hyphenated host/path must resolve, got $(wex 'brave-my-site.com__a-b-Default')"
+# Ordinary browser windows are untouched by the new tier.
+[[ "$(wex 'brave-browser')" == "gio launch $WA_SYS/brave-browser.desktop" ]] \
+  || fail "a normal browser window must still resolve by StartupWMClass, got $(wex 'brave-browser')"
+
+# A previously saved cmdline entry heals to desktop-file on recapture.
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"brave-maps.google.com__-Default","workspace":8,"exec":"/opt/brave-bin/brave --ozone-platform=wayland","execSource":"cmdline","enabled":true}
+]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"brave-maps.google.com__-Default","initialClass":"brave-maps.google.com__-Default","pid":1000,"floating":false,"workspace":{"id":8}}]
+EOF
+"$RELAUNCH" save --json | jq -e --arg e "gio launch $WA_USER/Google\\ Maps.desktop" '
+  ([.entries[] | select(.class == "brave-maps.google.com__-Default") | .exec] == [$e])
+  and ([.entries[] | select(.class == "brave-maps.google.com__-Default") | .execSource] == ["desktop-file"])
+' >/dev/null || fail "a stale cmdline web-app entry must heal to desktop-file"
+# …and the label now comes from the exact file.
+jq -e '[.entries[] | select(.class == "brave-maps.google.com__-Default") | .label] == ["Google Maps"]' \
+  "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "healed web app must label from Name="
+
+# list must not resolve: deleting the index cannot change what it reports.
+"$RELAUNCH" list --json | jq -e '
+  [.rows[] | select(.class == "brave-maps.google.com__-Default") | .execSource] == ["desktop-file"]
+' >/dev/null || fail "list must report the stored source without resolving"
+
+# --- two windows sharing one pid resolve independently ---
+# Chromium serves every web app from one process, so a Google Maps window and
+# the ordinary browser window report the SAME pid. Patches used to be keyed by
+# pid, so from_entries collapsed them and both windows took whichever
+# resolution ran last -- Maps resolved to brave-browser.desktop.
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"address":"0xaaa","class":"brave-maps.google.com__-Default","initialClass":"brave-maps.google.com__-Default","pid":1000,"floating":false,"workspace":{"id":8}},
+  {"address":"0xbbb","class":"brave-browser","initialClass":"brave-browser","pid":1000,"floating":false,"workspace":{"id":2}}
+]
+EOF
+out="$("$RELAUNCH" save --json)"
+[[ "$(wex 'brave-maps.google.com__-Default')" == "gio launch $WA_USER/Google\ Maps.desktop" ]] \
+  || fail "shared pid must not collapse resolutions, got $(wex 'brave-maps.google.com__-Default')"
+[[ "$(wex 'brave-browser')" == "gio launch $WA_SYS/brave-browser.desktop" ]] \
+  || fail "shared pid must not collapse resolutions for the browser window either"
+jq -e '.entries | length == 2' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null \
+  || fail "two windows sharing a pid must produce two entries"
+
+# --- unsupported class variants stay unresolved (no guessing) ---
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"class":"brave-maps.google.com__-Profile_2","initialClass":"brave-maps.google.com__-Profile_2","pid":1000,"floating":false,"workspace":{"id":8}},
+  {"class":"chromium-maps.google.com__-Default","initialClass":"chromium-maps.google.com__-Default","pid":1001,"floating":false,"workspace":{"id":9}}
+]
+EOF
+out="$("$RELAUNCH" save --json)"
+[[ "$(wsrc 'brave-maps.google.com__-Profile_2')" == "cmdline" ]] \
+  || fail "a non-Default profile must stay unresolved and keep the cmdline fallback"
+[[ "$(wsrc 'chromium-maps.google.com__-Default')" == "cmdline" ]] \
+  || fail "an unsupported browser prefix must stay unresolved"
+
+# --- ambiguity: two surviving distinct ids, one identity ---
+cat >"$WA_USER/Collide App.desktop" <<'EOF'
+[Desktop Entry]
+Name=Collide App
+Exec=omarchy-launch-webapp https://example.com/foo_bar
+Type=Application
+EOF
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"brave-example.com__foo_bar-Default","initialClass":"brave-example.com__foo_bar-Default","pid":1001,"floating":false,"workspace":{"id":9}}]
+EOF
+out="$("$RELAUNCH" save --json)"
+# /foo/bar and /foo_bar encode identically. Refuse to pick one.
+[[ "$(wsrc 'brave-example.com__foo_bar-Default')" == "cmdline" ]] \
+  || fail "an ambiguous identity must not resolve, got $(wsrc 'brave-example.com__foo_bar-Default')"
+rm -f "$WA_USER/Collide App.desktop"
+
+# --- XDG desktop-ID masking, web-app index only ---
+# Same id in a lower-priority dir is masked by the user copy.
+cat >"$WA_SYS/Google Maps.desktop" <<'EOF'
+[Desktop Entry]
+Name=Google Maps
+Exec=omarchy-launch-webapp https://maps.google.com
+Type=Application
+EOF
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"brave-maps.google.com__-Default","initialClass":"brave-maps.google.com__-Default","pid":1000,"floating":false,"workspace":{"id":8}}]
+EOF
+out="$("$RELAUNCH" save --json)"
+[[ "$(wex 'brave-maps.google.com__-Default')" == "gio launch $WA_USER/Google\ Maps.desktop" ]] \
+  || fail "same desktop id in a system dir must be masked, not treated as ambiguous"
+
+# A Hidden=true user override claims the id, so nothing resolves.
+cat >"$WA_USER/Google Maps.desktop" <<'EOF'
+[Desktop Entry]
+Name=Google Maps
+Exec=omarchy-launch-webapp https://maps.google.com
+Hidden=true
+Type=Application
+EOF
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+out="$("$RELAUNCH" save --json)"
+[[ "$(wsrc 'brave-maps.google.com__-Default')" == "cmdline" ]] \
+  || fail "a Hidden=true higher-priority entry must claim the id and block resolution"
+
+# A non-web-app user override with the same id also claims it.
+cat >"$WA_USER/Google Maps.desktop" <<'EOF'
+[Desktop Entry]
+Name=Google Maps
+Exec=some-other-launcher
+Type=Application
+EOF
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+out="$("$RELAUNCH" save --json)"
+[[ "$(wsrc 'brave-maps.google.com__-Default')" == "cmdline" ]] \
+  || fail "a non-web-app higher-priority entry must claim the id and block resolution"
+unset RELAUNCH_DATA_DIRS
+unset RELAUNCH_CMDLINE_DIR
+
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"
 printf '' >"$WORKDIR/globdir/not-the-class"

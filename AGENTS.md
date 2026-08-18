@@ -121,6 +121,32 @@ stable. `Panel.qml` parses that object.
   tokenizing yields the leaf `dua\`, which matches nothing. `unquote_argv`
   does this without `eval`, which would run command substitution in a string
   the user can edit in `overrides.json`.
+- **Omarchy web apps are the one sanctioned reverse `.desktop` lookup for a
+  launch command.** Chromium encodes an `--app=<url>` window class as
+  `brave-<host>_<path with / as _>-Default`, which no `StartupWMClass`,
+  desktop-file id or `Name` can match, and `/proc` cannot help either:
+  Chromium merges the request into its existing process, so a web-app window
+  reports the *main browser* argv with no `--app=`. Resolution therefore
+  derives the identity **forward** from `Exec=omarchy-launch-webapp <URL>`
+  and compares encoded strings exactly. The class is never decoded back into
+  a URL — `/` → `_` is lossy, so `/foo/bar` and `/foo_bar` collide. Query and
+  fragment are excluded because Chromium discards them; an empty path and `/`
+  are already identical at the source. This is a deterministic exception to
+  the rule above, not a softening of it: it reconnects an exact app-mode
+  identity to the exact user-maintained launcher that produced it, rather
+  than inferring an executable from a cosmetic `Name`. The tier sits after
+  the exact `StartupWMClass` and desktop-id matches and before `Name`.
+- The web-app index applies XDG desktop-ID masking: the highest-priority file
+  bearing an id claims it, **including** a `Hidden=true` or non-web-app
+  override, so a user copy genuinely replaces the system entry. After
+  masking, two surviving distinct ids yielding one identity mark that
+  identity ambiguous and unresolvable. This masking is scoped to the web-app
+  map only — the class/id/`Name` maps keep their first-wins-per-key
+  behaviour, and general XDG masking is a separate change.
+- Only `brave-…-Default` is supported, the form verified on hardware. Custom
+  Chromium profiles and other browsers stay unresolved and keep the existing
+  cmdline fallback and its `unverified` flag. Do not broaden the matcher by
+  guessing at suffix formats.
 - `list` (panel display) must not index `.desktop` files or resolve
   launchers. It reads saved rows, cheap terminal identity, and startup
   lines. Resolve only on `save` and `import`.
@@ -278,6 +304,11 @@ plus a oneshot is not a daemon, and staleness is bounded by the interval.
   app-id: `/usr/share/omarchy/default/hypr/apps/system.lua` matches `TUI.float`
   to apply float + center + 875×600, so a renamed class silently loses its
   floating treatment. Same for `terminals.lua` and `TUI.*`.
+- **Non-default Chromium profiles.** A user running something other than
+  `Default` gets a class this engine does not recognise, so their Omarchy web
+  apps fall back to the generic browser cmdline and relaunch as a plain
+  browser window. Known and deliberate: the suffix format for other profiles
+  has not been verified, and guessing it risks launching the wrong app.
 - A `.desktop` file cannot be found from a generic class either — `Disk
   Usage.desktop` has no `StartupWMClass` and its `Name` is "Disk Usage", so
   nothing keys back to `TUI.float`. The hosted-argv path above is what makes
