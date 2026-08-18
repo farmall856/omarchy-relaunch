@@ -355,7 +355,9 @@ Panel {
               id: helpChip
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              glyph: "\uf059"  // nf-fa-question_circle
+              // Plain question mark, not the solid circled variant: the
+              // chip already draws the surrounding border.
+              glyph: "\uf128"  // nf-fa-question
               hint: "Open the Relaunch README on GitHub"
               onClicked: root.openHelp()
             }
