@@ -121,55 +121,12 @@ def normalize_entry:
       if (.float | type) == "boolean" then {float: .float} else {} end
     );
 
-# Raw per-window snapshot, written on every save. Nothing reads it yet: it
-# exists so a future per-window feature has real data to work from. It never
-# feeds entries[] or the generated pins, which stay one-entry-per-class.
-def normalize_window:
-  {
-    class: (.class // ""),
-    workspace: ((.workspace // 0) | tonumber),
-    floating: (.floating == true),
-    monitor: ((.monitor // -1) | tonumber),
-    monitorName: (.monitorName // ""),
-    monitorDescription: (.monitorDescription // "")
-  };
-
-def window_snapshot($clients; $monitors):
-  (
-    $monitors
-    | map({
-        key: ((.id // -1) | tostring),
-        value: {name: (.name // ""), description: (.description // "")}
-      })
-    | from_entries
-  ) as $mon
-  | $clients
-  # Deliberately unfiltered: no first-per-class dedupe, and special or
-  # negative workspaces are kept. capture() drops those because it cannot
-  # pin them; a snapshot loses information by doing the same.
-  | map(
-      ((.monitor // -1) | tostring) as $mid
-      | {
-          class: match_class,
-          workspace: ((.workspace.id // 0) | tonumber),
-          floating: (.floating == true),
-          monitor: ((.monitor // -1) | tonumber),
-          # Output names (DP-1) are reassigned across reboots; the
-          # description (BOE 0x0BCA) identifies the physical panel. Store
-          # both so a future feature can match on whichever is available.
-          monitorName: ($mon[$mid].name // ""),
-          monitorDescription: ($mon[$mid].description // "")
-        }
-    )
-  | sort_by(.workspace, .class);
-
 def load_config:
   {
     staggerSeconds: ((.staggerSeconds // 0) | tonumber),
     ignored: ((.ignored // []) | map(tostring)),
     skipOnce: (.skipOnce == true),
-    entries: ((.entries // []) | map(normalize_entry)),
-    windows: ((.windows // []) | map(normalize_window))
+    entries: ((.entries // []) | map(normalize_entry))
   };
 
 def dump_config:
@@ -177,8 +134,7 @@ def dump_config:
     staggerSeconds: .staggerSeconds,
     ignored: (.ignored // []),
     skipOnce: (.skipOnce == true),
-    entries: ([.entries[] | normalize_entry] | sort_by(.workspace, .class)),
-    windows: ((.windows // []) | map(normalize_window))
+    entries: ([.entries[] | normalize_entry] | sort_by(.workspace, .class))
   };
 
 def capture($clients):
@@ -277,7 +233,6 @@ def capture($clients):
       ignored: $cfg.ignored,
       skipOnce: $cfg.skipOnce,
       entries: [ .order[] as $c | .by[$c] ],
-      windows: $cfg.windows,
       added, updated
     };
 
@@ -1931,14 +1886,11 @@ pid_for_running_class() {
 }
 
 cmd_save() {
-  local cfg clients monitors merged extra
+  local cfg clients merged extra
   ensure_hooks
   cfg="$(load_config_json)"
   clients="$(clients_json)"
-  monitors="$(monitors_raw)"
-  merged="$(jq --argjson clients "$clients" --argjson monitors "$monitors" "$jq_lib"'
-    capture($clients) + {windows: window_snapshot($clients; $monitors)}
-  ' <<<"$cfg")"
+  merged="$(jq --argjson clients "$clients" "$jq_lib"' capture($clients)' <<<"$cfg")"
   jq "$jq_lib"' del(.added, .updated) | dump_config' <<<"$merged" | atomic_write "$(config_path)"
   jq "$jq_lib"' del(.added, .updated)' <<<"$merged" | write_generated
   extra="$(jq '{added: .added, updated: .updated}' <<<"$merged")"
