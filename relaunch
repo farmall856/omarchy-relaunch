@@ -110,7 +110,8 @@ def normalize_entry:
     enabled: (.enabled == true),
     # Display only. class stays the identity and the only lookup key, so a
     # wrong label is cosmetic and can never mis-pin a window.
-    label: ((.label // "") | tostring)
+    label: ((.label // "") | tostring),
+    startupKeys: ((.startupKeys // []) | map(ascii_downcase))
   }
   + (
       # float is a real boolean: false is a captured fact ("this window was
@@ -206,8 +207,17 @@ def capture($clients):
             | .by[$cl.match].float = ($cl.floating == true)
             # Same for the display label: recomputed at save time so it
             # self-heals when a .desktop file appears, moves or is renamed.
-            | (if ($cl.relaunchLabel // "") != "" then
+            # Not for an overrides-table entry though: its exec is the text
+            # the user typed and is protected below, so relabelling it from
+            # the live hosted command would describe a command it does not
+            # run.
+            | (if ($cl.relaunchLabel // "") != ""
+                  and ((.by[$cl.match].execSource | normalize_exec_source) != "overrides-table")
+               then
                  .by[$cl.match].label = $cl.relaunchLabel
+               else . end)
+            | (if (($cl.relaunchStartupKeys // []) | length) > 0 then
+                 .by[$cl.match].startupKeys = $cl.relaunchStartupKeys
                else . end)
             | (
                 (.by[$cl.match].execSource | normalize_exec_source) as $src
@@ -247,7 +257,8 @@ def capture($clients):
                 label: (
                   if ($cl.relaunchLabel // "") != "" then $cl.relaunchLabel
                   else $cl.match end
-                )
+                ),
+                startupKeys: ($cl.relaunchStartupKeys // [])
               }
               + {float: ($cl.floating == true)}
             )
@@ -601,7 +612,10 @@ identity_from_argv() {
     done
   fi
 
-  # -e is kept, not dropped. xdg-terminal-exec accepts it as the explicit end of
+  # The app id goes through quote_argv too, not just the inner argv: boot runs
+# the whole string through bash -c, so an app id containing a space would
+# split into two words and one containing a metacharacter would be executed.
+# -e is kept, not dropped. xdg-terminal-exec accepts it as the explicit end of
   # options, so an inner command that begins with a dash cannot be reparsed as
   # one. The rebuilt line then matches what a packaged TUI .desktop already
   # ships, e.g. Omarchy's Disk Usage.desktop.
@@ -609,13 +623,13 @@ identity_from_argv() {
   if [[ -n "$app_id" ]] && ! is_generic_terminal_class "$app_id"; then
     class="$app_id"
     if ((${#inner[@]} > 0)); then
-      exec="xdg-terminal-exec --app-id=${class} -e $(quote_argv "${inner[@]}")"
+      exec="xdg-terminal-exec $(quote_argv "--app-id=${class}") -e $(quote_argv "${inner[@]}")"
     else
-      exec="xdg-terminal-exec --app-id=${class}"
+      exec="xdg-terminal-exec $(quote_argv "--app-id=${class}")"
     fi
   elif ((${#inner[@]} > 0)); then
     class="${inner[0]##*/}"
-    exec="xdg-terminal-exec --app-id=${class} -e $(quote_argv "${inner[@]}")"
+    exec="xdg-terminal-exec $(quote_argv "--app-id=${class}") -e $(quote_argv "${inner[@]}")"
   fi
 
   if [[ -n "$class" ]]; then
@@ -750,6 +764,35 @@ _desktop_indexed=0
 # an underscore. Query and fragment are excluded because Chromium discards
 # them -- verified, https://example.com/?q=1 yields the same class as
 # https://example.com. An empty path and / are identical at the source.
+# RFC 3986 5.2.4 remove_dot_segments, so /a/./b and /a/b/../b canonicalize
+# the way GURL::path() reports them.
+remove_dot_segments() {
+  local input="$1" out="" seg
+  local -a stack=()
+  while [[ -n "$input" ]]; do
+    seg="${input%%/*}"
+    if [[ "$input" == */* ]]; then
+      input="${input#*/}"
+    else
+      input=""
+    fi
+    case "$seg" in
+      "" | .) ;;
+      ..) ((${#stack[@]})) && unset "stack[${#stack[@]}-1]" && stack=("${stack[@]}") ;;
+      *) stack+=("$seg") ;;
+    esac
+  done
+  for seg in ${stack[@]+"${stack[@]}"}; do
+    out+="/$seg"
+  done
+  printf '%s' "${out:-/}"
+}
+
+# Chromium builds the app identity from GURL::host() and GURL::path()
+# (GenerateApplicationNameFromURL). host() excludes userinfo and the port, so
+# https://user@example.com:8443/app and https://example.com/app share one
+# identity -- and therefore one window class. Splitting the raw URL instead
+# would miss that, resolving to the wrong launcher or missing the ambiguity.
 chromium_identity_from_url() {
   local url="$1" rest host path
   [[ -n "$url" ]] || return 1
@@ -758,12 +801,21 @@ chromium_identity_from_url() {
   rest="${rest%%#*}"
   rest="${rest%%\?*}"
   host="${rest%%/*}"
-  [[ -n "$host" ]] || return 1
   if [[ "$rest" == */* ]]; then
     path="/${rest#*/}"
   else
     path="/"
   fi
+  # userinfo: everything up to the last @ is credentials, not host.
+  host="${host##*@}"
+  # port: not part of GURL::host(). Keep a bracketed IPv6 literal intact.
+  if [[ "$host" == \[*\]* ]]; then
+    host="${host%%\]*}]"
+  else
+    host="${host%%:*}"
+  fi
+  [[ -n "$host" ]] || return 1
+  path="$(remove_dot_segments "$path")"
   printf '%s_%s\n' "${host,,}" "${path//\//_}"
 }
 
@@ -794,8 +846,18 @@ webapp_url_from_exec() {
   return 1
 }
 
+# XDG desktop-file ID: the path relative to the applications/ root with each
+# / replaced by -, case preserved. foo/bar.desktop is the id foo-bar, and
+# Foo.desktop and foo.desktop are distinct ids that must not mask each other.
+desktop_file_id() {
+  local file="$1" root="$2" rel
+  rel="${file#"$root"/}"
+  rel="${rel%.desktop}"
+  printf '%s\n' "${rel//\//-}"
+}
+
 index_desktop_file() {
-  local file="$1"
+  local file="$1" root="${2:-}"
   local section="" raw_exec="" wmclass="" name="" hidden=false
   local line key val id launch
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -818,8 +880,10 @@ index_desktop_file() {
   # before the Hidden early-return on purpose -- a Hidden=true user override
   # must mask the system entry rather than let it register.
   local _wid _widkey _wurl _wident
-  _wid="$(basename "$file" .desktop)"
-  _widkey="$(normalize_desktop_key "$_wid")"
+  # Case-sensitive XDG id, not the lowercased basename: normalize_desktop_key
+  # collapses case, spaces, underscores and dots, which would let distinct
+  # launchers mask one another or hide a real ambiguity.
+  _widkey="$(desktop_file_id "$file" "${root:-${file%/*}}")"
   if [[ -z "${WEBAPP_ID_CLAIMED[$_widkey]:-}" ]]; then
     WEBAPP_ID_CLAIMED[$_widkey]=1
     if ! $hidden && [[ -n "$raw_exec" ]]; then
@@ -888,6 +952,60 @@ desktop_name_from_file() {
   printf '%s\n' "$name"
 }
 
+desktop_exec_line_from_file() {
+  local file="$1" section="" line key val
+  [[ -r "$file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    if [[ "$line" == \[*] ]]; then
+      section="$line"
+      continue
+    fi
+    [[ "$section" == "[Desktop Entry]" ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    if [[ "$key" == Exec ]]; then
+      printf '%s\n' "$val"
+      return 0
+    fi
+  done <"$file"
+  return 1
+}
+
+# Tokens by which an autostart line can be recognised as this entry, so
+# `o.launch_on_start("brave")` correlates with a saved brave-browser entry
+# and the row keeps kind: both. Resolved at save/import time and stored;
+# `list` must never index applications dirs to work this out.
+startup_keys_for() {
+  local class="$1" exec="$2" source="$3"
+  local -a keys=() argv=()
+  local leaf file id dexec
+  [[ -n "$class" ]] && keys+=("${class,,}")
+  if [[ "$source" == desktop-file ]]; then
+    mapfile -t -d '' argv < <(unquote_argv "$exec")
+    if ((${#argv[@]} >= 3)) && [[ "${argv[0]##*/}" == gio && "${argv[1]}" == launch ]]; then
+      file="${argv[2]}"
+      id="${file##*/}"
+      id="${id%.desktop}"
+      [[ -n "$id" ]] && keys+=("${id,,}")
+      dexec="$(desktop_exec_line_from_file "$file" 2>/dev/null || true)"
+      if [[ -n "$dexec" ]]; then
+        leaf="$(leaf_command_for_exec "$dexec" 2>/dev/null || true)"
+        [[ -n "$leaf" ]] && keys+=("${leaf,,}")
+      fi
+    fi
+  else
+    leaf="$(leaf_command_for_exec "$exec" 2>/dev/null || true)"
+    [[ -n "$leaf" ]] && keys+=("${leaf,,}")
+  fi
+  ((${#keys[@]})) || return 0
+  printf '%s\n' "${keys[@]}" | awk 'NF && !seen[$0]++'
+}
+
+startup_keys_json() {
+  startup_keys_for "$1" "$2" "$3" | jq -R . | jq -s .
+}
+
 desktop_name_for_leaf() {
   local k
   ensure_desktop_index
@@ -946,7 +1064,7 @@ ensure_desktop_index() {
   while IFS= read -r dir; do
     [[ -d "$dir" ]] || continue
     while IFS= read -r -d '' f; do
-      index_desktop_file "$f"
+      index_desktop_file "$f" "$dir"
     # -L: distro .desktop files are often symlinks (LibreOffice ships
     # /usr/share/applications/libreoffice-calc.desktop -> .../xdg/calc.desktop).
     # find -type f without -L skips those and Calc falls through to cmdline.
@@ -1157,7 +1275,7 @@ annotate_clients() {
   # mode=display: only unwrap terminal hosts (cheap /proc walk). Do not
   # index .desktop files or read cmdline launchers — that is save/import.
   local clients="$1" mode="${2:-full}"
-  local addr pid class exec source patches line ident label
+  local addr pid class exec source patches line ident label skeys
   patches='[]'
   # Keyed by window address, not pid. Chromium serves every web app from one
   # process, so a Google Maps window and the ordinary browser window share a
@@ -1181,13 +1299,15 @@ annotate_clients() {
     if [[ "$source" == terminal ]]; then
       ident="$(identity_from_pid "$pid")"
       label="$(display_label_for "$(jq -r '.class' <<<"$ident")" "$exec" "$source")"
-      patches="$(jq --arg addr "$addr" --argjson ident "$ident" --arg exec "$exec" --arg label "$label" \
-        '. + [{addr: $addr, wrapped: true, class: $ident.class, exec: $exec, execSource: "terminal", label: $label}]' <<<"$patches")"
+      skeys="$(startup_keys_json "$(jq -r '.class' <<<"$ident")" "$exec" "$source")"
+      patches="$(jq --arg addr "$addr" --argjson ident "$ident" --arg exec "$exec" --arg label "$label" --argjson skeys "$skeys" \
+        '. + [{addr: $addr, wrapped: true, class: $ident.class, exec: $exec, execSource: "terminal", label: $label, startupKeys: $skeys}]' <<<"$patches")"
       continue
     fi
     label="$(display_label_for "$class" "$exec" "$source")"
-    patches="$(jq --arg addr "$addr" --arg class "$class" --arg exec "$exec" --arg src "$source" --arg label "$label" \
-      '. + [{addr: $addr, wrapped: false, class: $class, exec: $exec, execSource: $src, label: $label}]' <<<"$patches")"
+    skeys="$(startup_keys_json "$class" "$exec" "$source")"
+    patches="$(jq --arg addr "$addr" --arg class "$class" --arg exec "$exec" --arg src "$source" --arg label "$label" --argjson skeys "$skeys" \
+      '. + [{addr: $addr, wrapped: false, class: $class, exec: $exec, execSource: $src, label: $label, startupKeys: $skeys}]' <<<"$patches")"
   done < <(jq -r '
     .[] | select(.pid != null)
     | [
@@ -1216,10 +1336,12 @@ annotate_clients() {
             | .relaunchExec = $p.exec
             | .relaunchExecSource = $p.execSource
             | .relaunchLabel = ($p.label // "")
+            | .relaunchStartupKeys = ($p.startupKeys // [])
           else
             .relaunchExec = $p.exec
             | .relaunchExecSource = $p.execSource
             | .relaunchLabel = ($p.label // "")
+            | .relaunchStartupKeys = ($p.startupKeys // [])
           end
       )
   ' <<<"$clients"
@@ -1280,8 +1402,15 @@ build_rows() {
     | [
         $cfg.entries[]
         | . as $e
-        | ($startup | map(select((.class | ascii_downcase) == ($e.class | ascii_downcase)
-              or (.exec | ascii_downcase) == ($e.exec | ascii_downcase))) | .[0] // null) as $s
+        | (($e.startupKeys // [])) as $keys
+        | ($startup | map(select(
+              . as $sl
+              | ($sl.class | ascii_downcase) == ($e.class | ascii_downcase)
+                or ($sl.exec | ascii_downcase) == ($e.exec | ascii_downcase)
+                or ($keys | index($sl.class | ascii_downcase)) != null
+                or ($keys | index($sl.exec | ascii_downcase)) != null
+                or ($keys | index($sl.exec | ascii_downcase | split(" ")[0])) != null
+            )) | .[0] // null) as $s
         | {
             id: ("relaunch:" + $e.class),
             kind: (if $s != null then (if ($ign | index($s.id)) then "relaunch" else "both" end) else "relaunch" end),
@@ -1299,6 +1428,7 @@ build_rows() {
     | [
         $startup[]
         | . as $s
+        | select(([$fromRelaunch[] | .startupId] | index($s.id)) == null)
         | (
             $byClass[($s.class | ascii_downcase)]
             // $byExec[($s.exec | ascii_downcase)]
@@ -1549,15 +1679,34 @@ clients_display() {
 }
 
 pid_for_running_class() {
-  local class="$1" clients
+  local class="$1" clients pid hit ident
   clients="$(clients_raw)" || return 1
-  jq -r --arg c "$class" '
+  hit="$(jq -r --arg c "$class" '
     map(select(
       ((.initialClass // .class // "") | ascii_downcase) == ($c | ascii_downcase)
       and (.pid != null)
     ) | .pid)
     | .[0] // empty
-  ' <<<"$clients"
+  ' <<<"$clients")"
+  if [[ -n "$hit" ]]; then
+    printf '%s\n' "$hit"
+    return 0
+  fi
+  # A hosted terminal reports the terminal class to Hyprland: `foot -e herdr`
+  # is class foot, while list shows the unwrapped identity herdr. Without this
+  # walk, `import --class herdr` finds no pid and stores a bare guess instead
+  # of the xdg-terminal-exec wrap. Only reached when the direct match failed,
+  # so the /proc walk stays off the common path.
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    ident="$(identity_from_pid "$pid")"
+    jq -e '.wrapped == true' >/dev/null <<<"$ident" || continue
+    if [[ "$(jq -r '.class | ascii_downcase' <<<"$ident")" == "${class,,}" ]]; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+  done < <(jq -r '.[] | select(.pid != null) | .pid' <<<"$clients")
+  return 1
 }
 
 cmd_save() {
@@ -1813,24 +1962,51 @@ cmd_last_session() {
     --argjson before "$(cat "$(last_session_path)")" \
     --argjson after "$(cat "$(last_boot_json_path)")" \
     --argjson now "$(clients_raw)" "$jq_lib"'
-      ($now | map(match_class)) as $liveClasses
-      | ($before.windows | group_by(.class) | map({key: .[0].class, value: .}) | from_entries) as $was
+      # Live windows keyed by class, carrying the state we care about, so a
+      # window that came back on the wrong workspace or with the wrong
+      # float/tile state is reported rather than counted as healthy.
+      (
+        $now
+        | map({
+            class: match_class,
+            workspace: ((.workspace.id // 0) | tonumber),
+            floating: (.floating == true)
+          })
+        | map(select(.class != ""))
+      ) as $live
       | [
-          $before.windows[]
-          | . as $w
-          | ($liveClasses | map(select(. == $w.class)) | length) as $liveCount
-          | ($was[$w.class] | length) as $wantCount
+          $before.windows
+          | group_by(.class)[]
+          | . as $group
+          | ($group[0].class) as $cls
+          | ($live | map(select(.class == $cls))) as $back
           | {
-              class: $w.class,
-              label: $w.label,
-              wasWorkspace: $w.workspace,
-              wasFloating: $w.floating,
-              want: $wantCount,
-              live: $liveCount
+              class: $cls,
+              label: $group[0].label,
+              want: ($group | length),
+              live: ($back | length),
+              missing: (($group | length) - ($back | length)),
+              # A placement is honoured when some returned window of this
+              # class sits on the saved workspace with the saved float state.
+              placements: [
+                $group[]
+                | . as $w
+                | {
+                    wasWorkspace: $w.workspace,
+                    wasFloating: $w.floating,
+                    matched: (
+                      ($back | map(select(
+                        .workspace == $w.workspace and .floating == $w.floating
+                      )) | length) > 0
+                    ),
+                    workspaceMatched: (
+                      ($back | map(select(.workspace == $w.workspace)) | length) > 0
+                    )
+                  }
+              ]
             }
+          | . + {mismatched: ([.placements[] | select(.matched | not)] | length)}
         ]
-      | group_by(.class)
-      | map(.[0] + {missing: (.[0].want - .[0].live)})
       | {
           capturedAt: $before.capturedAt,
           bootedAt: ($after.startedAt // ""),
@@ -1847,8 +2023,22 @@ cmd_last_session() {
     "last boot:      \(.bootedAt)  outcome: \(.outcome)",
     "",
     (.classes[]
+      | . as $c
       | if .missing > 0 then
           "  MISSING  \(.label)  class=\(.class)  had \(.want), back \(.live)"
+        elif .mismatched > 0 then
+          (
+            [.placements[] | select(.matched | not)]
+            | map(
+                if .workspaceMatched then
+                  "float \(.wasFloating)"
+                else
+                  "ws \(.wasWorkspace)"
+                end
+              )
+            | join(", ")
+          ) as $detail
+          | "  MOVED    \($c.label)  class=\($c.class)  expected \($detail)"
         else
           "  ok       \(.label)  class=\(.class)  \(.live)/\(.want)"
         end)
@@ -1857,6 +2047,15 @@ cmd_last_session() {
 
 # Opt-in trigger. See docs: ExecStop of a unit ordered After= the graphical
 # session runs while Hyprland is still alive, which is verified below.
+# Best-effort on purpose: teardown must never block on systemd.
+remove_snapshot_hook() {
+  local unit
+  unit="$(snapshot_unit_path)"
+  systemctl --user disable --now omarchy-relaunch-snapshot.service >/dev/null 2>&1 || true
+  rm -f "$unit"
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+}
+
 cmd_snapshot_hook() {
   local mode="" a unit
   for a in "$@"; do
@@ -1868,9 +2067,7 @@ cmd_snapshot_hook() {
   [[ -n "$mode" ]] || die "snapshot-hook requires --enable or --disable"
   unit="$(snapshot_unit_path)"
   if [[ "$mode" == disable ]]; then
-    systemctl --user disable --now omarchy-relaunch-snapshot.service >/dev/null 2>&1 || true
-    rm -f "$unit"
-    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    remove_snapshot_hook
     if $json_out; then emit_state; else printf 'Session snapshot hook removed.\n'; fi
     return
   fi
@@ -1891,12 +2088,19 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/true
 ExecStop=${SELF} snapshot
+# The snapshot is a diagnostic. If the Hyprland socket hangs, logout must not
+# wait on it.
+TimeoutStopSec=5
 
 [Install]
 WantedBy=graphical-session.target
 EOF
-  systemctl --user daemon-reload >/dev/null 2>&1 || true
-  systemctl --user enable --now omarchy-relaunch-snapshot.service >/dev/null 2>&1 || true
+  # No `|| true` here: silently leaving the feature inactive is worse than
+  # failing. Best-effort suppression belongs on disable/uninstall only.
+  systemctl --user daemon-reload >/dev/null 2>&1 \
+    || die "systemctl --user daemon-reload failed; is the user manager running?"
+  systemctl --user enable --now omarchy-relaunch-snapshot.service >/dev/null 2>&1 \
+    || die "systemctl --user enable --now omarchy-relaunch-snapshot.service failed"
   if $json_out; then emit_state; else
     printf 'Session snapshot hook installed: %s\n' "$unit"
     printf 'It writes %s when the graphical session stops.\n' "$(last_session_path)"
@@ -1917,7 +2121,7 @@ arg_value() {
 }
 
 cmd_import() {
-  local exec ws class cfg pid line source label write_override=false
+  local exec ws class cfg pid line source label skeys write_override=false
   exec="$(arg_value --exec "$@" || true)"
   ws="$(arg_value --workspace "$@" || true)"
   class="$(arg_value --class "$@" || true)"
@@ -1937,14 +2141,15 @@ cmd_import() {
   fi
   [[ -n "$exec" ]] || die "import could not resolve a launch command for ${class}"
   label="$(display_label_for "$class" "$exec" "$source")"
+  skeys="$(startup_keys_json "$class" "$exec" "$source")"
   cfg="$(load_config_json)"
   if jq -e --arg class "$class" '.entries[] | select(.class == $class)' >/dev/null <<<"$cfg"; then
-    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" --arg label "$label" '
-      .entries |= map(if .class == $class then .workspace = $ws | .exec = $exec | .execSource = $src | .label = $label | .enabled = true else . end)
+    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" --arg label "$label" --argjson skeys "$skeys" '
+      .entries |= map(if .class == $class then .workspace = $ws | .exec = $exec | .execSource = $src | .label = $label | .startupKeys = $skeys | .enabled = true else . end)
     ' <<<"$cfg")"
   else
-    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" --arg label "$label" '
-      .entries += [{class: $class, workspace: $ws, exec: $exec, execSource: $src, label: $label, enabled: true}]
+    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" --arg label "$label" --argjson skeys "$skeys" '
+      .entries += [{class: $class, workspace: $ws, exec: $exec, execSource: $src, label: $label, startupKeys: $skeys, enabled: true}]
     ' <<<"$cfg")"
   fi
   jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
@@ -1956,7 +2161,7 @@ cmd_import() {
 }
 
 cmd_set_exec() {
-  local class exec cfg label
+  local class exec cfg label skeys
   class="$(arg_value --class "$@" || true)"
   exec="$(arg_value --exec "$@" || true)"
   [[ -n "$class" ]] || die "set-exec requires --class"
@@ -1966,8 +2171,9 @@ cmd_set_exec() {
     die "no relaunch entry for class: $class"
   fi
   label="$(display_label_for "$class" "$exec" "overrides-table")"
-  cfg="$(jq --arg class "$class" --arg exec "$exec" --arg label "$label" '
-    .entries |= map(if .class == $class then .exec = $exec | .execSource = "overrides-table" | .label = $label else . end)
+  skeys="$(startup_keys_json "$class" "$exec" "overrides-table")"
+  cfg="$(jq --arg class "$class" --arg exec "$exec" --arg label "$label" --argjson skeys "$skeys" '
+    .entries |= map(if .class == $class then .exec = $exec | .execSource = "overrides-table" | .label = $label | .startupKeys = $skeys else . end)
   ' <<<"$cfg")"
   jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
   set_override_exec "$class" "$exec"
@@ -2093,6 +2299,12 @@ cmd_uninstall() {
     [[ "$a" == --yes ]] && yes=true
   done
   $yes || die "uninstall requires --yes"
+  # Disable the snapshot unit FIRST, while the script and config dir still
+  # exist: `disable --now` fires ExecStop, which runs `relaunch snapshot`.
+  # Tearing down the files first would leave an enabled unit whose ExecStop
+  # points at a deleted binary, and would let that ExecStop recreate the
+  # config dir that uninstall had just removed.
+  remove_snapshot_hook
   remove_managed_block "$(autostart_path)"
   remove_managed_block "$(hyprland_lua_path)"
   remove_legacy_conf
@@ -2162,8 +2374,8 @@ relaunch — engine for omarchy-relaunch
   relaunch boot                          hidden autostart hook
   relaunch last-boot [--json] [--open]
   relaunch snapshot                      capture the layout now (diagnostic)
-  relaunch last-session [--json] [--diff]
-  relaunch snapshot-hook --enable | --disable   show or open the last boot log
+  relaunch last-session [--json] [--diff]   compare that snapshot with the boot
+  relaunch snapshot-hook --enable | --disable   opt-in pre-shutdown snapshot
   relaunch import --class CLASS --workspace N
   relaunch import --exec CMD --workspace N
   relaunch set-exec --class CLASS --exec CMD

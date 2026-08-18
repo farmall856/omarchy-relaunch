@@ -1167,6 +1167,273 @@ out="$("$RELAUNCH" save --json)"
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
+# --- PR #12 review fixes, one block per finding ---
+
+# (1) A synthesized --app-id must be shell-quoted like the inner argv: boot
+# runs the whole string through bash -c, so a space would split it and a
+# metacharacter would execute.
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/prcmd"
+mkdir -p "$RELAUNCH_CMDLINE_DIR"
+printf 'foot\0--app-id=my app; touch /tmp/rl-appid-pwned\0-e\0htop\0' >"$RELAUNCH_CMDLINE_DIR/1200"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"my app; touch /tmp/rl-appid-pwned","initialClass":"my app; touch /tmp/rl-appid-pwned","pid":1200,"floating":false,"workspace":{"id":3}}]
+EOF
+saved="$("$RELAUNCH" save --json | jq -r '.entries[0].exec')"
+mkdir -p "$WORKDIR/appidstub"
+cat >"$WORKDIR/appidstub/xdg-terminal-exec" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@"
+EOF
+chmod +x "$WORKDIR/appidstub/xdg-terminal-exec"
+mapfile -t got < <(PATH="$WORKDIR/appidstub:$PATH" bash -c "$saved" 2>/dev/null)
+[[ "${got[0]}" == "--app-id=my app; touch /tmp/rl-appid-pwned" ]] \
+  || fail "app id must survive as one argument, got ${got[0]}"
+[[ ! -e /tmp/rl-appid-pwned ]] || fail "app id metacharacters executed at launch"
+unset RELAUNCH_CMDLINE_DIR
+
+# (2) Web-app identity follows GURL host()/path(): no port, no userinfo,
+# dot segments removed. Ports especially: Chromium gives one class for both.
+WB="$WORKDIR/gurl/applications"
+mkdir -p "$WB"
+printf '%s\n' '[Desktop Entry]' 'Name=Ported' 'Exec=omarchy-launch-webapp https://ported.example.com:8443/app' 'Type=Application' >"$WB/Ported.desktop"
+printf '%s\n' '[Desktop Entry]' 'Name=Dotty' 'Exec=omarchy-launch-webapp https://dotty.example.com/a/c/../b' 'Type=Application' >"$WB/Dotty.desktop"
+printf '%s\n' '[Desktop Entry]' 'Name=Userinfo' 'Exec=omarchy-launch-webapp https://joe:pw@userinfo.example.com/x' 'Type=Application' >"$WB/Userinfo.desktop"
+export RELAUNCH_DATA_DIRS="$WORKDIR/gurl"
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/gurlcmd"
+mkdir -p "$RELAUNCH_CMDLINE_DIR"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"address":"0x1","class":"brave-ported.example.com__app-Default","initialClass":"brave-ported.example.com__app-Default","pid":1300,"floating":false,"workspace":{"id":3}},
+  {"address":"0x2","class":"brave-dotty.example.com__a_b-Default","initialClass":"brave-dotty.example.com__a_b-Default","pid":1301,"floating":false,"workspace":{"id":4}},
+  {"address":"0x3","class":"brave-userinfo.example.com__x-Default","initialClass":"brave-userinfo.example.com__x-Default","pid":1302,"floating":false,"workspace":{"id":5}}
+]
+EOF
+out="$("$RELAUNCH" save --json)"
+pex() { jq -r --arg c "$1" '[.entries[] | select(.class == $c) | .exec] | .[0] // "(none)"' <<<"$out"; }
+[[ "$(pex 'brave-ported.example.com__app-Default')" == "gio launch $WB/Ported.desktop" ]] \
+  || fail "a port must be excluded from identity, got $(pex 'brave-ported.example.com__app-Default')"
+[[ "$(pex 'brave-dotty.example.com__a_b-Default')" == "gio launch $WB/Dotty.desktop" ]] \
+  || fail "dot segments must be removed, got $(pex 'brave-dotty.example.com__a_b-Default')"
+[[ "$(pex 'brave-userinfo.example.com__x-Default')" == "gio launch $WB/Userinfo.desktop" ]] \
+  || fail "userinfo must be excluded, got $(pex 'brave-userinfo.example.com__x-Default')"
+# Port and no-port share one Chromium class, so both launchers is ambiguous.
+printf '%s\n' '[Desktop Entry]' 'Name=Unported' 'Exec=omarchy-launch-webapp https://ported.example.com/app' 'Type=Application' >"$WB/Unported.desktop"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"address":"0x1","class":"brave-ported.example.com__app-Default","initialClass":"brave-ported.example.com__app-Default","pid":1300,"floating":false,"workspace":{"id":3}}]
+EOF
+out="$("$RELAUNCH" save --json)"
+# Falls back to whatever the normal chain yields (here guess, no /proc
+# fixture); the point is that it must NOT pick one of the two launchers.
+[[ "$(jq -r '.entries[0].execSource' <<<"$out")" != "desktop-file" ]] \
+  || fail "port and no-port URLs collide in Chromium and must be ambiguous, got $(jq -r '.entries[0].exec' <<<"$out")"
+rm -f "$WB/Unported.desktop"
+
+# (3) Masking keys on the case-sensitive XDG id, not a lowercased basename.
+printf '%s\n' '[Desktop Entry]' 'Name=Upper' 'Exec=omarchy-launch-webapp https://upper.example.com' 'Type=Application' >"$WB/Foo.desktop"
+printf '%s\n' '[Desktop Entry]' 'Name=Lower' 'Exec=omarchy-launch-webapp https://lower.example.com' 'Type=Application' >"$WB/foo.desktop"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"address":"0x1","class":"brave-upper.example.com__-Default","initialClass":"brave-upper.example.com__-Default","pid":1400,"floating":false,"workspace":{"id":3}},
+  {"address":"0x2","class":"brave-lower.example.com__-Default","initialClass":"brave-lower.example.com__-Default","pid":1401,"floating":false,"workspace":{"id":4}}
+]
+EOF
+out="$("$RELAUNCH" save --json)"
+[[ "$(pex 'brave-upper.example.com__-Default')" == "gio launch $WB/Foo.desktop" ]] \
+  || fail "Foo.desktop and foo.desktop are distinct ids and must not mask each other"
+[[ "$(pex 'brave-lower.example.com__-Default')" == "gio launch $WB/foo.desktop" ]] \
+  || fail "case-distinct desktop ids must both resolve"
+rm -f "$WB/Foo.desktop" "$WB/foo.desktop"
+# A nested file claims the id dir-name, per XDG.
+mkdir -p "$WB/sub"
+printf '%s\n' '[Desktop Entry]' 'Name=Nested' 'Exec=omarchy-launch-webapp https://nested.example.com' 'Type=Application' >"$WB/sub/bar.desktop"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"address":"0x1","class":"brave-nested.example.com__-Default","initialClass":"brave-nested.example.com__-Default","pid":1500,"floating":false,"workspace":{"id":3}}]
+EOF
+out="$("$RELAUNCH" save --json)"
+[[ "$(pex 'brave-nested.example.com__-Default')" == "gio launch $WB/sub/bar.desktop" ]] \
+  || fail "a nested desktop file must still resolve"
+unset RELAUNCH_DATA_DIRS
+unset RELAUNCH_CMDLINE_DIR
+
+# (6) Recapture must not relabel an overrides-table entry: its exec is the
+# user's text and is protected, so the label must describe that, not the
+# live hosted command.
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"herdr","workspace":1,"exec":"my-custom-herdr","execSource":"overrides-table","label":"My Custom Herdr","enabled":true}
+]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"herdr","initialClass":"herdr","pid":90,"floating":false,"workspace":{"id":1}}]
+EOF
+"$RELAUNCH" save --json | jq -e '
+  ([.entries[] | select(.class == "herdr") | .exec] == ["my-custom-herdr"])
+  and ([.entries[] | select(.class == "herdr") | .label] == ["My Custom Herdr"])
+' >/dev/null || fail "an overrides-table entry must keep both its exec and its label"
+unset RELAUNCH_CMDLINE_DIR
+
+# (4) import --class must find a hosted-terminal pid. Hyprland reports the
+# window as class foot; list unwraps it to herdr, and the panel + button then
+# calls import --class herdr. Without walking identity_from_pid that finds no
+# pid and stores a bare guess instead of the xdg-terminal-exec wrap.
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-empty"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+printf '{}\n' >"$RELAUNCH_CONFIG_DIR/overrides.json"
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"foot","initialClass":"foot","pid":90,"floating":false,"workspace":{"id":1}}]
+EOF
+"$RELAUNCH" import --class herdr --workspace 1 --json >/dev/null
+jq -e '
+  ([.entries[] | select(.class == "herdr") | .exec] == ["xdg-terminal-exec --app-id=herdr -e herdr"])
+  and ([.entries[] | select(.class == "herdr") | .execSource] == ["terminal"])
+' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null \
+  || fail "import --class of a hosted terminal must find its pid and store the wrap"
+jq -e '.herdr' "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null \
+  && fail "import --class must not write overrides.json for a hosted terminal"
+"$RELAUNCH" drop --class herdr --json >/dev/null
+unset RELAUNCH_CMDLINE_DIR
+unset RELAUNCH_DATA_DIRS
+
+# (5) A cheap startup class must still correlate with a saved entry, so the
+# row is kind: both and keeps its Delete startup config action.
+# o.launch_on_start("brave") inventories as class brave while the saved entry
+# is brave-browser; the entry carries startup keys resolved at save time.
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
+cat >"$RELAUNCH_AUTOSTART" <<'EOF'
+o.launch_on_start("brave")
+EOF
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"brave-browser","initialClass":"brave-browser","pid":1600,"floating":false,"workspace":{"id":2}}]
+EOF
+"$RELAUNCH" save >/dev/null
+jq -e '[.entries[] | select(.class == "brave-browser") | .startupKeys] | .[0] | index("brave") != null' \
+  "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null \
+  || fail "save must persist startup keys so list can correlate cheaply"
+"$RELAUNCH" list --json | jq -e '
+  ([.rows[] | select(.class == "brave-browser") | .kind] == ["both"])
+  and ([.rows[] | select(.class == "brave-browser") | .startupId] | .[0] != null)
+' >/dev/null || fail "a cheap startup class must correlate into kind: both"
+# …and it must not also appear as its own NOT IN RELAUNCH row.
+"$RELAUNCH" list --json | jq -e '
+  [.rows[] | select(.kind == "startup" and .exec == "brave")] | length == 0
+' >/dev/null || fail "a correlated startup line must not be listed separately"
+unset RELAUNCH_DATA_DIRS
+
+# (7) uninstall must tear the snapshot unit down, and disable it BEFORE
+# deleting the script and config dir, because disable --now fires ExecStop.
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+UNIT_DIR="$WORKDIR/xdgconf/systemd/user"
+mkdir -p "$UNIT_DIR"
+SYSTEMCTL_LOG="$WORKDIR/systemctl.log"
+: >"$SYSTEMCTL_LOG"
+cat >"$WORKDIR/systemctl" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$SYSTEMCTL_LOG"
+# disable --now fires ExecStop, which needs the script and config dir.
+if [[ "\$*" == *"disable --now"* ]]; then
+  [[ -d "$RELAUNCH_CONFIG_DIR" ]] || printf 'CONFIG_DIR_GONE\n' >>"$SYSTEMCTL_LOG"
+fi
+exit 0
+EOF
+chmod +x "$WORKDIR/systemctl"
+printf 'placeholder\n' >"$UNIT_DIR/omarchy-relaunch-snapshot.service"
+( export PATH="$WORKDIR:$PATH" XDG_CONFIG_HOME="$WORKDIR/xdgconf"
+  "$RELAUNCH" uninstall --yes >/dev/null 2>&1 )
+grep -q 'disable --now omarchy-relaunch-snapshot.service' "$SYSTEMCTL_LOG" \
+  || fail "uninstall must disable the snapshot unit"
+grep -q 'CONFIG_DIR_GONE' "$SYSTEMCTL_LOG" \
+  && fail "uninstall disabled the unit after deleting the config dir"
+[[ ! -e "$UNIT_DIR/omarchy-relaunch-snapshot.service" ]] \
+  || fail "uninstall must remove the snapshot unit file"
+mkdir -p "$RELAUNCH_CONFIG_DIR"
+
+# (8) Install must fail loudly rather than reporting success.
+cat >"$WORKDIR/systemctl" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$WORKDIR/systemctl"
+( export PATH="$WORKDIR:$PATH" XDG_CONFIG_HOME="$WORKDIR/xdgconf"
+  "$RELAUNCH" snapshot-hook --enable >/dev/null 2>&1 ) \
+  && fail "snapshot-hook --enable must fail when systemctl rejects it"
+# …while teardown stays best-effort.
+( export PATH="$WORKDIR:$PATH" XDG_CONFIG_HOME="$WORKDIR/xdgconf"
+  "$RELAUNCH" snapshot-hook --disable >/dev/null 2>&1 ) \
+  || fail "snapshot-hook --disable must stay best-effort when systemctl fails"
+# The generated unit bounds its own stop so a hung hyprctl cannot stall logout.
+cat >"$WORKDIR/systemctl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$WORKDIR/systemctl"
+( export PATH="$WORKDIR:$PATH" XDG_CONFIG_HOME="$WORKDIR/xdgconf"
+  "$RELAUNCH" snapshot-hook --enable >/dev/null 2>&1 )
+grep -q '^TimeoutStopSec=' "$UNIT_DIR/omarchy-relaunch-snapshot.service" \
+  || fail "the snapshot unit needs a TimeoutStopSec"
+grep -q 'After=graphical-session.target' "$UNIT_DIR/omarchy-relaunch-snapshot.service" \
+  || fail "the snapshot unit must stop before the graphical session"
+
+# (9) last-session --diff must compare workspace and float, not just counts.
+export FAKE_MONITORS="$WORKDIR/monitors.json"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"address":"0x1","class":"moved","initialClass":"moved","pid":1700,"floating":false,"monitor":0,"workspace":{"id":3},"title":"m"},
+  {"address":"0x2","class":"refloated","initialClass":"refloated","pid":1701,"floating":false,"monitor":0,"workspace":{"id":4},"title":"r"},
+  {"address":"0x3","class":"stayed","initialClass":"stayed","pid":1702,"floating":false,"monitor":0,"workspace":{"id":5},"title":"s"}
+]
+EOF
+"$RELAUNCH" snapshot >/dev/null
+cat >"$RELAUNCH_CONFIG_DIR/last-boot.json" <<'EOF'
+{"startedAt":"2026-01-01T00:00:00-00:00","outcome":"launched","launches":[]}
+EOF
+# Same classes, same counts: one moved workspace, one changed float state.
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"address":"0x1","class":"moved","initialClass":"moved","pid":1800,"floating":false,"monitor":0,"workspace":{"id":9},"title":"m"},
+  {"address":"0x2","class":"refloated","initialClass":"refloated","pid":1801,"floating":true,"monitor":0,"workspace":{"id":4},"title":"r"},
+  {"address":"0x3","class":"stayed","initialClass":"stayed","pid":1802,"floating":false,"monitor":0,"workspace":{"id":5},"title":"s"}
+]
+EOF
+report="$("$RELAUNCH" last-session --diff --json)"
+echo "$report" | jq -e '[.classes[] | select(.class == "moved") | .mismatched] == [1]' >/dev/null \
+  || fail "a window back on the wrong workspace must be reported: $report"
+echo "$report" | jq -e '[.classes[] | select(.class == "refloated") | .mismatched] == [1]' >/dev/null \
+  || fail "a window back with the wrong float state must be reported: $report"
+echo "$report" | jq -e '[.classes[] | select(.class == "stayed") | .mismatched] == [0]' >/dev/null \
+  || fail "an intact window must not be reported as mismatched: $report"
+echo "$report" | jq -e '[.classes[] | select(.class == "moved") | .missing] == [0]' >/dev/null \
+  || fail "a moved window is not a missing window: $report"
+"$RELAUNCH" last-session --diff | grep -q "MOVED" \
+  || fail "the human diff must show a MOVED row"
+unset FAKE_MONITORS
+
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"
 printf '' >"$WORKDIR/globdir/not-the-class"
