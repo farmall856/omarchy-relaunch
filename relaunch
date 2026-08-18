@@ -731,7 +731,68 @@ declare -A DESKTOP_CLASS_BY_EXEC=()
 # resolves to "Disk Usage". This lookup is acceptable here precisely because a
 # wrong answer is cosmetic; it was rejected for resolving launch commands.
 declare -A DESKTOP_NAME_BY_LEAF=()
+# Omarchy web-app index (github issue #11). Chromium encodes an --app=URL
+# window class as brave-<host>_<path with / as _>-Default, which no
+# StartupWMClass, desktop-file id or Name can match. Identities are compared
+# forward-encoded and never decoded, because / -> _ is lossy.
+declare -A WEBAPP_LAUNCH_BY_IDENTITY=()
+declare -A WEBAPP_ID_BY_IDENTITY=()
+declare -A WEBAPP_AMBIGUOUS=()
+# XDG desktop-ID masking, for this index only. The highest-priority file
+# bearing an id claims it -- even when that file is Hidden=true or is not a
+# web app -- so a user override genuinely replaces the system entry instead
+# of colliding with it. The class/id/Name maps keep their existing
+# first-wins-per-key behaviour; general masking is a separate issue.
+declare -A WEBAPP_ID_CLAIMED=()
 _desktop_indexed=0
+
+# Chromium identity for a URL: lowercase host, then the path with each / as
+# an underscore. Query and fragment are excluded because Chromium discards
+# them -- verified, https://example.com/?q=1 yields the same class as
+# https://example.com. An empty path and / are identical at the source.
+chromium_identity_from_url() {
+  local url="$1" rest host path
+  [[ -n "$url" ]] || return 1
+  rest="${url#*://}"
+  [[ "$rest" == "$url" && "$url" == *"://"* ]] && return 1
+  rest="${rest%%#*}"
+  rest="${rest%%\?*}"
+  host="${rest%%/*}"
+  [[ -n "$host" ]] || return 1
+  if [[ "$rest" == */* ]]; then
+    path="/${rest#*/}"
+  else
+    path="/"
+  fi
+  printf '%s_%s\n' "${host,,}" "${path//\//_}"
+}
+
+# URL argument of an Exec=omarchy-launch-webapp line, or nothing.
+webapp_url_from_exec() {
+  local raw="$1" i n a
+  local -a argv=()
+  mapfile -t -d '' argv < <(unquote_argv "$raw")
+  n=${#argv[@]}
+  ((n)) || return 1
+  i=0
+  while ((i < n)) && { is_wrapper_cmd "${argv[i]}" || [[ "${argv[i]}" == -- ]] \
+    || [[ "${argv[i]}" == [A-Za-z_]*[=]* && "${argv[i]}" != --* ]]; }; do
+    ((i++)) || true
+  done
+  ((i < n)) || return 1
+  [[ "${argv[i]##*/}" == omarchy-launch-webapp ]] || return 1
+  ((i++)) || true
+  while ((i < n)); do
+    a="${argv[i]}"
+    # Skip flags and .desktop field codes (%u, %U, %f...).
+    if [[ "$a" != -* && "$a" != %? ]]; then
+      printf '%s\n' "$a"
+      return 0
+    fi
+    ((i++)) || true
+  done
+  return 1
+}
 
 index_desktop_file() {
   local file="$1"
@@ -753,6 +814,32 @@ index_desktop_file() {
       Name) [[ -z "$name" ]] && name="$val" ;;
     esac
   done <"$file"
+  # Web-app index: XDG desktop-ID masking, this map only. The claim happens
+  # before the Hidden early-return on purpose -- a Hidden=true user override
+  # must mask the system entry rather than let it register.
+  local _wid _widkey _wurl _wident
+  _wid="$(basename "$file" .desktop)"
+  _widkey="$(normalize_desktop_key "$_wid")"
+  if [[ -z "${WEBAPP_ID_CLAIMED[$_widkey]:-}" ]]; then
+    WEBAPP_ID_CLAIMED[$_widkey]=1
+    if ! $hidden && [[ -n "$raw_exec" ]]; then
+      _wurl="$(webapp_url_from_exec "$raw_exec" 2>/dev/null || true)"
+      if [[ -n "$_wurl" ]]; then
+        _wident="$(chromium_identity_from_url "$_wurl" 2>/dev/null || true)"
+        if [[ -n "$_wident" ]]; then
+          if [[ -n "${WEBAPP_ID_BY_IDENTITY[$_wident]:-}" \
+            && "${WEBAPP_ID_BY_IDENTITY[$_wident]}" != "$_widkey" ]]; then
+            # Two surviving distinct ids, one identity: refuse to guess.
+            WEBAPP_AMBIGUOUS[$_wident]=1
+          else
+            WEBAPP_ID_BY_IDENTITY[$_wident]="$_widkey"
+            WEBAPP_LAUNCH_BY_IDENTITY[$_wident]="$(desktop_launch_cmd "$file")"
+          fi
+        fi
+      fi
+    fi
+  fi
+
   $hidden && return 0
   [[ -n "$raw_exec" ]] || return 0
   launch="$(desktop_launch_cmd "$file")" || return 0
@@ -867,13 +954,38 @@ ensure_desktop_index() {
   done < <(xdg_application_dirs)
 }
 
+# Launch command for a Chromium app-mode window class, or nothing. Only
+# brave-<identity>-Default is supported: that is the one form verified on
+# hardware. A custom profile or another browser stays unresolved and keeps
+# the existing cmdline fallback rather than being guessed at.
+webapp_launch_for_class() {
+  local class="$1" ident
+  [[ "$class" == brave-*-Default ]] || return 1
+  ident="${class#brave-}"
+  ident="${ident%-Default}"
+  [[ -n "$ident" ]] || return 1
+  [[ -n "${WEBAPP_AMBIGUOUS[$ident]:-}" ]] && return 1
+  [[ -n "${WEBAPP_LAUNCH_BY_IDENTITY[$ident]:-}" ]] || return 1
+  printf '%s\n' "${WEBAPP_LAUNCH_BY_IDENTITY[$ident]}"
+}
+
 desktop_exec_for_class() {
-  local k
+  local k hit
   ensure_desktop_index
   k="$(normalize_desktop_key "$1")"
-  # Window match: StartupWMClass, then desktop-file id, then Name.
-  # Name last so a PWA that reuses a friendly Name cannot steal the pin class.
-  printf '%s\n' "${DESKTOP_EXEC_BY_CLASS[$k]:-${DESKTOP_EXEC_BY_ID[$k]:-${DESKTOP_EXEC_BY_NAME[$k]:-}}}"
+  # Window match: StartupWMClass, then desktop-file id, then the Omarchy
+  # web-app identity, then Name. The web-app tier is exact, so it outranks
+  # the last-resort Name key, but it must not pre-empt a real
+  # StartupWMClass. Name stays last so a PWA that reuses a friendly Name
+  # cannot steal the pin class.
+  hit="${DESKTOP_EXEC_BY_CLASS[$k]:-${DESKTOP_EXEC_BY_ID[$k]:-}}"
+  if [[ -z "$hit" ]]; then
+    hit="$(webapp_launch_for_class "$1" 2>/dev/null || true)"
+  fi
+  if [[ -z "$hit" ]]; then
+    hit="${DESKTOP_EXEC_BY_NAME[$k]:-}"
+  fi
+  printf '%s\n' "$hit"
 }
 
 desktop_class_for_exec() {
@@ -1045,16 +1157,21 @@ annotate_clients() {
   # mode=display: only unwrap terminal hosts (cheap /proc walk). Do not
   # index .desktop files or read cmdline launchers — that is save/import.
   local clients="$1" mode="${2:-full}"
-  local pid class exec source patches line ident label
+  local addr pid class exec source patches line ident label
   patches='[]'
-  while IFS=$'\t' read -r pid class; do
+  # Keyed by window address, not pid. Chromium serves every web app from one
+  # process, so a Google Maps window and the ordinary browser window share a
+  # pid; keying patches by pid collapsed them through from_entries and gave
+  # both windows whichever resolution was processed last.
+  while IFS=$'\t' read -r addr pid class; do
     [[ -z "$pid" || "$pid" == null ]] && continue
+    [[ -z "$addr" || "$addr" == null ]] && continue
     if [[ "$mode" == display ]]; then
       ident="$(identity_from_pid "$pid")"
       if jq -e '.wrapped == true' >/dev/null <<<"$ident"; then
         exec="$(jq -r '.exec' <<<"$ident")"
-        patches="$(jq --argjson pid "$pid" --argjson ident "$ident" --arg exec "$exec" \
-          '. + [{pid: $pid, wrapped: true, class: $ident.class, exec: $exec, execSource: "terminal"}]' <<<"$patches")"
+        patches="$(jq --arg addr "$addr" --argjson ident "$ident" --arg exec "$exec" \
+          '. + [{addr: $addr, wrapped: true, class: $ident.class, exec: $exec, execSource: "terminal"}]' <<<"$patches")"
       fi
       continue
     fi
@@ -1064,16 +1181,19 @@ annotate_clients() {
     if [[ "$source" == terminal ]]; then
       ident="$(identity_from_pid "$pid")"
       label="$(display_label_for "$(jq -r '.class' <<<"$ident")" "$exec" "$source")"
-      patches="$(jq --argjson pid "$pid" --argjson ident "$ident" --arg exec "$exec" --arg label "$label" \
-        '. + [{pid: $pid, wrapped: true, class: $ident.class, exec: $exec, execSource: "terminal", label: $label}]' <<<"$patches")"
+      patches="$(jq --arg addr "$addr" --argjson ident "$ident" --arg exec "$exec" --arg label "$label" \
+        '. + [{addr: $addr, wrapped: true, class: $ident.class, exec: $exec, execSource: "terminal", label: $label}]' <<<"$patches")"
       continue
     fi
     label="$(display_label_for "$class" "$exec" "$source")"
-    patches="$(jq --argjson pid "$pid" --arg class "$class" --arg exec "$exec" --arg src "$source" --arg label "$label" \
-      '. + [{pid: $pid, wrapped: false, class: $class, exec: $exec, execSource: $src, label: $label}]' <<<"$patches")"
+    patches="$(jq --arg addr "$addr" --arg class "$class" --arg exec "$exec" --arg src "$source" --arg label "$label" \
+      '. + [{addr: $addr, wrapped: false, class: $class, exec: $exec, execSource: $src, label: $label}]' <<<"$patches")"
   done < <(jq -r '
     .[] | select(.pid != null)
     | [
+        # Real hyprctl always reports an address; fall back to the pid so a
+        # fixture or an odd payload without one still resolves.
+        (if (.address // "") != "" then .address else "pid:" + (.pid | tostring) end),
         (.pid | tostring),
         (if (.initialClass // "") != "" then .initialClass else (.class // "") end)
       ] | @tsv
@@ -1083,9 +1203,12 @@ annotate_clients() {
     return
   fi
   jq --argjson patches "$patches" '
-    ($patches | map({key: (.pid | tostring), value: .}) | from_entries) as $by
+    ($patches | map({key: .addr, value: .}) | from_entries) as $by
     | map(
-        (($by[(.pid | tostring)]) // null) as $p
+        (
+          (if (.address // "") != "" then .address else "pid:" + (.pid | tostring) end)
+        ) as $akey
+        | (($by[$akey]) // null) as $p
         | if $p == null then .
           elif $p.wrapped == true then
             .class = $p.class
