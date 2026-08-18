@@ -319,7 +319,7 @@ cat >"$FAKE_CLIENTS" <<'EOF'
 EOF
 "$RELAUNCH" save --json | jq -e '
   [.entries[] | select(.class == "herdr") | .exec] ==
-    ["xdg-terminal-exec --app-id=herdr herdr"]
+    ["xdg-terminal-exec --app-id=herdr -e herdr"]
 ' >/dev/null || fail "parent terminal --app-id must supply the launch command"
 unset RELAUNCH_CMDLINE_DIR
 
@@ -515,8 +515,33 @@ cat >"$FAKE_CLIENTS" <<'EOF'
 EOF
 "$RELAUNCH" save --json | jq -e '
   [.entries[] | select(.class == "mytool") | .exec] ==
-    ["xdg-terminal-exec --app-id=mytool mytool --flag value"]
+    ["xdg-terminal-exec --app-id=mytool -e mytool --flag value"]
 ' >/dev/null || fail "explicit --app-id must keep trailing hosted args"
+unset RELAUNCH_CMDLINE_DIR
+
+# --- hosted argv keeps argument boundaries (Omarchy TUI .desktop shape) ---
+# Disk Usage runs as: foot --app-id=TUI.float -e bash -c 'dua i /'
+# "dua i /" is ONE argv element. A "${inner[*]}" join loses that, and boot's
+# bash -c re-split then runs `dua` with no arguments: it prints and exits, so
+# the window is gone before the workspace pin applies.
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"
+mkdir -p "$RELAUNCH_CMDLINE_DIR"
+printf 'foot\0--app-id=TUI.float\0-e\0bash\0-c\0dua i /\0' >"$RELAUNCH_CMDLINE_DIR/4400"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class": "TUI.float", "initialClass": "TUI.float", "pid": 4400, "floating": true, "workspace": {"id": 4}}]
+EOF
+saved="$("$RELAUNCH" save --json | jq -r '.entries[] | select(.class == "TUI.float") | .exec')"
+[[ -n "$saved" ]] || fail "hosted TUI must be captured"
+# The saved string must re-split, through the same bash -c boot uses, back into
+# the exact argv /proc reported — 5 words with the script as a single argument.
+eval "set -- ${saved#xdg-terminal-exec }"
+[[ "$#" -eq 5 ]] || fail "hosted TUI argv must re-split into 5 words, got $#"
+[[ "$1" == "--app-id=TUI.float" ]] || fail "hosted TUI must keep its app-id, got $1"
+[[ "$2" == "-e" ]] || fail "hosted TUI must keep -e, got $2"
+[[ "$5" == "dua i /" ]] || fail "hosted TUI must keep 'dua i /' as one argument, got [$5]"
 unset RELAUNCH_CMDLINE_DIR
 
 # --- startup exec with glob chars stays literal ---
