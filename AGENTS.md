@@ -205,6 +205,26 @@ stable. `Panel.qml` parses that object.
 - Skip special/negative workspaces (`Workspace.ID < 1`) and empty classes.
 - Regex-escape class names in generated `o.window` lines, then Lua-escape
   backslashes so dotted classes (`org.omarchy.agent`) are valid Lua strings.
+- Boot placement has three outcomes, not two: `landed`, `misplaced` (a window
+  exists on another workspace) and `pending` (no window of that class yet).
+  Only `misplaced` is a restore failure. A single immediate sample cannot
+  tell the last two apart — LibreOffice and Chromium web apps take tens of
+  seconds to map a window, and both were reported `MISPLACED` after restoring
+  correctly. `verify_launches` re-samples only the still-pending entries,
+  bounded by `RELAUNCH_VERIFY_DEADLINE` / `RELAUNCH_VERIFY_INTERVAL`; this
+  runs at boot, so it is a bounded loop, never a watcher. `placed` stays in
+  the JSON and is true only for `landed`.
+- The `.desktop` index must be warmed in the shell that owns the loop.
+  `resolve_launch` runs inside `$(...)`, and a subshell gets a *copy* of
+  `_desktop_indexed` and the index arrays, so a cold parent rebuilds the
+  whole index once per window and throws it away. That alone was 1.7s of a
+  2.2s save.
+- Key derivation and the indexing hot path use bash builtins, not
+  `printf | tr | tr`, `basename` or `$(...)` around pure-builtin helpers. A
+  command substitution forks even when the callee forks nothing, and these
+  run per key per `.desktop` file. `save` went from 16.5s to 0.5s on a
+  93-file machine; the suite pins `normalize_desktop_key` output so a rewrite
+  cannot silently change which file a class resolves to.
 - Persist with temp-file + rename (`config.json.tmp`, `relaunch.lua.tmp`).
 - Everything runs as the user. No sudo, no IPC beyond `hyprctl` and the
   `relaunch` script on `PATH`.

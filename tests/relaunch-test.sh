@@ -36,6 +36,11 @@ EOF
 chmod +x "$HYPRCTL_STUB"
 
 export RELAUNCH_VERIFY_SLEEP=0
+# No bounded re-sampling in the suite: fixtures never grow a window, so every
+# boot would otherwise wait out the full deadline. The re-sampling behaviour
+# has its own test below, which sets these explicitly.
+export RELAUNCH_VERIFY_DEADLINE=0
+export RELAUNCH_VERIFY_INTERVAL=0
 export RELAUNCH_CONFIG_DIR="$WORKDIR/cfg"
 export RELAUNCH_AUTOSTART="$WORKDIR/autostart.lua"
 export RELAUNCH_HYPRLAND_LUA="$WORKDIR/hyprland.lua"
@@ -1561,6 +1566,113 @@ jq -e '[.entries[] | select(.class == "brave-browser") | .startupKeys] | .[0] | 
   [.rows[] | select(.class == "brave-browser") | .kind] == ["both"]
 ' >/dev/null || fail "after the upgrade Save the legacy entry must correlate"
 unset RELAUNCH_DATA_DIRS
+
+# --- normalize_desktop_key derivation is pinned (github issue #13) ---
+# The builtin rewrite replaced `printf | tr | tr`. Key derivation decides
+# which .desktop file a window class resolves to, so a future rewrite must
+# not change it silently. Values verified byte-identical against the old
+# pipeline over all 93 .desktop basenames on the development machine.
+keycheck() {
+  local got
+  got="$(head -n -1 "$RELAUNCH" >"$WORKDIR/keylib.sh"; \
+    bash -c 'source "$1"; normalize_desktop_key "$2"' _ "$WORKDIR/keylib.sh" "$2")"
+  [[ "$got" == "$1" ]] || fail "normalize_desktop_key '$2': want '$1', got '$got'"
+}
+keycheck "a-b-c"           "A B..C"
+keycheck "foo-bar"         "Foo___Bar"
+keycheck "x"               "x"
+keycheck ""                ""
+keycheck "a-b-c-d"         "A.B_C D"
+keycheck "-"               "___"
+keycheck "a-b-c-d"         "a..b__c  d"
+keycheck "brave-browser"   "brave-browser"
+keycheck "org-gnome-nautilus" "org.gnome.Nautilus"
+
+# --- boot placement has three outcomes (github issue #15) ---
+# A single immediate sample cannot tell a wrong workspace from a window that
+# has not mapped yet. LibreOffice and the Chromium web app were both reported
+# MISPLACED after restoring correctly.
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"ontarget","workspace":3,"exec":"true","execSource":"guess","enabled":true},
+  {"class":"wrongws","workspace":4,"exec":"true","execSource":"guess","enabled":true},
+  {"class":"nowindow","workspace":5,"exec":"true","execSource":"guess","enabled":true}
+]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"address":"0x1","class":"ontarget","initialClass":"ontarget","pid":3001,"floating":false,"workspace":{"id":3}},
+  {"address":"0x2","class":"wrongws","initialClass":"wrongws","pid":3002,"floating":false,"workspace":{"id":9}}
+]
+EOF
+"$RELAUNCH" boot >/dev/null 2>&1
+lb="$RELAUNCH_CONFIG_DIR/last-boot.json"
+jq -e '[.launches[] | select(.class == "ontarget") | .outcome] == ["landed"]' "$lb" >/dev/null \
+  || fail "a window on the expected workspace must be landed"
+jq -e '[.launches[] | select(.class == "wrongws") | .outcome] == ["misplaced"]' "$lb" >/dev/null \
+  || fail "a window on the wrong workspace must be misplaced"
+jq -e '[.launches[] | select(.class == "nowindow") | .outcome] == ["pending"]' "$lb" >/dev/null \
+  || fail "a class with no window yet must be pending, not misplaced"
+# Only a real misplacement is a failure, so `placed` must not be false for a
+# pending entry in the way it used to be read.
+jq -e '[.launches[] | select(.class == "wrongws") | .placed] == [false]' "$lb" >/dev/null \
+  || fail "misplaced must still report placed=false"
+jq -e '[.launches[] | select(.class == "ontarget") | .placed] == [true]' "$lb" >/dev/null \
+  || fail "landed must report placed=true"
+# The distinction is visible in the human log too.
+log="$(cat "$RELAUNCH_CONFIG_DIR/last-boot.log")"
+assert_contains "$log" "MISPLACED"
+assert_contains "$log" "PENDING (no window yet)"
+[[ "$(grep -c 'MISPLACED' <<<"$log")" -eq 1 ]] \
+  || fail "only the genuinely misplaced entry may be marked MISPLACED"
+# …and in --json.
+"$RELAUNCH" last-boot --json | jq -e '
+  [.launches[] | select(.class == "nowindow") | .outcome] == ["pending"]
+' >/dev/null || fail "the outcome must be visible in last-boot --json"
+# …and through the panel contract, which reads .lastBoot.
+"$RELAUNCH" list --json | jq -e '
+  [.lastBoot.launches[] | select(.class == "wrongws") | .outcome] == ["misplaced"]
+' >/dev/null || fail "the outcome must be visible in the panel --json contract"
+
+# A window that appears late is picked up by re-sampling, not reported wrong.
+# The stub grows a window on the second call.
+GROW="$WORKDIR/grow.json"
+cat >"$GROW" <<'EOF'
+[]
+EOF
+cat >"$WORKDIR/hyprctl-grow" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  clients)
+    n=0
+    [[ -f "$WORKDIR/grow.count" ]] && n="\$(cat "$WORKDIR/grow.count")"
+    n=\$((n + 1)); printf '%s' "\$n" >"$WORKDIR/grow.count"
+    if ((n >= 2)); then
+      cat "$WORKDIR/grow-late.json"
+    else
+      printf '[]\n'
+    fi
+    ;;
+  monitors) exit 1 ;;
+  reload) printf 'ok\n' ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$WORKDIR/hyprctl-grow"
+cat >"$WORKDIR/grow-late.json" <<'EOF'
+[{"address":"0xL","class":"slowapp","initialClass":"slowapp","pid":3100,"floating":false,"workspace":{"id":7}}]
+EOF
+rm -f "$WORKDIR/grow.count"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"slowapp","workspace":7,"exec":"true","execSource":"guess","enabled":true}
+]}
+EOF
+HYPRCTL="$WORKDIR/hyprctl-grow" RELAUNCH_VERIFY_DEADLINE=4 RELAUNCH_VERIFY_INTERVAL=1 \
+  "$RELAUNCH" boot >/dev/null 2>&1
+jq -e '[.launches[] | select(.class == "slowapp") | .outcome] == ["landed"]' "$lb" >/dev/null \
+  || fail "a slow-starting app that restores correctly must not be reported misplaced"
+assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/last-boot.log")" "MISPLACED"
 
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"
