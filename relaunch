@@ -903,7 +903,11 @@ cmdline_exec_for_pid() {
   while [[ "$pid" =~ ^[1-9][0-9]*$ ]] && ((hops < 8)); do
     if read_pid_argv "$pid" argv && ((${#argv[@]} > 0)); then
       if ! is_helper_argv "${argv[@]}"; then
-        printf '%s\n' "${argv[*]}"
+        # Not "${argv[*]}": boot runs this through bash -c, so a joined
+        # string re-splits and any space, quote, semicolon, ampersand, glob
+        # or $(...) in an argument changes meaning at launch. Same bug the
+        # hosted-terminal path already fixes with quote_argv.
+        printf '%s\n' "$(quote_argv "${argv[@]}")"
         return 0
       fi
     fi

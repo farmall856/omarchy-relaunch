@@ -913,6 +913,49 @@ echo "$report" | jq -e '
   || fail "human diff must show a MISSING row"
 unset FAKE_MONITORS
 
+# --- cmdline fallback keeps argv boundaries (github issue #1) ---
+# Non-terminal window, no .desktop match, so resolve falls through to
+# /proc. Boot runs the stored string through bash -c, so a "${argv[*]}"
+# join lets spaces, quotes, semicolons, ampersands, globs and $(...) change
+# meaning at launch.
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-empty"
+mkdir -p "$WORKDIR/xdg-empty/applications"
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/argvcmd"
+mkdir -p "$RELAUNCH_CMDLINE_DIR"
+printf 'weirdapp\0--title=two words\0--re=a;b&c\0--glob=*.txt\0--sub=$(touch /tmp/rl-pwned)\0--q=he said "hi"\0--bs=back\\slash\0' \
+  >"$RELAUNCH_CMDLINE_DIR/950"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"weirdapp","initialClass":"weirdapp","pid":950,"floating":false,"workspace":{"id":4}}]
+EOF
+saved="$("$RELAUNCH" save --json | jq -r '.entries[] | select(.class == "weirdapp") | .exec')"
+[[ -n "$saved" ]] || fail "cmdline fallback must capture something"
+"$RELAUNCH" save --json | jq -e '
+  [.entries[] | select(.class == "weirdapp") | .execSource] == ["cmdline"]
+' >/dev/null || fail "this fixture must exercise the cmdline fallback"
+
+# Re-split through the same bash -c boot uses, and compare to the fixture.
+mapfile -t got < <(PATH="$WORKDIR/argvstub:$PATH" bash -c "$saved" 2>/dev/null)
+mkdir -p "$WORKDIR/argvstub"
+cat >"$WORKDIR/argvstub/weirdapp" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@"
+EOF
+chmod +x "$WORKDIR/argvstub/weirdapp"
+mapfile -t got < <(PATH="$WORKDIR/argvstub:$PATH" bash -c "$saved" 2>/dev/null)
+[[ "${#got[@]}" -eq 6 ]] || fail "cmdline argv must re-split into 6 arguments, got ${#got[@]}: ${got[*]}"
+[[ "${got[0]}" == "--title=two words" ]] || fail "spaces must stay inside one argument, got ${got[0]}"
+[[ "${got[1]}" == '--re=a;b&c' ]] || fail "semicolon and ampersand must stay literal, got ${got[1]}"
+[[ "${got[2]}" == '--glob=*.txt' ]] || fail "glob must not expand, got ${got[2]}"
+[[ "${got[3]}" == '--sub=$(touch /tmp/rl-pwned)' ]] || fail "command substitution must stay literal, got ${got[3]}"
+[[ "${got[4]}" == '--q=he said "hi"' ]] || fail "quotes must stay literal, got ${got[4]}"
+[[ "${got[5]}" == '--bs=back\slash' ]] || fail "backslash must stay literal, got ${got[5]}"
+[[ ! -e /tmp/rl-pwned ]] || fail "command substitution executed at launch"
+unset RELAUNCH_DATA_DIRS
+unset RELAUNCH_CMDLINE_DIR
+
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"
 printf '' >"$WORKDIR/globdir/not-the-class"
