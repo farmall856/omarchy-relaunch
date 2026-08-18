@@ -565,7 +565,7 @@ Panel {
 
             BorderLegend {
               id: notInLegend
-              title: "Not in relaunch"
+              title: "NOT IN RELAUNCH"
             }
 
             Column {
@@ -642,60 +642,81 @@ Panel {
               }
             }
           }
-          Rectangle { width: parent.width; height: 1; color: root.barForeground; opacity: 0.2 }
+          // Boot policy and the last-boot log are one section. No divider
+          // above it: two bordered boxes already read as separate.
+          Item {
+            id: bootGroup
+            width: content.width
+            height: bootBox.height + bootLegend.height / 2
 
-          Text {
-            width: parent.width
-            text: "Relaunch on boot"
-            color: root.barForeground
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            font.bold: true
-          }
-
-          Text {
-            width: parent.width
-            text: root.bootLabel()
-            color: root.barForeground
-            opacity: 0.75
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-          }
-
-          Flow {
-            width: parent.width
-            spacing: Style.space(6)
-            Chip {
-              visible: !root.boot.disabled && !root.boot.skipOnce
-              label: "Skip next boot"
-              onClicked: root.run(["boot-skip", "--json"], "Skipping the next boot.")
+            Rectangle {
+              id: bootBox
+              y: bootLegend.height / 2
+              width: parent.width
+              height: bootBody.implicitHeight + Style.space(18)
+              radius: Style.space(6)
+              color: "transparent"
+              border.color: root.barForeground
+              border.width: 1
             }
-            Chip {
-              visible: root.boot.disabled || root.boot.skipOnce
-              label: "Enable on boot"
-              onClicked: root.run(["boot-enable", "--json"], "Enabled on boot.")
-            }
-            Chip {
-              visible: !root.boot.disabled
-              label: "Disable until re-enabled"
-              onClicked: root.run(["boot-disable", "--json"], "Disabled on boot.")
-            }
-          }
 
-          Chip {
-            label: root.confirmRemove ? "Click again to remove permanently" : "Remove Relaunch permanently"
-            danger: true
-            onClicked: {
-              if (!root.confirmRemove) {
-                root.confirmRemove = true
-                root.statusText = "Click again to uninstall Relaunch."
-                disarmRemove.restart()
-                return
+            BorderLegend {
+              id: bootLegend
+              title: "RELAUNCH ON BOOT"
+            }
+
+            Column {
+              id: bootBody
+              x: Style.space(10)
+              y: bootBox.y + Style.space(9)
+              width: parent.width - Style.space(20)
+              spacing: Style.space(6)
+
+              Text {
+                width: parent.width
+                text: root.bootLabel()
+                color: root.barForeground
+                opacity: 0.75
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
               }
-              disarmRemove.stop()
-              root.confirmRemove = false
-              root.run(["uninstall", "--yes", "--json"], "Relaunch removed.")
+
+              Flow {
+                width: parent.width
+                spacing: Style.space(6)
+                Chip {
+                  visible: !root.boot.disabled && !root.boot.skipOnce
+                  label: "Skip next boot"
+                  onClicked: root.run(["boot-skip", "--json"], "Skipping the next boot.")
+                }
+                Chip {
+                  visible: root.boot.disabled || root.boot.skipOnce
+                  label: "Enable on boot"
+                  onClicked: root.run(["boot-enable", "--json"], "Enabled on boot.")
+                }
+                Chip {
+                  visible: !root.boot.disabled
+                  label: "Disable until re-enabled"
+                  onClicked: root.run(["boot-disable", "--json"], "Disabled on boot.")
+                }
+              }
+
+              Text {
+                width: parent.width
+                visible: root.lastBoot !== null
+                text: root.lastBootLink()
+                color: root.barForeground
+                opacity: 0.7
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+
+              Chip {
+                label: "View last boot log"
+                onClicked: root.openLog()
+              }
             }
           }
 
@@ -710,20 +731,27 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          Text {
+          // Uninstall stands alone at the bottom, centred and in no section.
+          Item {
             width: parent.width
-            visible: root.lastBoot !== null
-            text: root.lastBootLink()
-            color: root.barForeground
-            opacity: 0.7
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
-
-          Chip {
-            label: "View last boot log"
-            onClicked: root.openLog()
+            height: removeChip.height
+            Chip {
+              id: removeChip
+              anchors.horizontalCenter: parent.horizontalCenter
+              label: root.confirmRemove ? "Click again to remove permanently" : "Remove Relaunch permanently"
+              danger: true
+              onClicked: {
+                if (!root.confirmRemove) {
+                  root.confirmRemove = true
+                  root.statusText = "Click again to uninstall Relaunch."
+                  disarmRemove.restart()
+                  return
+                }
+                disarmRemove.stop()
+                root.confirmRemove = false
+                root.run(["uninstall", "--yes", "--json"], "Relaunch removed.")
+              }
+            }
           }
         }
       }
