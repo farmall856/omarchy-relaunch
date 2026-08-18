@@ -139,8 +139,13 @@ Mirror `omarchy.clock` / `omarchy.weather`:
 - Root type is `BarWidget` with `moduleName` matching `manifest.json` `id`.
 - Expose `opened`, `open()`, `close()`, `toggle()`, `closeForPopoutSwitch()`,
   and `injectPanel()` so the bar can route popouts.
-- Theme via `root.barForeground` / `root.barBackground`, `Style.space()`,
-  `Style.font.*`. No hardcoded palette.
+- Theme via `root.barForeground`, `Style.space()`,
+  `Style.font.*`. No hardcoded palette. There is no `root.barBackground`:
+  `Ui/Panel.qml` exposes only `barForeground`. For a background, use the
+  shell idiom `root.bar ? root.bar.background : Color.background` (see
+  `Ui/PanelSlider.qml`). Assigning the non-existent property fails at
+  runtime, not at lint time — `qmllint` cannot resolve `qs.Ui` types, so it
+  says nothing. Watch the journal after `omarchy restart shell` instead.
 - Use `Quickshell.Io.Process` to run `relaunch`. The script must be on `PATH`
   (`~/.local/bin` after `install.sh`).
 - Overlay is a second kind, not a replacement for the panel. Bar click still

@@ -43,6 +43,14 @@ Panel {
   readonly property var startupRows: rows.filter(function(r) { return r.kind === "startup" })
   readonly property var ignoredRows: rows.filter(function(r) { return r.kind === "ignored" })
 
+  // Everything not on the relaunch list, in one box: running windows that
+  // could be added, startup apps not yet imported, and startup apps the user
+  // chose to leave alone. Each row carries its own `kind`, which decides
+  // which actions it gets.
+  readonly property var notInRelaunchRows: root.runningRows
+    .concat(root.startupRows)
+    .concat(root.ignoredRows)
+
   // One bordered box per workspace. relaunchRows is already sorted by
   // workspace, so a run of equal workspace numbers is one group.
   readonly property var relaunchGroups: {
@@ -179,6 +187,15 @@ Panel {
       Quickshell.execDetached(["omarchy-shell", "shell", "summon", "io.github.laytonf.relaunch", payload])
   }
 
+  readonly property string helpUrl: "https://github.com/farmall856/omarchy-relaunch#readme"
+
+  function openHelp() {
+    if (root.bar)
+      root.bar.run("xdg-open " + Util.shellQuote(root.helpUrl))
+    else
+      Quickshell.execDetached(["xdg-open", root.helpUrl])
+  }
+
   function saveExec(className, exec) {
     var cmd = String(exec || "").replace(/^\s+|\s+$/g, "")
     if (!className || !cmd) return
@@ -231,6 +248,7 @@ Panel {
     property string hint: ""
     property bool danger: false
     property bool active: false
+    property real glyphSize: Style.font.bodySmall
     signal clicked
     readonly property color tint: iconChip.danger ? Color.urgent : root.barForeground
     height: Style.space(22)
@@ -247,7 +265,7 @@ Panel {
       text: iconChip.glyph
       color: iconChip.tint
       font.family: root.bar ? root.bar.fontFamily : Style.font.family
-      font.pixelSize: Style.font.bodySmall
+      font.pixelSize: iconChip.glyphSize
     }
     MouseArea {
       id: iconChipMouse
@@ -259,6 +277,30 @@ Panel {
         visible: iconChipMouse.containsMouse && iconChip.hint !== ""
         text: iconChip.hint
       }
+    }
+  }
+
+  // Title chip that straddles a box's top border, fieldset style. It paints
+  // the panel background behind itself to break the border line, so the
+  // heading costs no vertical space inside the box.
+  component BorderLegend: Rectangle {
+    id: legendChip
+    property string title: ""
+    x: Style.space(10)
+    width: legendLabel.implicitWidth + Style.space(8)
+    height: legendLabel.implicitHeight
+    // Panel exposes barForeground but no background; the shell's own idiom
+    // for one is bar.background with a Color fallback (see Ui/PanelSlider).
+    color: root.bar ? root.bar.background : Color.background
+    Text {
+      id: legendLabel
+      anchors.centerIn: parent
+      text: legendChip.title
+      color: root.barForeground
+      opacity: 0.75
+      font.family: root.bar ? root.bar.fontFamily : Style.font.family
+      font.pixelSize: Style.font.caption
+      font.bold: true
     }
   }
 
@@ -293,23 +335,30 @@ Panel {
           width: scroller.width
           spacing: Style.space(10)
 
-          Text {
+          // Lowercase to match how the plugin is named everywhere else.
+          Item {
             width: parent.width
-            text: "Relaunch"
-            color: root.barForeground
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.subtitle
-            font.bold: true
-          }
+            height: Math.max(titleText.implicitHeight, helpChip.height)
 
-          Text {
-            width: parent.width
-            text: "Save the layout you have now. Existing Hyprland startup apps stay listed so you can add them, drop one side, or leave them alone."
-            color: root.barForeground
-            opacity: 0.75
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
+            Text {
+              id: titleText
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "relaunch"
+              color: root.barForeground
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.subtitle
+              font.bold: true
+            }
+
+            IconChip {
+              id: helpChip
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              glyph: "\uf059"  // nf-fa-question_circle
+              hint: "Open the Relaunch README on GitHub"
+              onClicked: root.openHelp()
+            }
           }
 
           Rectangle {
@@ -322,7 +371,7 @@ Panel {
             opacity: root.busy ? 0.5 : 1.0
             Text {
               anchors.centerIn: parent
-              text: root.busy ? "Working…" : "Save Startup App Workspaces"
+              text: root.busy ? "Working…" : "Save Current Workspaces"
               color: root.barForeground
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.body
@@ -343,43 +392,6 @@ Panel {
           Rectangle { width: parent.width; height: 1; color: root.barForeground; opacity: 0.2 }
 
           Text {
-            visible: root.runningRows.length > 0
-            width: parent.width
-            text: "Running now"
-            color: root.barForeground
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            font.bold: true
-          }
-
-          Repeater {
-            model: root.runningRows
-            delegate: Column {
-              id: runningRow
-              required property var modelData
-              width: content.width
-              spacing: Style.space(4)
-
-              Text {
-                width: parent.width
-                text: "ws " + modelData.workspace + "  ·  " + modelData.label
-                elide: Text.ElideRight
-                color: root.barForeground
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              Chip {
-                label: "Add to relaunch"
-                onClicked: root.run([
-                  "import", "--class", runningRow.modelData.class,
-                  "--workspace", String(runningRow.modelData.workspace), "--json"
-                ])
-              }
-            }
-          }
-
-          Text {
             width: parent.width
             text: root.relaunchRows.length > 0
               ? "Relaunch list (" + root.relaunchRows.length + ")"
@@ -392,31 +404,36 @@ Panel {
 
           Repeater {
             model: root.relaunchGroups
-            delegate: Rectangle {
+            delegate: Item {
               id: wsGroup
               required property var modelData
               width: content.width
-              height: wsBody.implicitHeight + Style.space(20)
-              radius: Style.space(6)
-              color: "transparent"
-              border.color: root.barForeground
-              border.width: 1
+              // The legend straddles the top border, so half of it sits
+              // above the box and has to be paid for here.
+              height: wsBox.height + wsLegend.height / 2
+
+              Rectangle {
+                id: wsBox
+                y: wsLegend.height / 2
+                width: parent.width
+                height: wsBody.implicitHeight + Style.space(18)
+                radius: Style.space(6)
+                color: "transparent"
+                border.color: root.barForeground
+                border.width: 1
+              }
+
+              BorderLegend {
+                id: wsLegend
+                title: "Workspace " + wsGroup.modelData.workspace
+              }
 
               Column {
                 id: wsBody
                 x: Style.space(10)
-                y: Style.space(10)
+                y: wsBox.y + Style.space(9)
                 width: parent.width - Style.space(20)
                 spacing: Style.space(6)
-
-                Text {
-                  text: "ws " + wsGroup.modelData.workspace
-                  color: root.barForeground
-                  opacity: 0.75
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                }
 
                 Repeater {
                   model: wsGroup.modelData.apps
@@ -527,95 +544,104 @@ Panel {
             }
           }
 
-          Text {
-            visible: root.startupRows.length > 0
-            width: parent.width
-            text: "Startup apps not in relaunch"
-            color: root.barForeground
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            font.bold: true
-          }
+          // Everything not on the relaunch list, in one box: running
+          // windows, startup apps, and the ones left alone. One line each.
+          Item {
+            id: notInGroup
+            visible: root.notInRelaunchRows.length > 0
+            width: content.width
+            height: visible ? notInBox.height + notInLegend.height / 2 : 0
 
-          Repeater {
-            model: root.startupRows
-            delegate: Column {
-              id: startupRow
-              required property var modelData
-              width: content.width
-              spacing: Style.space(4)
-              property int pickWs: 1
+            Rectangle {
+              id: notInBox
+              y: notInLegend.height / 2
+              width: parent.width
+              height: notInBody.implicitHeight + Style.space(18)
+              radius: Style.space(6)
+              color: "transparent"
+              border.color: root.barForeground
+              border.width: 1
+            }
 
-              Text {
-                width: parent.width
-                text: modelData.label + "  ·  " + modelData.exec
-                elide: Text.ElideRight
-                color: root.barForeground
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.bodySmall
-              }
+            BorderLegend {
+              id: notInLegend
+              title: "Not in relaunch"
+            }
 
-              Row {
-                spacing: Style.space(6)
-                Chip {
-                  label: "−"
-                  onClicked: startupRow.pickWs = Math.max(1, startupRow.pickWs - 1)
-                }
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "ws " + startupRow.pickWs
-                  color: root.barForeground
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                }
-                Chip {
-                  label: "+"
-                  onClicked: startupRow.pickWs = Math.min(10, startupRow.pickWs + 1)
-                }
-                Chip {
-                  label: "Add to relaunch"
-                  onClicked: root.run(["import", "--exec", startupRow.modelData.exec, "--workspace", String(startupRow.pickWs), "--json"])
-                }
-                Chip {
-                  label: "Leave alone"
-                  onClicked: root.run(["ignore", "--id", startupRow.modelData.startupId, "--json"])
+            Column {
+              id: notInBody
+              x: Style.space(10)
+              y: notInBox.y + Style.space(9)
+              width: parent.width - Style.space(20)
+              spacing: Style.space(6)
+
+              Repeater {
+                model: root.notInRelaunchRows
+                delegate: Item {
+                  id: notInRow
+                  required property var modelData
+                  width: notInBody.width
+                  height: notInActions.height
+
+                  Text {
+                    anchors.left: parent.left
+                    anchors.right: notInActions.left
+                    anchors.rightMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: notInRow.modelData.kind === "running"
+                      ? "ws " + notInRow.modelData.workspace + "  ·  " + notInRow.modelData.label
+                      : notInRow.modelData.label
+                    elide: Text.ElideRight
+                    color: root.barForeground
+                    // Left-alone rows are opted out, so they read as quieter.
+                    opacity: notInRow.modelData.kind === "ignored" ? 0.55 : 1.0
+                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+                  }
+
+                  Row {
+                    id: notInActions
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(6)
+
+                    IconChip {
+                      visible: notInRow.modelData.kind === "startup"
+                      glyph: "\uf070"  // nf-fa-eye_slash
+                      hint: "Leave this startup app alone"
+                      onClicked: root.run(["ignore", "--id", notInRow.modelData.startupId, "--json"])
+                    }
+                    IconChip {
+                      visible: notInRow.modelData.kind === "ignored"
+                      glyph: "\uf06e"  // nf-fa-eye
+                      hint: "Stop leaving this startup app alone"
+                      onClicked: root.run(["unignore", "--id", notInRow.modelData.startupId, "--json"])
+                    }
+                    IconChip {
+                      visible: notInRow.modelData.kind !== "ignored"
+                      glyph: "+"
+                      glyphSize: Style.font.body
+                      // A running window is added where it already is. A
+                      // startup app has no window to read a workspace from,
+                      // so it starts on 1; launching it and saving moves it.
+                      hint: notInRow.modelData.kind === "running"
+                        ? "Add " + notInRow.modelData.label + " to relaunch on workspace " + notInRow.modelData.workspace
+                        : "Add " + notInRow.modelData.label + " to relaunch on workspace 1"
+                      onClicked: notInRow.modelData.kind === "running"
+                        ? root.run([
+                            "import", "--class", notInRow.modelData.class,
+                            "--workspace", String(notInRow.modelData.workspace), "--json"
+                          ])
+                        : root.run([
+                            "import", "--exec", notInRow.modelData.exec,
+                            "--workspace", "1", "--json"
+                          ])
+                    }
+                  }
                 }
               }
             }
           }
-
-          Text {
-            visible: root.ignoredRows.length > 0
-            width: parent.width
-            text: "Left alone (still shown here)"
-            color: root.barForeground
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            font.bold: true
-          }
-
-          Repeater {
-            model: root.ignoredRows
-            delegate: Row {
-              required property var modelData
-              width: content.width
-              spacing: Style.space(8)
-              Text {
-                width: parent.width - Style.space(90)
-                text: modelData.label
-                elide: Text.ElideRight
-                color: root.barForeground
-                opacity: 0.55
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.bodySmall
-              }
-              Chip {
-                label: "Stop ignoring"
-                onClicked: root.run(["unignore", "--id", modelData.startupId, "--json"])
-              }
-            }
-          }
-
           Rectangle { width: parent.width; height: 1; color: root.barForeground; opacity: 0.2 }
 
           Text {
