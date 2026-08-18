@@ -115,31 +115,21 @@ Boot policy and the last-boot report, in one box.
 Centred on its own at the very bottom of the panel, in no section. Two-click
 confirm; removes the hooks, the config, and the plugin folder.
 
-### Session snapshot (optional, diagnostic)
+### Session snapshot (manual, diagnostic)
 
-Off by default. It answers "what did I have before, and what actually came
-back?" — nothing else reads it, and no part of save, restore or boot depends
-on it.
+Answers "what did I have before, and what actually came back?" Nothing else
+reads it, and no part of save, restore or boot depends on it.
 
 ```sh
-relaunch snapshot-hook --enable    # install the opt-in hook
-relaunch snapshot                  # or capture the layout right now
-relaunch last-session --diff       # compare that snapshot with the last boot
-relaunch snapshot-hook --disable   # remove it
+relaunch snapshot              # capture the layout right now
+relaunch last-session --diff   # compare that snapshot with the last boot
 ```
 
-`--enable` installs a systemd **user** unit that runs `relaunch snapshot` when
-the graphical session stops, writing `~/.config/omarchy-relaunch/last-session.json`
-with every window's class, label, workspace, float state, monitor, pid and
-title. It is ordered so its `ExecStop` runs while Hyprland is still up, and
-carries a short `TimeoutStopSec` so a hung compositor socket cannot stall
-logout. A oneshot unit is not a daemon: nothing is resident between runs.
-
-`last-session --diff` reports each class as `ok`, `MISSING` (fewer windows
-came back than you had) or `MOVED` (a window came back on the wrong workspace
-or with the wrong float/tile state).
-
-`relaunch uninstall --yes` removes the hook along with everything else.
+Capture is always something you ask for. Relaunch does not sample your
+windows on a timer or at shutdown, and there is no background service — an
+earlier pre-shutdown hook was removed because it recorded window titles on a
+schedule you could not see or control. Everything Relaunch keeps on disk is
+visible and editable in the panel.
 
 ## Configure
 

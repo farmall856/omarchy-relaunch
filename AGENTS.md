@@ -70,6 +70,20 @@ stable. `Panel.qml` parses that object.
 
 ## Invariants
 
+- **Stored data must be visible and manageable by the user.** Everything
+  Relaunch keeps on disk has to be inspectable and editable through the
+  panel. Data recorded outside that surface is not acceptable no matter how
+  useful it would be, and window titles are the sensitive case — they carry
+  document names, URLs, email subjects and chat contacts, unlike the class
+  names in the entry list. Any new persisted field owes an answer to "where
+  does the user see and manage this?" before it is added. Capture must be
+  something the user initiated; no background sampling, no timers, no daemon.
+- **Relaunch is best-effort, not mission critical.** In the user's words: it
+  "mostly restores your desired window config and if it doesn't then the
+  fallback is to do what you would have done anyway. Nothing lost." So a
+  feature that trades user control, privacy or predictability for more
+  complete restoration loses that trade. Degrade gracefully instead of
+  reaching for more data.
 - One entry per window class. Capture keeps the first seen (lowest workspace).
   A `class:^(brave-browser)$` rule sends every Brave window to that workspace.
 - Match `initialClass`, not `class`. Brave/Electron mutate class after launch.
@@ -350,37 +364,32 @@ git worktree add --detach ~/Projects/rl-review origin/main
 Separate index, shared object store, and it can check out anything without
 touching the working tree.
 
-## Session snapshot (opt-in, diagnostic)
+## Session snapshot — removed
 
-`relaunch snapshot` writes `last-session.json`: every window with class,
-label, workspace, floating, monitor, pid and title. Nothing in `save`,
-`generate` or `boot` reads it — it exists so `relaunch last-session --diff`
-can show what did not come back, or came back wrong. The diff compares
-workspace and float state, not only per-class counts: a window back on the
-wrong workspace reports `MOVED`, not `ok`.
+`snapshot-hook` is gone: no systemd unit, no `--enable`/`--disable`, no
+pre-shutdown trigger. It was removed on the user's decision, for two
+independent reasons.
 
-`uninstall` tears the unit down **first**, before deleting the script and
-config dir — `disable --now` fires `ExecStop`, which runs `relaunch snapshot`
-and needs both present. Installation fails through the normal error contract
-rather than `|| true`; only disable and uninstall are best-effort. The unit
-carries a short `TimeoutStopSec` so a hung `hyprctl` cannot stall logout.
+It did not work. On a real reboot the `ExecStop` fired with `hyprctl` still
+answering — the ordering analysis was correct — and captured **1 of 11
+windows**, because Omarchy's applications are uwsm scopes bound to the same
+`graphical-session.target` with nothing ordering them after this unit. That
+is a design error, not a tuning problem: ordering later moves further past
+the clients, ordering earlier means the session has not begun shutting down.
 
-The trigger is a user unit installed by `relaunch snapshot-hook --enable`
-and removed by `--disable`. It is `PartOf=`/`After=graphical-session.target`,
-and stop ordering is the reverse of start ordering, so its `ExecStop` runs
-*before* the target goes down. `wayland-wm@.service` declares
-`Before=graphical-session.target`, so the compositor stops *after* the target
-— and therefore after this `ExecStop`, with `hyprctl` still answering.
+More importantly, it recorded window titles to disk on a schedule the user
+neither saw nor controlled. See "Stored data must be visible and
+manageable" below. A periodic systemd timer was considered as the
+replacement and **rejected on the same grounds** — a timer plus a oneshot
+avoids the letter of the no-daemon rule while being exactly the background
+recorder the principle forbids. Do not propose it again.
 
-Verified on this machine: the systemd user environment carries
-`HYPRLAND_INSTANCE_SIGNATURE` and `WAYLAND_DISPLAY`, and an `ExecStop` of such
-a unit read 9 windows through `hyprctl`. **Not** verified: a real
-logout/reboot. If the compositor exits first — Hyprland's own exit dispatcher
-rather than a systemd-initiated teardown — `wayland-wm@.service` fires
-`OnSuccess=wayland-session-shutdown.target` with Hyprland already gone, and
-the snapshot would be empty. One reboot with the hook enabled settles it. A
-systemd user *timer* is the fallback if ordering turns out unreliable; a timer
-plus a oneshot is not a daemon, and staleness is bounded by the interval.
+`relaunch snapshot` survives as a manual command, and `last-session --diff`
+still reads what it writes, because the user chose the moment of capture.
+
+Upgrades must disable and delete any `omarchy-relaunch-snapshot.service`
+left by an older install. Without that, an orphaned unit keeps firing at
+every logout with an `ExecStop` pointing at a command that no longer exists.
 
 ## Known limitations
 
