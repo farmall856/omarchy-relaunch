@@ -153,10 +153,15 @@ banner.
 
 - **Two feet:** a plain `foot` and another `foot` share one class, so both
   follow the saved foot workspace. Distinct hosted commands
-  (`xdg-terminal-exec --app-id=herdr herdr`) get their own class.
+  (`xdg-terminal-exec --app-id=herdr -e herdr`) get their own class.
 - **herdr:** `SUPER+SHIFT+H` launches it. Open herdr on ws 1, save.
-  Capture should record `xdg-terminal-exec --app-id=herdr herdr`. herdr
-  sessions restore themselves; the plugin only places the window.
+  Capture should record `xdg-terminal-exec --app-id=herdr -e herdr` — with
+  the `-e`, which `xdg-terminal-exec` takes as the explicit end of options.
+  herdr sessions restore themselves; the plugin only places the window.
+- **Stale saved exec:** an entry captured by an older engine keeps whatever
+  string that engine wrote, and reinstalling does not rewrite it. Recapture
+  must re-heal a `terminal` or `desktop-file` exec whose live resolution
+  differs, while leaving a `set-exec` value (`overrides-table`) alone.
 - **Float:** float a *new* class and save. Existing entries do **not**
   refresh `float`.
 - **Stagger:** set `staggerSeconds: 1` in `config.json`. Boot waits 1s
@@ -203,6 +208,20 @@ has no `MISPLACED`; existing bar widgets unaffected.
 - two untagged `foot` windows cannot occupy different workspaces (one class)
 - leftover app lines in `autostart.lua` will double-start (user config, not
   a Relaunch bug; this laptop’s autostart is now sunsetr + the boot hook)
+
+**Phase 6 re-confirmed on current HEAD (2026-08-18)**, in a sandbox using
+`RELAUNCH_CONFIG_DIR` plus fixture `/proc` and `.desktop` dirs: two feet
+collapse to one entry at the lowest workspace; herdr keeps its own class and
+its `-e`; a new floating class records `float` while an existing entry does
+not gain it; `staggerSeconds: 1` waits between launches but not before the
+first, and `0` never waits; `generate` follows a hand-edited `config.json`
+rather than live windows; the `disabled` / `skip-once` guard is in the
+generated Lua and `skip-once` is consumed after one boot; `uninstall --yes`
+removes the hook, the `dofile`, and the config dir while leaving `sunsetr`
+and unrelated `hyprland.lua` lines intact. The plugin copy of the engine runs
+with `~/.local/bin` off `PATH`. Still needs a human at the keyboard: opening
+the panel with the plugin copy of `relaunch` moved aside, which must show
+"Command failed" rather than hang the bar.
 
 **Fixed since this plan was first written (do not re-open as bugs):**
 
