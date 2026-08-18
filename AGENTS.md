@@ -260,7 +260,15 @@ https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/new?template=
 `relaunch snapshot` writes `last-session.json`: every window with class,
 label, workspace, floating, monitor, pid and title. Nothing in `save`,
 `generate` or `boot` reads it — it exists so `relaunch last-session --diff`
-can show what did not come back, or came back wrong.
+can show what did not come back, or came back wrong. The diff compares
+workspace and float state, not only per-class counts: a window back on the
+wrong workspace reports `MOVED`, not `ok`.
+
+`uninstall` tears the unit down **first**, before deleting the script and
+config dir — `disable --now` fires `ExecStop`, which runs `relaunch snapshot`
+and needs both present. Installation fails through the normal error contract
+rather than `|| true`; only disable and uninstall are best-effort. The unit
+carries a short `TimeoutStopSec` so a hung `hyprctl` cannot stall logout.
 
 The trigger is a user unit installed by `relaunch snapshot-hook --enable`
 and removed by `--disable`. It is `PartOf=`/`After=graphical-session.target`,
