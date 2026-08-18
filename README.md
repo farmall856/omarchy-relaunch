@@ -173,7 +173,7 @@ Runtime files (not in git):
 - `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
 - `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags
 - `~/.config/omarchy-relaunch/last-boot.log` / `last-boot.json` — last `relaunch boot` diagnostic
-- `~/.config/omarchy-relaunch/last-session.json` — pre-shutdown window snapshot, only if you enabled the hook
+- `~/.config/omarchy-relaunch/last-session.json` — window snapshot, written only when you run `relaunch snapshot`
 
 ## Remove
 

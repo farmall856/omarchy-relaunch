@@ -855,7 +855,7 @@ jq -e '[.entries[] | select(.class == "brave-browser") | .label] == ["Brave Web 
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
-# --- pre-shutdown session snapshot (diagnostic; opt-in; changes nothing) ---
+# --- manual session snapshot (diagnostic; user-invoked; changes nothing) ---
 export FAKE_MONITORS="$WORKDIR/monitors.json"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"ignored":[],"entries":[

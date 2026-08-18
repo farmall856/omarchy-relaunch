@@ -1948,8 +1948,9 @@ cmd_snapshot() {
         )
       }
   ')"
-  # Labels are the stored ones, never resolved here: this can run at shutdown,
-  # where indexing .desktop files would be both slow and pointless.
+  # Labels are the stored ones, never resolved here. Indexing .desktop files
+  # would be slow and pointless for a diagnostic the user invoked by hand and
+  # is waiting on.
   out="$(jq --argjson cfg "$(load_config_json)" '
     (
       $cfg.entries
@@ -1969,7 +1970,7 @@ cmd_snapshot() {
   fi
 }
 
-# Diff the pre-shutdown snapshot against what the last boot actually produced.
+# Diff the manual snapshot against what the last boot actually produced.
 cmd_last_session() {
   local diff_mode=false a
   for a in "$@"; do

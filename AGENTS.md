@@ -29,8 +29,8 @@ Runtime files (user-owned, never commit):
 - `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
 - `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags (skip is also in config.json so Save cannot drop it)
 - `~/.config/omarchy-relaunch/last-boot.log` / `last-boot.json` — last `relaunch boot` diagnostic
-- `~/.config/omarchy-relaunch/last-session.json` — pre-shutdown window
-  snapshot, written only when the opt-in hook is enabled
+- `~/.config/omarchy-relaunch/last-session.json` — window snapshot, written
+  only by `relaunch snapshot`, which the user runs by hand
 - `~/.config/omarchy/plugins/io.github.laytonf.relaunch/` — installed QML copy
 
 Do not generate `relaunch.conf` / `windowrulev2`. Pins are Lua only.
@@ -390,6 +390,17 @@ still reads what it writes, because the user chose the moment of capture.
 Upgrades must disable and delete any `omarchy-relaunch-snapshot.service`
 left by an older install. Without that, an orphaned unit keeps firing at
 every logout with an `ExecStop` pointing at a command that no longer exists.
+`ensure_hooks` does this, guarded by a `[[ -f ]]` test so the normal path
+does not fork `systemctl` on a hot path.
+
+That leaves a one-logout window, which is expected rather than a defect:
+`boot` deliberately does **not** call `ensure_hooks`, so a user who upgrades
+and reboots without running `list` or `save` in between keeps the legacy
+unit for one more logout. The first `list` or `save` after the upgrade
+disarms it — and the panel runs `list` as soon as it opens. Do not "fix"
+this by calling `ensure_hooks` from `boot`: boot is the latency-sensitive
+path, and the cost of the stale unit is one extra `ExecStop` that writes a
+snapshot file, not a failed restore.
 
 ## Known limitations
 
