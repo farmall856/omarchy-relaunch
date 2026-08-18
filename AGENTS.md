@@ -272,18 +272,84 @@ widget invokes `./relaunch` from the plugin folder (not PATH). First
 
 ## Repo / publish
 
-Not initialized as a git repo yet. One-time:
-
-```bash
-./git-init.sh farmall856
-# then: gh repo create farmall856/omarchy-relaunch --public --source=. --remote=origin --push
-```
+Published at `github.com/farmall856/omarchy-relaunch` (public). Trunk is
+`main`; feature work happens on a branch and lands through a pull request.
 
 Marketplace submit:
 https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/new?template=submit-plugin.yml
 
+That marketplace repo is someone else's — the account here has `pull` but not
+`push`, so submission is fork-and-PR, never a direct push.
+
 `.gitignore` already excludes generated `config.json` (and a leftover
 `relaunch.conf` name from older installs). Keep it that way.
+
+The `gh` token on this machine carries `gist, read:org, repo` — **no
+`workflow` scope**. Pushing anything under `.github/workflows/` from the CLI
+is rejected, so there is no CI and no bot review. Every gate here is manual.
+
+## Working with other agents
+
+Several agents run side by side in herdr panes on this machine. They are not
+interchangeable, and the split is deliberate:
+
+| Agent | Kind | Role |
+|---|---|---|
+| Claude | `claude` | **The only agent that writes code.** Implements, commits, opens PRs. |
+| Sol | `opencode` (GPT 5.4) | Review only. Reads diffs, reports findings. Never commits. |
+| Grok | `grok` | Review only. Same terms as Sol. |
+
+Grok was previously given implementation work and it was withdrawn after
+mistakes in the resolver. Do not hand a non-Claude agent an implementation
+task without the user saying so explicitly.
+
+**Every agent on this machine runs as the same Unix user and shares one `gh`
+token.** GitHub therefore cannot tell them apart — every issue, comment and
+push is attributed to `farmall856` regardless of which agent made it. Do not
+rely on GitHub identity to know who did what; say so in the text. It also
+means any agent *can* push to `main` or close any issue. Do not.
+
+### The loop
+
+Review has to survive a context compaction, so it lives on the pull request,
+not in a terminal pane.
+
+```bash
+# Claude, after the work is committed
+gh pr create --base main --fill
+
+# Sol / Grok, reviewing
+gh pr diff <n>                                  # the change
+gh pr view <n>                                  # intent
+gh pr review <n> --comment --body "..."         # findings go HERE
+
+# Claude, folding review back in
+gh pr view <n> --comments
+```
+
+Rules:
+
+- **Do not merge your own pull request.** The user merges. A reviewer's
+  approval is advice, not a gate that anyone but the user may clear.
+- Reference issues with a closing keyword in the PR body (`Closes #1`), not
+  only a bare `(#1)` in a commit subject — a bare reference links but never
+  closes, which is how eleven fixed issues stayed open.
+- Issues are the queue: `gh issue list --state open`. Findings that are not
+  being fixed in the current branch become issues, not PR comments on an
+  unrelated diff.
+
+### Worktrees
+
+A reviewer that runs `git checkout` or `git stash` in the shared checkout
+destroys whatever the implementer has not committed yet. Read-only *intent*
+is not read-only *behaviour*. Give each non-implementing agent its own tree:
+
+```bash
+git worktree add --detach ~/Projects/rl-review origin/main
+```
+
+Separate index, shared object store, and it can check out anything without
+touching the working tree.
 
 ## Session snapshot (opt-in, diagnostic)
 
