@@ -366,22 +366,48 @@ and needs both present. Installation fails through the normal error contract
 rather than `|| true`; only disable and uninstall are best-effort. The unit
 carries a short `TimeoutStopSec` so a hung `hyprctl` cannot stall logout.
 
-The trigger is a user unit installed by `relaunch snapshot-hook --enable`
-and removed by `--disable`. It is `PartOf=`/`After=graphical-session.target`,
-and stop ordering is the reverse of start ordering, so its `ExecStop` runs
-*before* the target goes down. `wayland-wm@.service` declares
-`Before=graphical-session.target`, so the compositor stops *after* the target
-— and therefore after this `ExecStop`, with `hyprctl` still answering.
+### The shutdown hook does not work, and cannot be fixed by ordering
 
-Verified on this machine: the systemd user environment carries
-`HYPRLAND_INSTANCE_SIGNATURE` and `WAYLAND_DISPLAY`, and an `ExecStop` of such
-a unit read 9 windows through `hyprctl`. **Not** verified: a real
-logout/reboot. If the compositor exits first — Hyprland's own exit dispatcher
-rather than a systemd-initiated teardown — `wayland-wm@.service` fires
-`OnSuccess=wayland-session-shutdown.target` with Hyprland already gone, and
-the snapshot would be empty. One reboot with the hook enabled settles it. A
-systemd user *timer* is the fallback if ordering turns out unreliable; a timer
-plus a oneshot is not a daemon, and staleness is bounded by the interval.
+The trigger is a user unit installed by `relaunch snapshot-hook --enable`.
+It is `PartOf=`/`After=graphical-session.target`, so its `ExecStop` runs
+before the target goes down, and `wayland-wm@.service` declares
+`Before=graphical-session.target`, so the compositor stops after it. That
+part is true and was verified twice — once with a synthetic probe that read
+9 windows, and once on a real reboot, where the unit ran and `hyprctl`
+answered.
+
+**It still captured 1 of 11 windows.** From the reboot of 2026-08-18:
+
+```
+16:49:13 systemd[1225]: Stopping Relaunch pre-shutdown window snapshot...
+16:49:13 relaunch[1172613]: Wrote .../last-session.json (1 windows)
+```
+
+The compositor was alive; the applications were not. Omarchy launches
+applications as uwsm-managed scopes that are themselves bound to
+`graphical-session.target`, and nothing orders them after this unit, so ten
+of eleven clients had already been stopped by the time `ExecStop` ran. The
+one survivor was Brave, which also came back with `exit_type = Crashed`.
+
+This is a design error, not a tuning problem. Ordering this unit later only
+moves it further past the clients it is meant to observe; ordering it
+earlier means the session has not begun shutting down yet, so there is
+nothing to record. **Do not attempt to fix this with `Before=`/`After=`
+against the app scopes.** Their unit names are generated per launch and are
+not stable to order against.
+
+### The timer is the design that can work
+
+A systemd user *timer* plus a oneshot `relaunch snapshot` samples the live
+layout on an interval. It is not a daemon — the oneshot exits — so it stays
+inside the no-daemon rule, and staleness is bounded by the interval rather
+than by the teardown ordering. The cost is that the last sample predates the
+shutdown by up to one interval, which for a diagnostic is acceptable in a
+way that "one window out of eleven" is not.
+
+Until that lands, `snapshot-hook --enable` must not be described to users as
+capturing their session. `relaunch snapshot` run by hand is the only
+reliable way to produce a `last-session.json` worth diffing.
 
 ## Known limitations
 
