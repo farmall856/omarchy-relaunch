@@ -734,6 +734,117 @@ jq -e '
     | .[0] | .monitor == 1 and .monitorName == "" and .monitorDescription == "")
 ' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "unreadable monitors must degrade to empty names, keeping the id"
 
+# --- display labels: stored at save time, one tier at a time ---
+# class stays the identity and the only lookup key; label is display only.
+LBL="$WORKDIR/lbl"
+mkdir -p "$LBL/applications"
+cat >"$LBL/applications/brave-browser.desktop" <<'EOF'
+[Desktop Entry]
+Name=Brave Web Browser
+Exec=brave %U
+StartupWMClass=brave-browser
+Type=Application
+EOF
+# Omarchy ships Disk Usage exactly like this: the class is the generic
+# TUI.float, and only the wrapped leaf command keys back to the friendly name.
+cat >"$LBL/applications/Disk Usage.desktop" <<'EOF'
+[Desktop Entry]
+Name=Disk Usage
+Exec=xdg-terminal-exec --app-id=TUI.float -e bash -c "dua i /"
+Type=Application
+EOF
+export RELAUNCH_DATA_DIRS="$LBL"
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/lblcmd"
+mkdir -p "$RELAUNCH_CMDLINE_DIR"
+# tier 2a: hosted TUI whose leaf command matches a .desktop terminal wrap
+printf 'foot\0--app-id=TUI.float\0-e\0bash\0-c\0dua i /\0' >"$RELAUNCH_CMDLINE_DIR/700"
+# tier 2b: hosted TUI with no .desktop anywhere
+printf 'foot\0--app-id=herdr\0-e\0herdr\0' >"$RELAUNCH_CMDLINE_DIR/701"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"class":"TUI.float","initialClass":"TUI.float","pid":700,"floating":true,"workspace":{"id":3}},
+  {"class":"herdr","initialClass":"herdr","pid":701,"floating":false,"workspace":{"id":1}},
+  {"class":"brave-browser","initialClass":"brave-browser","pid":702,"floating":false,"workspace":{"id":2}},
+  {"class":"NoDesktopApp","initialClass":"NoDesktopApp","pid":703,"floating":false,"workspace":{"id":8}}
+]
+EOF
+printf '/opt/weird/bin/nodesktop-bin\0--flag\0' >"$RELAUNCH_CMDLINE_DIR/703"
+out="$("$RELAUNCH" save --json)"
+lbl() { jq -r --arg c "$1" '[.entries[] | select(.class == $c) | .label] | .[0] // "(none)"' <<<"$out"; }
+
+# Tier 1: execSource desktop-file -> Name= from the exact file the exec names.
+[[ "$(lbl brave-browser)" == "Brave Web Browser" ]] \
+  || fail "tier 1: desktop-file label must come from Name=, got $(lbl brave-browser)"
+# Tier 2a: terminal -> leaf `dua` -> the .desktop whose Exec wraps it.
+[[ "$(lbl TUI.float)" == "Disk Usage" ]] \
+  || fail "tier 2a: hosted TUI must resolve through its leaf command, got $(lbl TUI.float)"
+# Tier 2b: terminal with no matching .desktop keeps the leaf itself.
+[[ "$(lbl herdr)" == "herdr" ]] \
+  || fail "tier 2b: hosted TUI with no .desktop must fall back to the leaf, got $(lbl herdr)"
+# Tier 3: anything else -> leaf of the exec, basename only.
+[[ "$(lbl NoDesktopApp)" == "nodesktop-bin" ]] \
+  || fail "tier 3: label must be the leaf of the exec, got $(lbl NoDesktopApp)"
+
+# Tier 4: no exec to read at all -> class.
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"LegacyApp","workspace":2,"exec":"","execSource":"","enabled":true}
+]}
+EOF
+"$RELAUNCH" list --json | jq -e '
+  [.rows[] | select(.class == "LegacyApp") | .label] == ["LegacyApp"]
+' >/dev/null || fail "tier 4: an entry with no label must display as its class"
+
+# The stored label survives, and the class remains the only lookup key: the
+# generated pin still matches on class, never on the label.
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+"$RELAUNCH" save >/dev/null
+jq -e '[.entries[] | select(.class == "TUI.float") | .label] == ["Disk Usage"]' \
+  "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "label must be persisted to config.json"
+lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+assert_contains "$lua" 'class = "^(TUI\\.float)$"'
+assert_not_contains "$lua" 'Disk Usage'
+
+# Recapture recomputes it, so a label self-heals when the .desktop changes.
+cat >"$LBL/applications/Disk Usage.desktop" <<'EOF'
+[Desktop Entry]
+Name=Disk Usage Analyzer
+Exec=xdg-terminal-exec --app-id=TUI.float -e bash -c "dua i /"
+Type=Application
+EOF
+"$RELAUNCH" save >/dev/null
+jq -e '[.entries[] | select(.class == "TUI.float") | .label] == ["Disk Usage Analyzer"]' \
+  "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null \
+  || fail "recapture must recompute the label, like float and exec"
+
+# A stale hand-edited label is replaced, not preserved: it is not a user field.
+jq '.entries |= map(if .class == "TUI.float" then .label = "Stale Name" else . end)' \
+  "$RELAUNCH_CONFIG_DIR/config.json" >"$WORKDIR/t" && mv "$WORKDIR/t" "$RELAUNCH_CONFIG_DIR/config.json"
+"$RELAUNCH" save >/dev/null
+jq -e '[.entries[] | select(.class == "TUI.float") | .label] == ["Disk Usage Analyzer"]' \
+  "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "a stale label must be recomputed"
+
+# list must not resolve labels: it reads what save stored, nothing more.
+# Deleting the whole index cannot change what list reports.
+mv "$LBL/applications" "$LBL/applications-gone"
+"$RELAUNCH" list --json | jq -e '
+  [.rows[] | select(.class == "TUI.float") | .label] == ["Disk Usage Analyzer"]
+' >/dev/null || fail "list must display the stored label without touching .desktop files"
+mv "$LBL/applications-gone" "$LBL/applications"
+
+# import stores a label too.
+"$RELAUNCH" drop --class brave-browser --json >/dev/null
+"$RELAUNCH" import --class brave-browser --workspace 2 --json >/dev/null
+jq -e '[.entries[] | select(.class == "brave-browser") | .label] == ["Brave Web Browser"]' \
+  "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "import must store a label"
+unset RELAUNCH_DATA_DIRS
+unset RELAUNCH_CMDLINE_DIR
+
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"
 printf '' >"$WORKDIR/globdir/not-the-class"

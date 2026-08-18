@@ -506,6 +506,19 @@ Panel {
                       }
                     }
 
+                    // The row shows a friendly label now, but the pin matches
+                    // on class, so class has to stay reachable somewhere.
+                    Text {
+                      visible: relaunchRow.expanded
+                      width: parent.width
+                      text: "class " + relaunchRow.modelData.class + " — what the workspace pin matches"
+                      wrapMode: Text.WordWrap
+                      color: root.barForeground
+                      opacity: 0.6
+                      font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
+
                     Text {
                       visible: relaunchRow.expanded && root.rowBroken(relaunchRow.modelData)
                       width: parent.width

@@ -98,6 +98,24 @@ stable. `Panel.qml` parses that object.
   (`DP-1`) are reassigned across reboots, descriptions (`BOE 0x0BCA`) identify
   the panel. `hyprctl monitors` failing degrades to empty names, never a save
   failure. It must never feed `entries[]` or the generated pins.
+- Entries carry a `label`: a human-readable display name, resolved at
+  `save`/`import` time and stored, never resolved at `list` time. Recomputed
+  on recapture so it self-heals; it is not a user field, so a hand-edited
+  label is replaced. Tiers: `desktop-file` reads `Name=` from the exact file
+  the exec already names; `terminal` takes the leaf command and looks for a
+  `.desktop` whose Exec is a terminal wrap running that leaf (Omarchy's
+  `Disk Usage.desktop` maps `dua` → "Disk Usage"), else uses the leaf;
+  anything else uses the leaf of the exec; the fallback is `class`.
+  **`class` remains the identity and the only lookup key.** The label must
+  never key anything and never reaches the generated pins. That is the only
+  reason this reverse `.desktop` lookup is acceptable here after being
+  rejected for resolving launch commands: a wrong label is cosmetic, a wrong
+  exec is not.
+- Unquote a stored exec before reading a leaf from it. It is `printf %q`
+  output, so `bash -c dua\ i\ /` holds `dua i /` as one argument, and naive
+  tokenizing yields the leaf `dua\`, which matches nothing. `unquote_argv`
+  does this without `eval`, which would run command substitution in a string
+  the user can edit in `overrides.json`.
 - `list` (panel display) must not index `.desktop` files or resolve
   launchers. It reads saved rows, cheap terminal identity, and startup
   lines. Resolve only on `save` and `import`.

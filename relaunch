@@ -103,7 +103,10 @@ def normalize_entry:
     workspace: ((.workspace // 0) | tonumber),
     exec: (.exec // ""),
     execSource: ((.execSource // "") | normalize_exec_source),
-    enabled: (.enabled == true)
+    enabled: (.enabled == true),
+    # Display only. class stays the identity and the only lookup key, so a
+    # wrong label is cosmetic and can never mis-pin a window.
+    label: ((.label // "") | tostring)
   }
   + (
       # float is a real boolean: false is a captured fact ("this window was
@@ -197,6 +200,11 @@ def capture($clients):
             # Live window state is the authority for float, same as for
             # workspace. Recapture refreshes it rather than preserving it.
             | .by[$cl.match].float = ($cl.floating == true)
+            # Same for the display label: recomputed at save time so it
+            # self-heals when a .desktop file appears, moves or is renamed.
+            | (if ($cl.relaunchLabel // "") != "" then
+                 .by[$cl.match].label = $cl.relaunchLabel
+               else . end)
             | (
                 (.by[$cl.match].execSource | normalize_exec_source) as $src
                 | (($cl.relaunchExecSource // "") | normalize_exec_source) as $nsrc
@@ -231,7 +239,11 @@ def capture($clients):
                   else "guess"
                   end
                 ),
-                enabled: true
+                enabled: true,
+                label: (
+                  if ($cl.relaunchLabel // "") != "" then $cl.relaunchLabel
+                  else $cl.match end
+                )
               }
               + {float: ($cl.floating == true)}
             )
@@ -432,6 +444,109 @@ quote_argv() {
   printf '%s' "$out"
 }
 
+# Split a shell-quoted exec back into argv, without eval. The stored exec is
+# printf %q output, so `bash -c dua\ i\ /` holds "dua i /" as ONE argument.
+# Tokenizing the raw string instead yields a leaf of `dua\`, which matches no
+# .desktop file. eval would unquote correctly but would also run command
+# substitution in a string the user can edit in overrides.json, and this runs
+# at save time, not launch time.
+unquote_argv() {
+  local s="$1" cur="" q="" c i=0 n=${#1} started=0
+  local -a out=()
+  while ((i < n)); do
+    c="${s:i:1}"
+    if [[ -n "$q" ]]; then
+      if [[ "$c" == "$q" ]]; then
+        q=""
+      elif [[ "$q" == '"' && "$c" == '\' && $((i + 1)) -lt n ]]; then
+        ((i++)) || true
+        cur+="${s:i:1}"
+      else
+        cur+="$c"
+      fi
+      started=1
+    else
+      case "$c" in
+        '\')
+          if ((i + 1 < n)); then
+            ((i++)) || true
+            cur+="${s:i:1}"
+          fi
+          started=1
+          ;;
+        "'" | '"') q="$c"; started=1 ;;
+        ' ' | $'\t')
+          if ((started)); then
+            out+=("$cur")
+            cur=""
+            started=0
+          fi
+          ;;
+        *) cur+="$c"; started=1 ;;
+      esac
+    fi
+    ((i++)) || true
+  done
+  ((started)) && out+=("$cur")
+  ((${#out[@]})) && printf '%s\0' "${out[@]}"
+  return 0
+}
+
+# The command a launch line actually runs, with wrappers, terminals and a
+# `bash -c` shim walked off. Display only: the label is never a lookup key.
+leaf_command_from_argv() {
+  local -a argv=("$@")
+  local i=0 n=${#argv[@]} a
+  local -a inner=()
+
+  while ((i < n)) && { is_wrapper_cmd "${argv[i]}" || [[ "${argv[i]}" == -- ]] \
+    || [[ "${argv[i]}" == [A-Za-z_]*[=]* && "${argv[i]}" != --* ]]; }; do
+    ((i++)) || true
+  done
+
+  if ((i < n)) && is_terminal_cmd "${argv[i]}"; then
+    ((i++)) || true
+    while ((i < n)); do
+      a="${argv[i]}"
+      if [[ "$a" == --app-id || "$a" == --working-directory || "$a" == --dir \
+        || "$a" == -D || "$a" == --title ]]; then
+        i=$((i + 2))
+      elif [[ "$a" == -e || "$a" == --command || "$a" == -- ]]; then
+        inner=("${argv[@]:i+1}")
+        break
+      elif [[ "$a" == -* ]]; then
+        ((i++)) || true
+      else
+        inner=("${argv[@]:i}")
+        break
+      fi
+    done
+  else
+    inner=("${argv[@]:i}")
+  fi
+
+  ((${#inner[@]})) || return 1
+
+  # `bash -c "dua i /"` names dua, not bash.
+  case "${inner[0]##*/}" in
+    bash | sh | zsh | dash)
+      if [[ "${inner[1]:-}" == -c && -n "${inner[2]:-}" ]]; then
+        local script="${inner[2]}"
+        script="${script%% *}"
+        [[ -n "$script" ]] && { printf '%s\n' "${script##*/}"; return 0; }
+      fi
+      ;;
+  esac
+  printf '%s\n' "${inner[0]##*/}"
+}
+
+leaf_command_for_exec() {
+  local -a argv=()
+  mapfile -t -d '' argv < <(unquote_argv "$1")
+  ((${#argv[@]})) || return 1
+  leaf_command_from_argv "${argv[@]}"
+}
+
 # Print JSON {wrapped, class, exec} from argv. A terminal hosting another
 # command (foot -e herdr, omarchy-launch-terminal nvim) becomes class=that
 # command and exec=xdg-terminal-exec --app-id=<class> -e <command...>, so the
@@ -597,6 +712,12 @@ declare -A DESKTOP_EXEC_BY_CLASS=()
 declare -A DESKTOP_EXEC_BY_ID=()
 declare -A DESKTOP_EXEC_BY_NAME=()
 declare -A DESKTOP_CLASS_BY_EXEC=()
+# Reverse map for display labels only: the leaf command of a terminal-wrapping
+# Exec -> that entry's Name. Omarchy ships Disk Usage.desktop with
+# Exec=xdg-terminal-exec --app-id=TUI.float -e bash -c "dua i /", so `dua`
+# resolves to "Disk Usage". This lookup is acceptable here precisely because a
+# wrong answer is cosmetic; it was rejected for resolving launch commands.
+declare -A DESKTOP_NAME_BY_LEAF=()
 _desktop_indexed=0
 
 index_desktop_file() {
@@ -633,6 +754,89 @@ index_desktop_file() {
   # Reverse map uses the raw Exec token so startup-line matching still works.
   index_set_if_empty DESKTOP_CLASS_BY_EXEC "$(normalize_desktop_key "$raw_exec")" "${wmclass:-$id}"
   index_set_if_empty DESKTOP_CLASS_BY_EXEC "$(normalize_desktop_key "${raw_exec%% *}")" "${wmclass:-$id}"
+  if [[ -n "$name" ]]; then
+    local leaf
+    leaf="$(leaf_command_for_exec "$raw_exec" 2>/dev/null || true)"
+    # Only a terminal wrap: a plain Exec=brave would map `brave` -> "Brave",
+    # which tier 1 already covers from the exact file, and which would let any
+    # app claim a bare command name.
+    if [[ -n "$leaf" && "$leaf" != "${raw_exec%% *}" ]]; then
+      index_set_if_empty DESKTOP_NAME_BY_LEAF "$(normalize_desktop_key "$leaf")" "$name"
+    fi
+  fi
+}
+
+# Name= straight out of one known file. Tier 1: the exec already names it.
+desktop_name_from_file() {
+  local file="$1" section="" line key val name=""
+  [[ -r "$file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    if [[ "$line" == \[*] ]]; then
+      section="$line"
+      continue
+    fi
+    [[ "$section" == "[Desktop Entry]" ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    if [[ "$key" == Name && -z "$name" ]]; then
+      name="$val"
+      break
+    fi
+  done <"$file"
+  [[ -n "$name" ]] || return 1
+  printf '%s\n' "$name"
+}
+
+desktop_name_for_leaf() {
+  local k
+  ensure_desktop_index
+  k="$(normalize_desktop_key "$1")"
+  printf '%s\n' "${DESKTOP_NAME_BY_LEAF[$k]:-}"
+}
+
+# Human-readable name for an entry. Display only -- `class` stays the identity
+# and the only lookup key, so a wrong label is cosmetic and never mis-pins a
+# window. Tiers, in order:
+#   1. desktop-file  -> Name= from the exact file the exec already names
+#   2. terminal      -> leaf command, then a .desktop whose terminal-wrap Exec
+#                       runs that leaf, else the leaf itself
+#   3. anything else -> leaf of the exec
+#   4. fallback      -> class
+display_label_for() {
+  local class="$1" exec="$2" source="$3"
+  local -a argv=()
+  local leaf name file
+
+  if [[ -n "$exec" ]]; then
+    case "$source" in
+      desktop-file)
+        mapfile -t -d '' argv < <(unquote_argv "$exec")
+        # gio launch <file>
+        if ((${#argv[@]} >= 3)) && [[ "${argv[0]##*/}" == gio && "${argv[1]}" == launch ]]; then
+          file="${argv[2]}"
+        else
+          file=""
+        fi
+        if [[ -n "$file" ]]; then
+          name="$(desktop_name_from_file "$file" 2>/dev/null || true)"
+          [[ -n "$name" ]] && { printf '%s\n' "$name"; return 0; }
+        fi
+        ;;
+      terminal)
+        leaf="$(leaf_command_for_exec "$exec" 2>/dev/null || true)"
+        if [[ -n "$leaf" ]]; then
+          name="$(desktop_name_for_leaf "$leaf")"
+          [[ -n "$name" ]] && { printf '%s\n' "$name"; return 0; }
+          printf '%s\n' "$leaf"
+          return 0
+        fi
+        ;;
+    esac
+    leaf="$(leaf_command_for_exec "$exec" 2>/dev/null || true)"
+    [[ -n "$leaf" ]] && { printf '%s\n' "$leaf"; return 0; }
+  fi
+  printf '%s\n' "$class"
 }
 
 ensure_desktop_index() {
@@ -824,7 +1028,7 @@ annotate_clients() {
   # mode=display: only unwrap terminal hosts (cheap /proc walk). Do not
   # index .desktop files or read cmdline launchers — that is save/import.
   local clients="$1" mode="${2:-full}"
-  local pid class exec source patches line ident
+  local pid class exec source patches line ident label
   patches='[]'
   while IFS=$'\t' read -r pid class; do
     [[ -z "$pid" || "$pid" == null ]] && continue
@@ -842,12 +1046,14 @@ annotate_clients() {
     source="${line#*$'\t'}"
     if [[ "$source" == terminal ]]; then
       ident="$(identity_from_pid "$pid")"
-      patches="$(jq --argjson pid "$pid" --argjson ident "$ident" --arg exec "$exec" \
-        '. + [{pid: $pid, wrapped: true, class: $ident.class, exec: $exec, execSource: "terminal"}]' <<<"$patches")"
+      label="$(display_label_for "$(jq -r '.class' <<<"$ident")" "$exec" "$source")"
+      patches="$(jq --argjson pid "$pid" --argjson ident "$ident" --arg exec "$exec" --arg label "$label" \
+        '. + [{pid: $pid, wrapped: true, class: $ident.class, exec: $exec, execSource: "terminal", label: $label}]' <<<"$patches")"
       continue
     fi
-    patches="$(jq --argjson pid "$pid" --arg class "$class" --arg exec "$exec" --arg src "$source" \
-      '. + [{pid: $pid, wrapped: false, class: $class, exec: $exec, execSource: $src}]' <<<"$patches")"
+    label="$(display_label_for "$class" "$exec" "$source")"
+    patches="$(jq --argjson pid "$pid" --arg class "$class" --arg exec "$exec" --arg src "$source" --arg label "$label" \
+      '. + [{pid: $pid, wrapped: false, class: $class, exec: $exec, execSource: $src, label: $label}]' <<<"$patches")"
   done < <(jq -r '
     .[] | select(.pid != null)
     | [
@@ -869,9 +1075,11 @@ annotate_clients() {
             | .initialClass = $p.class
             | .relaunchExec = $p.exec
             | .relaunchExecSource = $p.execSource
+            | .relaunchLabel = ($p.label // "")
           else
             .relaunchExec = $p.exec
             | .relaunchExecSource = $p.execSource
+            | .relaunchLabel = ($p.label // "")
           end
       )
   ' <<<"$clients"
@@ -938,7 +1146,7 @@ build_rows() {
             id: ("relaunch:" + $e.class),
             kind: (if $s != null then (if ($ign | index($s.id)) then "relaunch" else "both" end) else "relaunch" end),
             class: $e.class,
-            label: $e.class,
+            label: (if ($e.label // "") != "" then $e.label else $e.class end),
             exec: (if $e.exec != "" then $e.exec else ($e.class | guess_exec) end),
             execSource: ($e.execSource // ""),
             workspace: $e.workspace,
@@ -1255,18 +1463,21 @@ cmd_list() {
   if jq -e '.entries | length == 0' >/dev/null <<<"$cfg"; then
     printf 'No relaunch entries. Run `relaunch save`.\n'
   else
-    printf '%-4s %-3s %-24s %s\n' ws on class exec
+    # Label first because it is what a human recognises, but class stays on
+    # the line: it is what the generated pin actually matches.
+    printf '%-4s %-3s %-22s %-22s %s\n' ws on name class exec
     jq -r "$jq_lib"'
       .entries[]
       | [
           (.workspace | tostring),
           (if .enabled then "x" else " " end),
+          (if (.label // "") != "" then .label else .class end),
           .class,
           (if .exec != "" then .exec else (.class | guess_exec) + " *" end)
         ]
       | join("\u001f")
-    ' <<<"$cfg" | while IFS=$'\037' read -r ws on class exec; do
-      printf '%-4s [%s] %-24s %s\n' "$ws" "$on" "$class" "$exec"
+    ' <<<"$cfg" | while IFS=$'\037' read -r ws on label class exec; do
+      printf '%-4s [%s] %-22s %-22s %s\n' "$ws" "$on" "$label" "$class" "$exec"
     done
   fi
   local startup
@@ -1399,7 +1610,7 @@ arg_value() {
 }
 
 cmd_import() {
-  local exec ws class cfg pid line source write_override=false
+  local exec ws class cfg pid line source label write_override=false
   exec="$(arg_value --exec "$@" || true)"
   ws="$(arg_value --workspace "$@" || true)"
   class="$(arg_value --class "$@" || true)"
@@ -1418,14 +1629,15 @@ cmd_import() {
     write_override=true
   fi
   [[ -n "$exec" ]] || die "import could not resolve a launch command for ${class}"
+  label="$(display_label_for "$class" "$exec" "$source")"
   cfg="$(load_config_json)"
   if jq -e --arg class "$class" '.entries[] | select(.class == $class)' >/dev/null <<<"$cfg"; then
-    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" '
-      .entries |= map(if .class == $class then .workspace = $ws | .exec = $exec | .execSource = $src | .enabled = true else . end)
+    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" --arg label "$label" '
+      .entries |= map(if .class == $class then .workspace = $ws | .exec = $exec | .execSource = $src | .label = $label | .enabled = true else . end)
     ' <<<"$cfg")"
   else
-    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" '
-      .entries += [{class: $class, workspace: $ws, exec: $exec, execSource: $src, enabled: true}]
+    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" --arg label "$label" '
+      .entries += [{class: $class, workspace: $ws, exec: $exec, execSource: $src, label: $label, enabled: true}]
     ' <<<"$cfg")"
   fi
   jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
@@ -1437,7 +1649,7 @@ cmd_import() {
 }
 
 cmd_set_exec() {
-  local class exec cfg
+  local class exec cfg label
   class="$(arg_value --class "$@" || true)"
   exec="$(arg_value --exec "$@" || true)"
   [[ -n "$class" ]] || die "set-exec requires --class"
@@ -1446,8 +1658,9 @@ cmd_set_exec() {
   if ! jq -e --arg class "$class" '.entries[] | select(.class == $class)' >/dev/null <<<"$cfg"; then
     die "no relaunch entry for class: $class"
   fi
-  cfg="$(jq --arg class "$class" --arg exec "$exec" '
-    .entries |= map(if .class == $class then .exec = $exec | .execSource = "overrides-table" else . end)
+  label="$(display_label_for "$class" "$exec" "overrides-table")"
+  cfg="$(jq --arg class "$class" --arg exec "$exec" --arg label "$label" '
+    .entries |= map(if .class == $class then .exec = $exec | .execSource = "overrides-table" | .label = $label else . end)
   ' <<<"$cfg")"
   jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
   set_override_exec "$class" "$exec"
