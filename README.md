@@ -5,7 +5,7 @@ then relaunches those apps into the same workspaces after a reboot or crash.
 Each app restores its own context; this makes sure it comes back up in the
 right place.
 
-Click the bar icon → **Save Startup App Workspaces**. That's it. On the next
+Click the bar icon → **Save Current Workspaces**. That's it. On the next
 boot, herdr is back on workspace 1, Brave on 2, your terminal on 6 — wherever
 you had them.
 
@@ -19,8 +19,8 @@ the list. Workspace pins live in generated `~/.config/omarchy-relaunch/relaunch.
 declarative config rather than live state, it survives a crash for free.
 
 - **Bar widget (`BarWidget.qml` / `Panel.qml`):** Save, list edits, and boot
-  policy. The last-boot log is a second plugin kind — a fullscreen overlay
-  (`Overlay.qml`), not the cramped bar popover.
+  policy, grouped into bordered sections. The last-boot log is a second plugin
+  kind — a fullscreen overlay (`Overlay.qml`), not the cramped bar popover.
 - **Engine (`relaunch`, a bash + jq script):** inventories windows and
   existing Hyprland startup apps, writes the Lua pins, and runs `relaunch boot`.
   The widget invokes the copy in the plugin folder.
@@ -59,19 +59,60 @@ user, like any Hyprland command.
 
 1. Arrange your apps across workspaces the way you want them on boot.
 2. Click the Relaunch icon in the bar.
-3. **Save Startup App Workspaces** — captures the layout and writes the pins.
-4. Existing Hyprland startup apps stay listed so you can add them to relaunch,
-   delete a startup line, or leave one alone.
-5. After a reboot, **View last boot log** opens a fullscreen overlay with the
-   last `relaunch boot` diagnostic (what launched, where it landed).
+3. **Save Current Workspaces** — captures the layout and writes the pins. The
+   status line reports how many entries were added and updated.
 
-Boot policy in the same panel:
+The panel is titled **relaunch**, with a **?** icon opposite it on the same
+line that opens this README on GitHub. Below the save button the panel is
+bordered boxes, each with its title sitting on the top border rather than
+inside it. Every icon names itself on hover.
+
+### Workspace boxes
+
+Under a **Relaunch list (N)** heading — or **No apps on the relaunch list
+yet** — comes one box per workspace, titled **Workspace 1**, **Workspace 2**,
+and so on, holding the apps pinned to that workspace. Each app is a single
+line: its name, then two icons.
+
+- **Rocket** — show the launch command. It opens an editable field with a
+  **Save** button, so the same icon both views and edits it. `Esc` closes the
+  field. For an app that is also a Hyprland startup app, a **Delete startup
+  config** button appears here too.
+- **Trash can** — remove that app from the relaunch list.
+
+An app whose launch command cannot be found is drawn in the urgent colour and
+opens its editor by itself, since there is nothing else on a one-line row to
+fix it with. Type the command that starts it and press **Save**.
+
+### NOT IN RELAUNCH
+
+One box for everything not on the relaunch list — running windows, Hyprland
+startup apps you have not imported, and startup apps you told Relaunch to
+leave alone. One line each.
+
+- **+** — add that app to the relaunch list. A running window is added on the
+  workspace it is already on. A startup app has no window to read a workspace
+  from, so it is added on workspace 1; launch it, put it where you want it,
+  and save again to move it.
+- **Crossed-out eye** — leave a startup app alone. It stops being offered for
+  import but stays listed, dimmed, so you can see the choice was deliberate.
+- **Eye** — stop leaving it alone, putting it back in the list above.
+
+### RELAUNCH ON BOOT
+
+Boot policy and the last-boot report, in one box.
 
 - **Skip next boot** — one-shot; the next `relaunch boot` does nothing, then
   clears itself. The chip becomes **Enable on boot** until then.
 - **Disable until re-enabled** — stays off across reboots until you enable it.
-- **Remove Relaunch permanently** — two-click confirm; removes hooks, config,
-  and the plugin folder.
+- **View last boot log** — opens a fullscreen overlay with the last
+  `relaunch boot` diagnostic: what launched, and where it landed. The line
+  above it summarises the last boot at a glance.
+
+### Remove Relaunch permanently
+
+Centred on its own at the very bottom of the panel, in no section. Two-click
+confirm; removes the hooks, the config, and the plugin folder.
 
 ## Configure
 
