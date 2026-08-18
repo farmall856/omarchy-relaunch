@@ -338,17 +338,35 @@ Panel {
           // Lowercase to match how the plugin is named everywhere else.
           Item {
             width: parent.width
-            height: Math.max(titleText.implicitHeight, helpChip.height)
+            height: Math.max(titleRow.implicitHeight, helpChip.height)
 
-            Text {
-              id: titleText
+            Row {
+              id: titleRow
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
-              text: "relaunch"
-              color: root.barForeground
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.subtitle
-              font.bold: true
+              spacing: Style.space(8)
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                // Same glyph as the bar button (BarWidget.qml), so the popup
+                // names the button that opened it. Keep the two in step.
+                // Identity, not a control: plain Text, no chip border and no
+                // hover state.
+                text: "\uf1da"
+                color: root.barForeground
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.subtitle
+              }
+
+              Text {
+                id: titleText
+                anchors.verticalCenter: parent.verticalCenter
+                text: "relaunch"
+                color: root.barForeground
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.subtitle
+                font.bold: true
+              }
             }
 
             IconChip {
