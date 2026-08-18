@@ -616,6 +616,15 @@ jq -e '
 lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
 assert_contains "$lua" 'o.window({ class = "^(floaty)$" }, { workspace = "3 silent", float = true })'
 assert_contains "$lua" 'o.window({ class = "^(tiley)$" }, { workspace = "4 silent", tile = true })'
+# tile = true alone loses to Omarchy's floating-window tag: verified on
+# hardware, a tagged class came back floating at 875x600 with the tile rule
+# present. The tag has to be removed first. A tiled entry therefore emits an
+# untag line as well; a floating one must not.
+assert_contains "$lua" 'o.window({ class = "^(tiley)$" }, { tag = "-floating-window" })'
+assert_not_contains "$lua" 'o.window({ class = "^(floaty)$" }, { tag = "-floating-window" })'
+[[ "$(grep -n 'tag = "-floating-window"' <<<"$lua" | cut -d: -f1)" \
+   -lt "$(grep -n 'class = "\^(tiley)\$" }, { workspace' <<<"$lua" | cut -d: -f1)" ]] \
+  || fail "the untag line must come before the placement rule it enables"
 
 # Recapture refreshes float from the live window, the same way it refreshes
 # workspace. Both directions, and neither counts as a second update when the
@@ -690,7 +699,8 @@ jq -e '[.windows[] | select(.class == "foot")] | length == 2' "$RELAUNCH_CONFIG_
 jq -e '[.entries[] | select(.class == "foot")] | length == 1' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "snapshot must not change the one-entry-per-class model"
 jq -e '[.entries[] | select(.class == "foot") | .workspace] == [1]' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "first-seen lowest workspace still wins for the entry"
 lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
-[[ "$(grep -c 'class = "\^(foot)\$"' <<<"$lua")" -eq 1 ]]   || fail "snapshot must not add pins; expected exactly one foot rule"
+# Count placement rules only: a tiled entry also emits a tag-removal line.
+[[ "$(grep -c 'class = "\^(foot)\$" }, { workspace' <<<"$lua")" -eq 1 ]]   || fail "snapshot must not add pins; expected exactly one foot placement rule"
 assert_not_contains "$lua" 'scratchpad'
 
 # Monitor id, name and description all land. Output names are reassigned
