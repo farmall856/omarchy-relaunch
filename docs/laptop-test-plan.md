@@ -162,8 +162,12 @@ banner.
   string that engine wrote, and reinstalling does not rewrite it. Recapture
   must re-heal a `terminal` or `desktop-file` exec whose live resolution
   differs, while leaving a `set-exec` value (`overrides-table`) alone.
-- **Float:** float a *new* class and save. Existing entries do **not**
-  refresh `float`.
+- **Float/tile:** float a class and save, then tile it and save again. The
+  entry's `float` must follow the window both times, and the generated pin
+  must carry `float = true` / `tile = true` to match. A silent pin is a bug:
+  Omarchy tags `TUI.float` `+floating-window`, so a tiled window would come
+  back floating at 875×600. Window *size* and *centering* are not restored —
+  that is per-window, not per-class.
 - **Stagger:** set `staggerSeconds: 1` in `config.json`. Boot waits 1s
   *between* launches, not before the first. `0` is the usual value.
 - **Missing script:** the panel runs
@@ -212,8 +216,7 @@ has no `MISPLACED`; existing bar widgets unaffected.
 **Phase 6 re-confirmed on current HEAD (2026-08-18)**, in a sandbox using
 `RELAUNCH_CONFIG_DIR` plus fixture `/proc` and `.desktop` dirs: two feet
 collapse to one entry at the lowest workspace; herdr keeps its own class and
-its `-e`; a new floating class records `float` while an existing entry does
-not gain it; `staggerSeconds: 1` waits between launches but not before the
+its `-e`; `staggerSeconds: 1` waits between launches but not before the
 first, and `0` never waits; `generate` follows a hand-edited `config.json`
 rather than live windows; the `disabled` / `skip-once` guard is in the
 generated Lua and `skip-once` is consumed after one boot; `uninstall --yes`
