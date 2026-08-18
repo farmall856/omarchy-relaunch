@@ -92,7 +92,14 @@ def known_exec:
     "herdr": "xdg-terminal-exec --app-id=herdr herdr",
     "Proton Mail": "proton-mail",
     "Proton Pass": "proton-pass",
-    "signal": "signal-desktop"
+    "signal": "signal-desktop",
+    "libreoffice-calc": "libreoffice --calc",
+    "libreoffice-writer": "libreoffice --writer",
+    "libreoffice-impress": "libreoffice --impress",
+    "libreoffice-draw": "libreoffice --draw",
+    "libreoffice-base": "libreoffice --base",
+    "libreoffice-math": "libreoffice --math",
+    "libreoffice-startcenter": "libreoffice"
   };
 
 def exec_class:
@@ -125,7 +132,13 @@ def exec_class:
     "signal-desktop": "signal",
     "signal": "signal",
     "omarchy-launch-terminal": "foot",
-    "xdg-terminal-exec": "foot"
+    "xdg-terminal-exec": "foot",
+    "localc": "libreoffice-calc",
+    "lowriter": "libreoffice-writer",
+    "loimpress": "libreoffice-impress",
+    "lodraw": "libreoffice-draw",
+    "lobase": "libreoffice-base",
+    "lomath": "libreoffice-math"
   };
 
 def guess_exec:
@@ -203,6 +216,14 @@ def capture($clients):
               .by[$cl.match].workspace = $cl.workspace.id
               | .updated += 1
             else . end
+            | (known_exec[$cl.match] // empty) as $known
+            | if ($known != "")
+                and (.by[$cl.match].exec == ($cl.match | ascii_downcase))
+                and ($known != ($cl.match | ascii_downcase))
+              then
+                .by[$cl.match].exec = $known
+                | .updated += 1
+              else . end
           else
             .by[$cl.match] = (
               {

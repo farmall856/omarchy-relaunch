@@ -94,7 +94,8 @@ cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
   {"class":"brave-browser","workspace":1,"exec":"","enabled":true},
   {"class":"Alacritty","workspace":2,"exec":"","enabled":true},
   {"class":"VSCodium","workspace":3,"exec":"","enabled":true},
-  {"class":"herdr","workspace":4,"exec":"","enabled":true}
+  {"class":"herdr","workspace":4,"exec":"","enabled":true},
+  {"class":"libreoffice-calc","workspace":7,"exec":"","enabled":true}
 ]}
 EOF
 "$RELAUNCH" generate >/dev/null
@@ -103,6 +104,37 @@ assert_contains "$got" 'o.window({ class = "^(brave-browser)$"'
 assert_contains "$got" 'o.window({ class = "^(Alacritty)$"'
 assert_contains "$got" 'o.window({ class = "^(VSCodium)$"'
 assert_contains "$got" 'o.window({ class = "^(herdr)$"'
+assert_contains "$got" 'o.window({ class = "^(libreoffice-calc)$"'
+export FAKE_CLIENTS="${FAKE_CLIENTS:-$WORKDIR/clients.json}"
+cat >"$WORKDIR/clients.json" <<'EOF'
+[{"class":"libreoffice-calc","initialClass":"libreoffice-calc","floating":false,"workspace":{"id":7}}]
+EOF
+# capture uses known_exec; recapture must not keep a bad lowercased-class exec
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+export FAKE_CLIENTS="$WORKDIR/clients.json"
+"$RELAUNCH" save --json | jq -e '
+  [.entries[] | select(.class == "libreoffice-calc") | .exec] == ["libreoffice --calc"]
+' >/dev/null || fail "libreoffice-calc must guess libreoffice --calc, not the class name"
+# A leftover fallback exec (lowercased class) is healed on recapture;
+# a real user override is not.
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"libreoffice-calc","workspace":7,"exec":"libreoffice-calc","enabled":true}
+]}
+EOF
+"$RELAUNCH" save --json | jq -e '
+  [.entries[] | select(.class == "libreoffice-calc") | .exec] == ["libreoffice --calc"]
+' >/dev/null || fail "recapture must heal fallback exec libreoffice-calc"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"libreoffice-calc","workspace":7,"exec":"localc --norestore","enabled":true}
+]}
+EOF
+"$RELAUNCH" save --json | jq -e '
+  [.entries[] | select(.class == "libreoffice-calc") | .exec] == ["localc --norestore"]
+' >/dev/null || fail "recapture must keep a real user exec override"
 
 # --- capture merge ---
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
