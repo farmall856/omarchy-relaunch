@@ -24,7 +24,7 @@ hook) launches the list. Workspace pins live in generated `relaunch.lua`.
 
 Runtime files (user-owned, never commit):
 
-- `~/.config/omarchy-relaunch/config.json` — entries, ignored startup ids, `skipOnce`
+- `~/.config/omarchy-relaunch/config.json` — entries, ignored startup ids, `skipOnce`, `windows`
 - `~/.config/omarchy-relaunch/overrides.json` — user `class → exec` exceptions (starts empty)
 - `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
 - `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags (skip is also in config.json so Save cannot drop it)
@@ -88,6 +88,16 @@ stable. `Panel.qml` parses that object.
   `overrides.json` starts empty and only grows when the user saves a
   command. `--json` includes `execSource`, `execOk`, `unverified`, and
   `warnings`.
+- `config.json` carries a `windows` snapshot: every window seen at the last
+  save, with class, workspace, floating, and monitor id/name/description.
+  Rewritten by `save`, carried through untouched by every other command.
+  Nothing reads it yet — it exists so a future per-window feature has real
+  data. It is deliberately unfiltered (no first-per-class dedupe, special and
+  negative workspaces kept) because a snapshot loses information by applying
+  capture's filters. Store both monitor name and description: output names
+  (`DP-1`) are reassigned across reboots, descriptions (`BOE 0x0BCA`) identify
+  the panel. `hyprctl monitors` failing degrades to empty names, never a save
+  failure. It must never feed `entries[]` or the generated pins.
 - `list` (panel display) must not index `.desktop` files or resolve
   launchers. It reads saved rows, cheap terminal identity, and startup
   lines. Resolve only on `save` and `import`.
@@ -189,6 +199,22 @@ https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/new?template=
 
 ## Known limitations
 
+- **One workspace per class, and the pin is a standing rule.** The generated
+  `o.window` line has no expiry: it applies to every window of that class for
+  the whole session, not just the ones `relaunch boot` starts. Verified on
+  `omarchy13` — with `brave-browser` pinned to workspace 2, launching Brave
+  from workspace 7 opened it on 2; same for `foot`. So two windows of one app
+  on two workspaces can be neither restored nor kept: capture records only the
+  first seen, and the standing rule would collapse both anyway. Hyprland
+  window rules match class, not a window instance, so there is nothing to
+  attach a second placement to. This is the ceiling of the approach, not a
+  bug — do not "fix" it with per-window rules.
+- **Workspace numbers, not screens.** Restore targets workspace numbers.
+  Which monitor a workspace lives on is Hyprland's business, and Omarchy
+  ships no workspace→monitor binding at all — only manual keybindings
+  (`default/hypr/bindings/tiling.lua:34-37`). With a user's own
+  workspace→monitor rules, restore follows them; without, placement across
+  screens is whatever Hyprland decides. Only single-monitor is verified.
 - **Shared generic TUI classes.** Omarchy launches every floating TUI under
   `TUI.float` and every tiled one under `TUI.tile`. One entry per class means
   two different TUIs cannot hold different workspaces — the second capture
