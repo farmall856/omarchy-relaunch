@@ -24,6 +24,10 @@ disabled_path() { printf '%s\n' "$(config_dir)/disabled"; }
 skip_path() { printf '%s\n' "$(config_dir)/skip-once"; }
 last_boot_log_path() { printf '%s\n' "$(config_dir)/last-boot.log"; }
 last_boot_json_path() { printf '%s\n' "$(config_dir)/last-boot.json"; }
+last_session_path() { printf '%s\n' "$(config_dir)/last-session.json"; }
+snapshot_unit_path() {
+  printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/omarchy-relaunch-snapshot.service"
+}
 
 autostart_path() {
   printf '%s\n' "${RELAUNCH_AUTOSTART:-$HOME/.config/hypr/autostart.lua}"
@@ -1596,6 +1600,173 @@ cmd_last_boot() {
   cat "$(last_boot_log_path)"
 }
 
+# Snapshot of the real layout, for diffing against what came back. Opt-in and
+# purely diagnostic: nothing in save, generate or boot reads it.
+cmd_snapshot() {
+  local clients monitors out
+  clients="$(clients_raw)"
+  monitors="$(monitors_raw)"
+  out="$(jq -n --argjson clients "$clients" --argjson monitors "$monitors" \
+    --arg at "$(date -Iseconds)" "$jq_lib"'
+    (
+      $monitors
+      | map({key: ((.id // -1) | tostring), value: {name: (.name // ""), description: (.description // "")}})
+      | from_entries
+    ) as $mon
+    | {
+        capturedAt: $at,
+        windows: (
+          $clients
+          | map(
+              ((.monitor // -1) | tostring) as $mid
+              | {
+                  class: match_class,
+                  label: "",
+                  workspace: ((.workspace.id // 0) | tonumber),
+                  floating: (.floating == true),
+                  monitor: ((.monitor // -1) | tonumber),
+                  monitorName: ($mon[$mid].name // ""),
+                  monitorDescription: ($mon[$mid].description // ""),
+                  pid: (.pid // 0),
+                  title: (.title // "")
+                }
+            )
+          | sort_by(.workspace, .class)
+        )
+      }
+  ')"
+  # Labels are the stored ones, never resolved here: this can run at shutdown,
+  # where indexing .desktop files would be both slow and pointless.
+  out="$(jq --argjson cfg "$(load_config_json)" '
+    (
+      $cfg.entries
+      | map(select((.label // "") != ""))
+      | map({key: .class, value: .label})
+      | from_entries
+    ) as $byClass
+    # An empty label is not a label: jq only treats null and false as falsy,
+    # so // would happily hand back "".
+    | .windows |= map(.label = ($byClass[.class] // .class))
+  ' <<<"$out")"
+  printf '%s\n' "$out" | atomic_write "$(last_session_path)"
+  if $json_out; then
+    printf '%s\n' "$out" | jq '{ok: true, capturedAt: .capturedAt, windows: .windows}'
+  else
+    printf 'Wrote %s (%s windows)\n' "$(last_session_path)" "$(jq '.windows | length' <<<"$out")"
+  fi
+}
+
+# Diff the pre-shutdown snapshot against what the last boot actually produced.
+cmd_last_session() {
+  local diff_mode=false a
+  for a in "$@"; do
+    [[ "$a" == --diff ]] && diff_mode=true
+  done
+  [[ -f "$(last_session_path)" ]] \
+    || die "no session snapshot yet (enable it: relaunch snapshot-hook --enable)"
+  if ! $diff_mode; then
+    if $json_out; then cat "$(last_session_path)"; else
+      jq -r '"session snapshot \(.capturedAt)\n", (.windows[] | "  ws \(.workspace)  \(.label)  class=\(.class)")' \
+        "$(last_session_path)"
+    fi
+    return
+  fi
+  [[ -f "$(last_boot_json_path)" ]] || die "no last-boot log to diff against"
+  local report
+  report="$(jq -n \
+    --argjson before "$(cat "$(last_session_path)")" \
+    --argjson after "$(cat "$(last_boot_json_path)")" \
+    --argjson now "$(clients_raw)" "$jq_lib"'
+      ($now | map(match_class)) as $liveClasses
+      | ($before.windows | group_by(.class) | map({key: .[0].class, value: .}) | from_entries) as $was
+      | [
+          $before.windows[]
+          | . as $w
+          | ($liveClasses | map(select(. == $w.class)) | length) as $liveCount
+          | ($was[$w.class] | length) as $wantCount
+          | {
+              class: $w.class,
+              label: $w.label,
+              wasWorkspace: $w.workspace,
+              wasFloating: $w.floating,
+              want: $wantCount,
+              live: $liveCount
+            }
+        ]
+      | group_by(.class)
+      | map(.[0] + {missing: (.[0].want - .[0].live)})
+      | {
+          capturedAt: $before.capturedAt,
+          bootedAt: ($after.startedAt // ""),
+          outcome: ($after.outcome // ""),
+          classes: .
+        }
+    ')"
+  if $json_out; then
+    printf '%s\n' "$report"
+    return
+  fi
+  jq -r '
+    "session before: \(.capturedAt)",
+    "last boot:      \(.bootedAt)  outcome: \(.outcome)",
+    "",
+    (.classes[]
+      | if .missing > 0 then
+          "  MISSING  \(.label)  class=\(.class)  had \(.want), back \(.live)"
+        else
+          "  ok       \(.label)  class=\(.class)  \(.live)/\(.want)"
+        end)
+  ' <<<"$report"
+}
+
+# Opt-in trigger. See docs: ExecStop of a unit ordered After= the graphical
+# session runs while Hyprland is still alive, which is verified below.
+cmd_snapshot_hook() {
+  local mode="" a unit
+  for a in "$@"; do
+    case "$a" in
+      --enable) mode=enable ;;
+      --disable) mode=disable ;;
+    esac
+  done
+  [[ -n "$mode" ]] || die "snapshot-hook requires --enable or --disable"
+  unit="$(snapshot_unit_path)"
+  if [[ "$mode" == disable ]]; then
+    systemctl --user disable --now omarchy-relaunch-snapshot.service >/dev/null 2>&1 || true
+    rm -f "$unit"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    if $json_out; then emit_state; else printf 'Session snapshot hook removed.\n'; fi
+    return
+  fi
+  mkdir -p "$(dirname "$unit")"
+  cat >"$unit" <<EOF
+[Unit]
+Description=Relaunch pre-shutdown window snapshot
+Documentation=https://github.com/farmall856/omarchy-relaunch
+# Stop ordering is the reverse of start ordering, so After= here means this
+# unit stops BEFORE graphical-session.target. wayland-wm@.service declares
+# Before=graphical-session.target, so the compositor stops after the target --
+# and therefore after this ExecStop. hyprctl is still answering.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/true
+ExecStop=${SELF} snapshot
+
+[Install]
+WantedBy=graphical-session.target
+EOF
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  systemctl --user enable --now omarchy-relaunch-snapshot.service >/dev/null 2>&1 || true
+  if $json_out; then emit_state; else
+    printf 'Session snapshot hook installed: %s\n' "$unit"
+    printf 'It writes %s when the graphical session stops.\n' "$(last_session_path)"
+  fi
+}
+
 arg_value() {
   local flag="$1"
   shift
@@ -1853,7 +2024,10 @@ relaunch — engine for omarchy-relaunch
   relaunch list [--json]                 relaunch + startup inventory
   relaunch reload                        hyprctl reload
   relaunch boot                          hidden autostart hook
-  relaunch last-boot [--json] [--open]   show or open the last boot log
+  relaunch last-boot [--json] [--open]
+  relaunch snapshot                      capture the layout now (diagnostic)
+  relaunch last-session [--json] [--diff]
+  relaunch snapshot-hook --enable | --disable   show or open the last boot log
   relaunch import --class CLASS --workspace N
   relaunch import --exec CMD --workspace N
   relaunch set-exec --class CLASS --exec CMD
@@ -1889,6 +2063,9 @@ main() {
     reload) cmd_reload ;;
     boot) cmd_boot ;;
     last-boot) cmd_last_boot "$@" ;;
+    snapshot) cmd_snapshot ;;
+    last-session) cmd_last_session "$@" ;;
+    snapshot-hook) cmd_snapshot_hook "$@" ;;
     import) cmd_import "$@" ;;
     set-exec) cmd_set_exec "$@" ;;
     drop) cmd_drop "$@" ;;
