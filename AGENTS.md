@@ -96,7 +96,19 @@ stable. `Panel.qml` parses that object.
   exec is rewritten whenever live resolution disagrees with it — otherwise a
   broken value written by an older engine is sticky forever and reinstalling
   never repairs it. `overrides-table` is the only source the user typed, so it
-  is never healed away; `enabled` and `float` edits are always preserved.
+  is never healed away; `enabled` edits are always preserved.
+- Float/tile follows the live window, like workspace. Capture stores `float`
+  as a real boolean and recapture refreshes it — it is not a preserved user
+  edit. Generated rules must say which they want: `float = true` when true,
+  `tile = true` when false. Silence is not neutral, because
+  `default/hypr/apps/system.lua` tags `TUI.float` (and friends)
+  `+floating-window`, so an unqualified pin lets a tiled window come back
+  floating at 875×600. `tile` is a first-class rule; Omarchy uses it in
+  `default/hypr/apps/browser.lua`. A genuinely absent `float` means
+  "unknown" — a legacy entry, or one added by `import` with no window to
+  read — and emits neither rule. `relaunch.lua` is loaded from
+  `hyprland.lua` after the Omarchy defaults, so these rules win.
+  Per-window geometry (center, size) is out of scope: it is not per-class.
 - Skip special/negative workspaces (`Workspace.ID < 1`) and empty classes.
 - Regex-escape class names in generated `o.window` lines, then Lua-escape
   backslashes so dotted classes (`org.omarchy.agent`) are valid Lua strings.

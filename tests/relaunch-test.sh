@@ -591,6 +591,71 @@ EOF
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
+# --- float/tile is captured and pinned in both directions ---
+# Omarchy tags TUI.float +floating-window in default/hypr/apps/system.lua, so
+# a pin that stays silent about float lets that tag win and a window that was
+# tiled comes back floating at 875x600. The generated rule has to say which
+# one it wants. relaunch.lua is loaded after the Omarchy defaults, so it wins.
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"class":"floaty","initialClass":"floaty","pid":510,"floating":true,"workspace":{"id":3}},
+  {"class":"tiley","initialClass":"tiley","pid":511,"floating":false,"workspace":{"id":4}}
+]
+EOF
+"$RELAUNCH" save --json | jq -e '
+  ([.entries[] | select(.class == "floaty") | .float] == [true])
+  and ([.entries[] | select(.class == "tiley") | .float] == [false])
+' >/dev/null || fail "capture must record float as a real boolean in both directions"
+jq -e '
+  ([.entries[] | select(.class == "tiley") | has("float")] == [true])
+' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "float:false must survive the config round trip, not be dropped as falsy"
+lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+assert_contains "$lua" 'o.window({ class = "^(floaty)$" }, { workspace = "3 silent", float = true })'
+assert_contains "$lua" 'o.window({ class = "^(tiley)$" }, { workspace = "4 silent", tile = true })'
+
+# Recapture refreshes float from the live window, the same way it refreshes
+# workspace. Both directions, and neither counts as a second update when the
+# workspace moved too.
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"class":"floaty","initialClass":"floaty","pid":510,"floating":false,"workspace":{"id":3}},
+  {"class":"tiley","initialClass":"tiley","pid":511,"floating":true,"workspace":{"id":4}}
+]
+EOF
+out="$("$RELAUNCH" save --json)"
+echo "$out" | jq -e '
+  ([.entries[] | select(.class == "floaty") | .float] == [false])
+  and ([.entries[] | select(.class == "tiley") | .float] == [true])
+' >/dev/null || fail "recapture must refresh float from the live window: $out"
+echo "$out" | jq -e '.updated == 2' >/dev/null   || fail "a float-only change is one update per entry: $out"
+lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+assert_contains "$lua" 'o.window({ class = "^(floaty)$" }, { workspace = "3 silent", tile = true })'
+assert_contains "$lua" 'o.window({ class = "^(tiley)$" }, { workspace = "4 silent", float = true })'
+
+# One window whose workspace and float both moved is still one update.
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"floaty","initialClass":"floaty","pid":510,"floating":true,"workspace":{"id":9}}]
+EOF
+"$RELAUNCH" save --json | jq -e '.updated == 1' >/dev/null   || fail "updated counts entries, not changed fields"
+
+# A legacy entry with no float at all is unknown, not tiled: it must not
+# start emitting tile = true until a live window says so.
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"legacy","workspace":2,"exec":"legacy","execSource":"guess","enabled":true}
+]}
+EOF
+"$RELAUNCH" generate >/dev/null
+lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+assert_contains "$lua" 'o.window({ class = "^(legacy)$" }, { workspace = "2 silent" })'
+assert_not_contains "$lua" 'legacy)$" }, { workspace = "2 silent", tile'
+# …and import, which has no window to read, leaves it unknown too.
+"$RELAUNCH" import --exec legacy2 --workspace 5 --json >/dev/null
+jq -e '[.entries[] | select(.class == "legacy2") | has("float")] == [false]'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "import has no live window, so float must stay unknown"
+
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"
 printf '' >"$WORKDIR/globdir/not-the-class"

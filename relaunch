@@ -105,7 +105,13 @@ def normalize_entry:
     execSource: ((.execSource // "") | normalize_exec_source),
     enabled: (.enabled == true)
   }
-  + (if .float == true then {float: true} else {} end);
+  + (
+      # float is a real boolean: false is a captured fact ("this window was
+      # tiled"), not the absence of one. Only a genuinely absent float --
+      # a legacy entry, or one added by `import` with no live window to
+      # read -- stays absent, and that means "unknown, emit no rule".
+      if (.float | type) == "boolean" then {float: .float} else {} end
+    );
 
 def load_config:
   {
@@ -139,10 +145,14 @@ def capture($clients):
       else
         .seen[$cl.match] = true
         | if .by[$cl.match] then
-            if .by[$cl.match].workspace != $cl.workspace.id then
-              .by[$cl.match].workspace = $cl.workspace.id
-              | .updated += 1
-            else . end
+            # updated counts entries, not fields: one window whose workspace
+            # and float both moved is one update, so compare the whole entry
+            # once at the end rather than incrementing per assignment.
+            (.by[$cl.match]) as $before
+            | .by[$cl.match].workspace = $cl.workspace.id
+            # Live window state is the authority for float, same as for
+            # workspace. Recapture refreshes it rather than preserving it.
+            | .by[$cl.match].float = ($cl.floating == true)
             | (
                 (.by[$cl.match].execSource | normalize_exec_source) as $src
                 | (($cl.relaunchExecSource // "") | normalize_exec_source) as $nsrc
@@ -163,8 +173,8 @@ def capture($clients):
             | if $heal then
                 .by[$cl.match].exec = $cl.relaunchExec
                 | .by[$cl.match].execSource = $cl.relaunchExecSource
-                | .updated += 1
               else . end
+            | if .by[$cl.match] != $before then .updated += 1 else . end
           else
             .by[$cl.match] = (
               {
@@ -179,7 +189,7 @@ def capture($clients):
                 ),
                 enabled: true
               }
-              + (if $cl.floating == true then {float: true} else {} end)
+              + {float: ($cl.floating == true)}
             )
             | .order += [$cl.match]
             | .added += 1
@@ -204,7 +214,17 @@ def lua_rules:
   enabled_entries
   | map(
       "o.window({ class = \"^(\(.class | lua_regex))$\" }, { workspace = \"\(.workspace) silent\""
-      + (if .float == true then ", float = true" else "" end)
+      + (
+          # Omarchy tags TUI.float etc. +floating-window in
+          # default/hypr/apps/system.lua, so silence means "float" for those
+          # classes. Say tile = true explicitly to bring a tiled window back
+          # tiled. relaunch.lua is loaded by hyprland.lua after the Omarchy
+          # defaults, so this rule wins. tile is a first-class rule: see
+          # default/hypr/apps/browser.lua.
+          if .float == true then ", float = true"
+          elif .float == false then ", tile = true"
+          else "" end
+        )
       + " })\n"
     )
   | add // "";
