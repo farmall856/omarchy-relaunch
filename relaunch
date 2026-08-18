@@ -216,7 +216,12 @@ def capture($clients):
                then
                  .by[$cl.match].label = $cl.relaunchLabel
                else . end)
-            | (if (($cl.relaunchStartupKeys // []) | length) > 0 then
+            # Same override protection as the label: a user override keeps
+            # its typed exec, so correlation keys describing the live hosted
+            # command would associate it with a startup line it never runs.
+            | (if (($cl.relaunchStartupKeys // []) | length) > 0
+                  and ((.by[$cl.match].execSource | normalize_exec_source) != "overrides-table")
+               then
                  .by[$cl.match].startupKeys = $cl.relaunchStartupKeys
                else . end)
             | (
@@ -764,28 +769,49 @@ _desktop_indexed=0
 # an underscore. Query and fragment are excluded because Chromium discards
 # them -- verified, https://example.com/?q=1 yields the same class as
 # https://example.com. An empty path and / are identical at the source.
-# RFC 3986 5.2.4 remove_dot_segments, so /a/./b and /a/b/../b canonicalize
-# the way GURL::path() reports them.
+# RFC 3986 5.2.4 remove_dot_segments, transcribed literally. A segment-stack
+# approximation is not equivalent: it drops empty segments and the trailing
+# slash a final "." or ".." produces, so /a/b/.. would give /a instead of /a/
+# and /a//b would give /a/b. Those are different Chromium identities.
 remove_dot_segments() {
-  local input="$1" out="" seg
-  local -a stack=()
+  local input="$1" output="" seg rest
   while [[ -n "$input" ]]; do
-    seg="${input%%/*}"
-    if [[ "$input" == */* ]]; then
-      input="${input#*/}"
-    else
+    if [[ "$input" == ../* ]]; then
+      input="${input#../}"
+    elif [[ "$input" == ./* ]]; then
+      input="${input#./}"
+    elif [[ "$input" == /./* ]]; then
+      input="/${input#/./}"
+    elif [[ "$input" == "/." ]]; then
+      input="/"
+    elif [[ "$input" == /../* ]]; then
+      input="/${input#/../}"
+      output="${output%/*}"
+    elif [[ "$input" == "/.." ]]; then
+      input="/"
+      output="${output%/*}"
+    elif [[ "$input" == "." || "$input" == ".." ]]; then
       input=""
+    else
+      if [[ "$input" == /* ]]; then
+        rest="${input:1}"
+        if [[ "$rest" == */* ]]; then
+          seg="/${rest%%/*}"
+        else
+          seg="/$rest"
+        fi
+      else
+        if [[ "$input" == */* ]]; then
+          seg="${input%%/*}"
+        else
+          seg="$input"
+        fi
+      fi
+      output+="$seg"
+      input="${input#"$seg"}"
     fi
-    case "$seg" in
-      "" | .) ;;
-      ..) ((${#stack[@]})) && unset "stack[${#stack[@]}-1]" && stack=("${stack[@]}") ;;
-      *) stack+=("$seg") ;;
-    esac
   done
-  for seg in ${stack[@]+"${stack[@]}"}; do
-    out+="/$seg"
-  done
-  printf '%s' "${out:-/}"
+  printf '%s' "$output"
 }
 
 # Chromium builds the app identity from GURL::host() and GURL::path()
@@ -796,8 +822,10 @@ remove_dot_segments() {
 chromium_identity_from_url() {
   local url="$1" rest host path
   [[ -n "$url" ]] || return 1
+  # A GURL needs a scheme. The previous guard could never fire: rest == url
+  # only when there is no "://", which the second half then required.
+  [[ "$url" == *"://"* ]] || return 1
   rest="${url#*://}"
-  [[ "$rest" == "$url" && "$url" == *"://"* ]] && return 1
   rest="${rest%%#*}"
   rest="${rest%%\?*}"
   host="${rest%%/*}"

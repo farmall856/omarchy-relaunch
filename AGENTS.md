@@ -147,6 +147,36 @@ stable. `Panel.qml` parses that object.
   Chromium profiles and other browsers stay unresolved and keep the existing
   cmdline fallback and its `unverified` flag. Do not broaden the matcher by
   guessing at suffix formats.
+- Entries carry `startupKeys`: a lowercased list of tokens by which an
+  autostart line can be recognised as this entry — the class, the
+  desktop-file id, and the `Exec` leaf of the `.desktop` the exec already
+  names. Resolved at `save`/`import` time and stored, never at `list` time,
+  because `list` must not index applications dirs. It exists so
+  `o.launch_on_start("brave")` correlates with a saved `brave-browser` entry
+  and the row keeps `kind: both` and its "Delete startup config" action.
+  **It is a correlation list only.** It is never an identity, never a lookup
+  key, and never reaches the generated pins — `class` remains the only
+  identity. A missing field normalizes to `[]`, so a config written before
+  the field behaves exactly as it did before; the next `save` fills it in.
+  It gets the same override protection as `label`: recapture leaves it alone
+  on an `overrides-table` entry, whose exec is the user's own text.
+- A synthesized `--app-id=<class>` goes through `quote_argv` like the inner
+  argv. Boot runs the whole string through `bash -c`, so an app id containing
+  a space would split and one containing a metacharacter would execute.
+- Web-app identity follows `GURL::host()`/`GURL::path()`: userinfo and port
+  excluded, dot segments removed by a literal transcription of RFC 3986
+  5.2.4. A segment-stack approximation is **not** equivalent — it drops empty
+  segments and the trailing slash a final `.` or `..` produces, so `/a/b/..`
+  would give `/a` instead of `/a/` and `/a//b` would give `/a/b`. Those are
+  different Chromium identities. A URL with no scheme is not a GURL and is
+  rejected.
+- Web-app masking keys on the case-sensitive XDG desktop-file id (path
+  relative to `applications/`, `/` → `-`), not a lowercased basename:
+  `Foo.desktop` and `foo.desktop` are distinct ids, and `foo/bar.desktop`
+  claims `foo-bar`.
+- Recapture never relabels an `overrides-table` entry. Its exec is the user's
+  text and is protected, so a label describing the live hosted command would
+  describe something it does not run.
 - `list` (panel display) must not index `.desktop` files or resolve
   launchers. It reads saved rows, cheap terminal identity, and startup
   lines. Resolve only on `save` and `import`.
