@@ -99,6 +99,13 @@ Exec=libreoffice --calc %U
 StartupWMClass=libreoffice-calc
 Type=Application
 EOF
+cat >"$XDG_APPS/brave.desktop" <<'EOF'
+[Desktop Entry]
+Name=Brave Web Browser
+Exec=brave %U
+StartupWMClass=brave-browser
+Type=Application
+EOF
 cat >"$XDG_APPS/proton-mail.desktop" <<'EOF'
 [Desktop Entry]
 Name=Proton Mail
@@ -127,6 +134,31 @@ EOF
 CALC_DESK="$XDG_APPS/libreoffice-calc.desktop"
 MAIL_DESK="$XDG_APPS/proton-mail.desktop"
 PCT_DESK="$XDG_APPS/pct-app.desktop"
+# Packaged apps (LibreOffice) ship .desktop files as symlinks.
+mkdir -p "$WORKDIR/xdg-sym/applications"
+ln -s "$CALC_DESK" "$WORKDIR/xdg-sym/applications/libreoffice-calc.desktop"
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-sym"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"libreoffice-calc","initialClass":"libreoffice-calc","pid":71,"floating":false,"workspace":{"id":7}}]
+EOF
+"$RELAUNCH" save --json | jq -e --arg calc "gio launch $WORKDIR/xdg-sym/applications/libreoffice-calc.desktop" '
+  ([.entries[] | select(.class == "libreoffice-calc") | .exec] == [$calc])
+  and ([.entries[] | select(.class == "libreoffice-calc") | .execSource] == ["desktop-file"])
+' >/dev/null || fail "symlinked .desktop files must be indexed"
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"class":"libreoffice-calc","initialClass":"libreoffice-calc","pid":71,"floating":false,"workspace":{"id":7}},
+  {"class":"Proton Mail","initialClass":"Proton Mail","pid":72,"floating":false,"workspace":{"id":3}},
+  {"class":"pct-app","initialClass":"pct-app","pid":73,"floating":false,"workspace":{"id":8}}
+]
+EOF
 "$RELAUNCH" save --json | jq -e --arg calc "gio launch $CALC_DESK" --arg mail "gio launch $MAIL_DESK" --arg pct "gio launch $PCT_DESK" '
   ([.entries[] | select(.class == "libreoffice-calc") | .exec] == [$calc])
   and ([.entries[] | select(.class == "Proton Mail") | .exec] == [$mail])
@@ -164,6 +196,39 @@ EOF
 "$RELAUNCH" save --json | jq -e --arg exec "gio launch $WORKDIR/xdg-user/applications/X.desktop" '
   [.entries[] | select(.class == "X") | .exec] == [$exec]
 ' >/dev/null || fail "user applications dir must win over system .desktop"
+
+# A Brave PWA can reuse Name=Proton Mail. The official app window class must
+# still map to proton-mail.desktop; the PWA maps by desktop-file id.
+mkdir -p "$WORKDIR/xdg-pwa/applications"
+cat >"$WORKDIR/xdg-pwa/applications/proton-mail.desktop" <<'EOF'
+[Desktop Entry]
+Name=Proton Mail
+Exec=proton-mail %U
+Type=Application
+EOF
+cat >"$WORKDIR/xdg-pwa/applications/brave-jnpecgipniidlgicjocehkhajgdnjekh-Default.desktop" <<'EOF'
+[Desktop Entry]
+Name=Proton Mail
+Exec=/opt/brave-bin/brave --app-id=jnpecgipniidlgicjocehkhajgdnjekh
+StartupWMClass=crx_jnpecgipniidlgicjocehkhajgdnjekh
+Type=Application
+EOF
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-pwa"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"class":"Proton Mail","initialClass":"Proton Mail","pid":75,"floating":false,"workspace":{"id":3}},
+  {"class":"brave-jnpecgipniidlgicjocehkhajgdnjekh-Default","initialClass":"brave-jnpecgipniidlgicjocehkhajgdnjekh-Default","pid":76,"floating":false,"workspace":{"id":3}}
+]
+EOF
+PWA_DESK="$WORKDIR/xdg-pwa/applications/brave-jnpecgipniidlgicjocehkhajgdnjekh-Default.desktop"
+OFFICIAL_MAIL="$WORKDIR/xdg-pwa/applications/proton-mail.desktop"
+"$RELAUNCH" save --json | jq -e --arg official "gio launch $OFFICIAL_MAIL" --arg pwa "gio launch $PWA_DESK" '
+  ([.entries[] | select(.class == "Proton Mail") | .exec] == [$official])
+  and ([.entries[] | select(.class == "brave-jnpecgipniidlgicjocehkhajgdnjekh-Default") | .exec] == [$pwa])
+' >/dev/null || fail "PWA Name= must not steal the official Proton Mail class"
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -189,6 +254,39 @@ EOF
   ([.entries[] | select(.class == "libreoffice-calc") | .exec] == ["localc --norestore"])
   and ([.entries[] | select(.class == "libreoffice-calc") | .execSource] == ["overrides-table"])
 ' >/dev/null || fail "override must beat desktop-file on recapture"
+
+# list / display must not search .desktop files. Add-from-running uses --class.
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+printf '{}\n' >"$RELAUNCH_CONFIG_DIR/overrides.json"
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"libreoffice-calc","initialClass":"libreoffice-calc","pid":71,"floating":false,"workspace":{"id":7}}]
+EOF
+"$RELAUNCH" list --json | jq -e '
+  ([.rows[] | select(.kind == "running" and .class == "libreoffice-calc")] | length == 1)
+  and ([.rows[] | select(.kind == "running" and .class == "libreoffice-calc") | .execSource] == ["guess"])
+' >/dev/null || fail "list must not resolve .desktop launchers for running windows"
+"$RELAUNCH" import --class libreoffice-calc --workspace 7 --json | jq -e --arg calc "gio launch $CALC_DESK" '
+  ([.entries[] | select(.class == "libreoffice-calc") | .exec] == [$calc])
+  and ([.entries[] | select(.class == "libreoffice-calc") | .execSource] == ["desktop-file"])
+' >/dev/null || fail "import --class must store gio launch <desktop-file>"
+jq -e '.["libreoffice-calc"]' "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null \
+  && fail "import --class from desktop must not write overrides.json"
+"$RELAUNCH" drop --class libreoffice-calc --json >/dev/null
+"$RELAUNCH" set-exec --class missing --exec true 2>/dev/null \
+  && fail "set-exec on missing class should fail"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"libreoffice-calc","workspace":7,"exec":"gio launch /tmp/x.desktop","enabled":true}
+]}
+EOF
+"$RELAUNCH" set-exec --class libreoffice-calc --exec "localc --norestore" >/dev/null
+jq -e '.["libreoffice-calc"] == "localc --norestore"' "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null \
+  || fail "set-exec must write override before drop"
+"$RELAUNCH" drop --class libreoffice-calc >/dev/null
+jq -e '.["libreoffice-calc"]' "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null \
+  && fail "drop must remove the class from overrides.json"
 
 # Guess with a missing command is flagged immediately
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-empty"
@@ -291,11 +389,12 @@ o.exec_on_start("setsid uwsm-app -- xdg-terminal-exec --app-id=org.omarchy.termi
 o.exec_on_start("relaunch boot")
 EOF
 
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
 listed="$("$RELAUNCH" list --json)"
 echo "$listed" | jq -e '
   ([.startup[].exec] | index("relaunch boot") == null)
   and ([.startup[].exec] | index("brave") != null)
-  and ([.startup[] | select(.exec == "brave") | .class] | .[0] == "brave-browser")
+  and ([.startup[] | select(.exec == "brave") | .class] | .[0] == "brave")
   and ([.startup[] | select(.exec | startswith("setsid")) | .class] | .[0] == "org.omarchy.terminal")
   and ([.rows[] | select(.kind == "startup" and .exec == "brave")] | length == 1)
 ' >/dev/null || fail "inventory: $listed"
