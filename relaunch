@@ -534,7 +534,11 @@ index_desktop_file() {
   id="$(basename "$file" .desktop)"
   index_set_if_empty DESKTOP_EXEC_BY_CLASS "$(normalize_desktop_key "$wmclass")" "$launch"
   index_set_if_empty DESKTOP_EXEC_BY_ID "$(normalize_desktop_key "$id")" "$launch"
-  index_set_if_empty DESKTOP_EXEC_BY_NAME "$(normalize_desktop_key "$name")" "$launch"
+  # Name is a last-resort fallback. A Brave PWA named "Proton Mail" has
+  # StartupWMClass=crx_… — do not let that Name steal the official app class.
+  if [[ -z "$wmclass" || "$(normalize_desktop_key "$wmclass")" == "$(normalize_desktop_key "$name")" ]]; then
+    index_set_if_empty DESKTOP_EXEC_BY_NAME "$(normalize_desktop_key "$name")" "$launch"
+  fi
   # Reverse map uses the raw Exec token so startup-line matching still works.
   index_set_if_empty DESKTOP_CLASS_BY_EXEC "$(normalize_desktop_key "$raw_exec")" "${wmclass:-$id}"
   index_set_if_empty DESKTOP_CLASS_BY_EXEC "$(normalize_desktop_key "${raw_exec%% *}")" "${wmclass:-$id}"
@@ -548,7 +552,10 @@ ensure_desktop_index() {
     [[ -d "$dir" ]] || continue
     while IFS= read -r -d '' f; do
       index_desktop_file "$f"
-    done < <(find "$dir" -maxdepth 2 -type f -name '*.desktop' -print0 2>/dev/null)
+    # -L: distro .desktop files are often symlinks (LibreOffice ships
+    # /usr/share/applications/libreoffice-calc.desktop -> .../xdg/calc.desktop).
+    # find -type f without -L skips those and Calc falls through to cmdline.
+    done < <(find -L "$dir" -maxdepth 2 -type f -name '*.desktop' -print0 2>/dev/null)
   done < <(xdg_application_dirs)
 }
 
@@ -556,8 +563,9 @@ desktop_exec_for_class() {
   local k
   ensure_desktop_index
   k="$(normalize_desktop_key "$1")"
-  # Spec order: StartupWMClass, then Name, then desktop-file id.
-  printf '%s\n' "${DESKTOP_EXEC_BY_CLASS[$k]:-${DESKTOP_EXEC_BY_NAME[$k]:-${DESKTOP_EXEC_BY_ID[$k]:-}}}"
+  # Window match: StartupWMClass, then desktop-file id, then Name.
+  # Name last so a PWA that reuses a friendly Name cannot steal the pin class.
+  printf '%s\n' "${DESKTOP_EXEC_BY_CLASS[$k]:-${DESKTOP_EXEC_BY_ID[$k]:-${DESKTOP_EXEC_BY_NAME[$k]:-}}}"
 }
 
 desktop_class_for_exec() {
@@ -600,6 +608,13 @@ cmdline_exec_for_pid() {
 }
 
 class_for_startup_exec() {
+  # --cheap skips the .desktop index. Display/list must use that so opening
+  # the panel does not walk every application dir.
+  local cheap=0
+  if [[ "${1:-}" == --cheap ]]; then
+    cheap=1
+    shift
+  fi
   local exec="$1" ident class mapped first="" token base
   local -a argv=()
   split_exec_words "$exec" argv
@@ -609,10 +624,12 @@ class_for_startup_exec() {
     printf '%s\n' "$class"
     return
   fi
-  mapped="$(desktop_class_for_exec "$exec")"
-  if [[ -n "$mapped" ]]; then
-    printf '%s\n' "$mapped"
-    return
+  if ! ((cheap)); then
+    mapped="$(desktop_class_for_exec "$exec")"
+    if [[ -n "$mapped" ]]; then
+      printf '%s\n' "$mapped"
+      return
+    fi
   fi
   for token in "${argv[@]}"; do
     [[ "$token" == -* || "$token" == -- ]] && continue
@@ -620,10 +637,12 @@ class_for_startup_exec() {
     base="${token##*/}"
     is_wrapper_cmd "$base" && continue
     [[ -z "$first" ]] && first="$base"
-    mapped="$(desktop_class_for_exec "$base")"
-    if [[ -n "$mapped" && "$mapped" != "$base" ]]; then
-      printf '%s\n' "$mapped"
-      return
+    if ! ((cheap)); then
+      mapped="$(desktop_class_for_exec "$base")"
+      if [[ -n "$mapped" && "$mapped" != "$base" ]]; then
+        printf '%s\n' "$mapped"
+        return
+      fi
     fi
   done
   printf '%s\n' "${first:-${argv[0]:-}}"
@@ -664,6 +683,15 @@ set_override_exec() {
   printf '%s\n' "$json" | atomic_write "$(overrides_path)"
 }
 
+unset_override_exec() {
+  local class="$1" json
+  ensure_overrides_file
+  json="$(load_overrides_json | jq --arg c "$class" '
+    with_entries(select((.key | ascii_downcase) != ($c | ascii_downcase)))
+  ')"
+  printf '%s\n' "$json" | atomic_write "$(overrides_path)"
+}
+
 exec_is_ok() {
   local exec="$1" token
   token="${exec%% *}"
@@ -700,10 +728,22 @@ resolve_launch() {
 }
 
 annotate_clients() {
-  local clients="$1" pid class exec source patches line
+  # mode=display: only unwrap terminal hosts (cheap /proc walk). Do not
+  # index .desktop files or read cmdline launchers — that is save/import.
+  local clients="$1" mode="${2:-full}"
+  local pid class exec source patches line ident
   patches='[]'
   while IFS=$'\t' read -r pid class; do
     [[ -z "$pid" || "$pid" == null ]] && continue
+    if [[ "$mode" == display ]]; then
+      ident="$(identity_from_pid "$pid")"
+      if jq -e '.wrapped == true' >/dev/null <<<"$ident"; then
+        exec="$(jq -r '.exec' <<<"$ident")"
+        patches="$(jq --argjson pid "$pid" --argjson ident "$ident" --arg exec "$exec" \
+          '. + [{pid: $pid, wrapped: true, class: $ident.class, exec: $exec, execSource: "terminal"}]' <<<"$patches")"
+      fi
+      continue
+    fi
     line="$(resolve_launch "$class" "$pid")"
     exec="${line%%$'\t'*}"
     source="${line#*$'\t'}"
@@ -768,7 +808,7 @@ scan_startup() {
     fi
     is_relaunch_exec "$exec" && continue
     id="lua:${kind}:${exec}"
-    class="$(class_for_startup_exec "$exec")"
+    class="$(class_for_startup_exec --cheap "$exec")"
     items="$(jq --arg id "$id" --arg source "$(basename "$file")" --arg kind "$kind" \
       --arg exec "$exec" --arg class "$class" --argjson line "$n" \
       '. + [{id: $id, source: $source, kind: $kind, exec: $exec, class: $class, line: $line}]' \
@@ -910,7 +950,7 @@ emit_state() {
   ensure_overrides_file
   cfg="$(load_config_json)"
   startup="$(scan_startup)"
-  clients="$(clients_json)"
+  clients="$(clients_display)"
   rows="$(build_rows "$cfg" "$startup" "$clients")"
   local _entf _rowf
   _entf="$(mktemp)"
@@ -1008,7 +1048,7 @@ verify_launches() {
   if [[ "${RELAUNCH_VERIFY_SLEEP:-2}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !(${RELAUNCH_VERIFY_SLEEP:-2} > 0)}"; then
     sleep "${RELAUNCH_VERIFY_SLEEP:-2}"
   fi
-  if ! clients="$(clients_json)"; then
+  if ! clients="$(clients_raw)"; then
     printf '%s\n' "$launches"
     return
   fi
@@ -1032,13 +1072,33 @@ verify_launches() {
   ' <<<"$launches"
 }
 
-clients_json() {
+clients_raw() {
   local out
   if ! out="$("$HYPRCTL" clients -j)"; then
     die "hyprctl clients: command failed"
   fi
   jq -e 'type == "array"' >/dev/null <<<"$out" || die "hyprctl clients: expected a JSON array"
-  annotate_clients "$out"
+  printf '%s\n' "$out"
+}
+
+clients_json() {
+  annotate_clients "$(clients_raw)" full
+}
+
+clients_display() {
+  annotate_clients "$(clients_raw)" display
+}
+
+pid_for_running_class() {
+  local class="$1" clients
+  clients="$(clients_raw)" || return 1
+  jq -r --arg c "$class" '
+    map(select(
+      ((.initialClass // .class // "") | ascii_downcase) == ($c | ascii_downcase)
+      and (.pid != null)
+    ) | .pid)
+    | .[0] // empty
+  ' <<<"$clients"
 }
 
 cmd_save() {
@@ -1222,25 +1282,39 @@ arg_value() {
 }
 
 cmd_import() {
-  local exec ws class cfg
+  local exec ws class cfg pid line source write_override=false
   exec="$(arg_value --exec "$@" || true)"
   ws="$(arg_value --workspace "$@" || true)"
-  [[ -n "$exec" ]] || die "import requires --exec"
+  class="$(arg_value --class "$@" || true)"
   [[ "$ws" =~ ^[1-9][0-9]*$ ]] || die "import requires --workspace N (N>=1)"
-  class="$(class_for_startup_exec "$exec")"
+  [[ -n "$class" || -n "$exec" ]] || die "import requires --class or --exec"
+  if [[ -n "$class" && -z "$exec" ]]; then
+    pid="$(pid_for_running_class "$class" || true)"
+    line="$(resolve_launch "$class" "${pid:-}")"
+    exec="${line%%$'\t'*}"
+    source="${line#*$'\t'}"
+  else
+    if [[ -z "$class" ]]; then
+      class="$(class_for_startup_exec "$exec")"
+    fi
+    source="overrides-table"
+    write_override=true
+  fi
+  [[ -n "$exec" ]] || die "import could not resolve a launch command for ${class}"
   cfg="$(load_config_json)"
   if jq -e --arg class "$class" '.entries[] | select(.class == $class)' >/dev/null <<<"$cfg"; then
-    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" '
-      .entries |= map(if .class == $class then .workspace = $ws | .exec = $exec | .enabled = true else . end)
+    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" '
+      .entries |= map(if .class == $class then .workspace = $ws | .exec = $exec | .execSource = $src | .enabled = true else . end)
     ' <<<"$cfg")"
   else
-    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" '
-      .entries += [{class: $class, workspace: $ws, exec: $exec, enabled: true}]
+    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" '
+      .entries += [{class: $class, workspace: $ws, exec: $exec, execSource: $src, enabled: true}]
     ' <<<"$cfg")"
   fi
-  cfg="$(jq --arg class "$class" '.entries |= map(if .class == $class then .execSource = "overrides-table" else . end)' <<<"$cfg")"
   jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
-  set_override_exec "$class" "$exec"
+  if $write_override; then
+    set_override_exec "$class" "$exec"
+  fi
   jq "$jq_lib"' load_config' <<<"$cfg" | write_generated
   if $json_out; then emit_state; else printf 'Imported %s -> workspace %s\n' "$class" "$ws"; fi
 }
@@ -1275,6 +1349,7 @@ cmd_drop() {
   cfg="$(load_config_json)"
   cfg="$(jq --arg class "$class" '.entries |= map(select(.class != $class))' <<<"$cfg")"
   jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
+  unset_override_exec "$class"
   jq "$jq_lib"' load_config' <<<"$cfg" | write_generated
   if $json_out; then emit_state; else printf 'Removed %s from relaunch\n' "$class"; fi
 }
@@ -1449,6 +1524,7 @@ relaunch — engine for omarchy-relaunch
   relaunch reload                        hyprctl reload
   relaunch boot                          hidden autostart hook
   relaunch last-boot [--json] [--open]   show or open the last boot log
+  relaunch import --class CLASS --workspace N
   relaunch import --exec CMD --workspace N
   relaunch set-exec --class CLASS --exec CMD
   relaunch drop --class CLASS            remove from relaunch list

@@ -48,6 +48,7 @@ relaunch generate [--json]             # rebuild rules
 relaunch list [--json]                 # entries + startup inventory + rows + boot
 relaunch reload
 relaunch boot                          # hidden autostart hook
+relaunch import --class CLASS --workspace N
 relaunch import --exec CMD --workspace N
 relaunch set-exec --class CLASS --exec CMD
 relaunch drop --class CLASS
@@ -78,6 +79,9 @@ stable. `Panel.qml` parses that object.
   `overrides.json` starts empty and only grows when the user saves a
   command. `--json` includes `execSource`, `execOk`, `unverified`, and
   `warnings`.
+- `list` (panel display) must not index `.desktop` files or resolve
+  launchers. It reads saved rows, cheap terminal identity, and startup
+  lines. Resolve only on `save` and `import`.
 - Recapture refreshes workspace only (and heals a fallback exec). Preserve
   user `exec`, `enabled`, and `float` edits.
 - Skip special/negative workspaces (`Workspace.ID < 1`) and empty classes.

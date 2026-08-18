@@ -317,7 +317,7 @@ Panel {
               Chip {
                 label: "Add to relaunch"
                 onClicked: root.run([
-                  "import", "--exec", runningRow.modelData.exec,
+                  "import", "--class", runningRow.modelData.class,
                   "--workspace", String(runningRow.modelData.workspace), "--json"
                 ])
               }
@@ -338,6 +338,7 @@ Panel {
           Repeater {
             model: root.relaunchRows
             delegate: Column {
+              id: relaunchRow
               required property var modelData
               width: content.width
               spacing: Style.space(4)
@@ -346,24 +347,35 @@ Panel {
                 width: parent.width
                 spacing: Style.space(8)
                 Text {
-                  text: "ws " + modelData.workspace
+                  text: "ws " + relaunchRow.modelData.workspace
                   width: Style.space(44)
                   color: root.barForeground
-                  opacity: modelData.enabled ? 1.0 : 0.4
+                  opacity: relaunchRow.modelData.enabled ? 1.0 : 0.4
                   font.family: root.bar ? root.bar.fontFamily : Style.font.family
                   font.pixelSize: Style.font.bodySmall
                 }
                 Text {
-                  text: modelData.label
-                    + (modelData.kind === "both" ? "  · also a startup app" : "")
-                    + (root.rowUnverified(modelData) ? "  (unverified)" : "")
+                  text: relaunchRow.modelData.label
+                    + (relaunchRow.modelData.kind === "both" ? "  · also a startup app" : "")
+                    + (root.rowUnverified(relaunchRow.modelData) ? "  (unverified)" : "")
                   width: parent.width - Style.space(52)
                   elide: Text.ElideRight
-                  color: root.rowBroken(modelData) ? Color.urgent : root.barForeground
-                  opacity: modelData.enabled ? 1.0 : 0.4
+                  color: root.rowBroken(relaunchRow.modelData) ? Color.urgent : root.barForeground
+                  opacity: relaunchRow.modelData.enabled ? 1.0 : 0.4
                   font.family: root.bar ? root.bar.fontFamily : Style.font.family
                   font.pixelSize: Style.font.bodySmall
                 }
+              }
+
+              Text {
+                visible: String(relaunchRow.modelData.exec || "") !== ""
+                width: parent.width
+                text: String(relaunchRow.modelData.exec || "")
+                wrapMode: Text.WrapAnywhere
+                color: root.barForeground
+                opacity: relaunchRow.modelData.enabled ? 0.75 : 0.4
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.bodySmall
               }
 
               Text {
