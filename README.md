@@ -105,6 +105,7 @@ After a manual edit, run `relaunch generate` (or Save again from the panel).
 Runtime files (not in git):
 
 - `~/.config/omarchy-relaunch/config.json` — entries and skip/ignore state
+- `~/.config/omarchy-relaunch/overrides.json` — class → exec exceptions you set
 - `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
 - `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags
 - `~/.config/omarchy-relaunch/last-boot.log` / `last-boot.json` — last `relaunch boot` diagnostic
@@ -131,10 +132,10 @@ use the panel action or `relaunch uninstall --yes` for a full teardown.
 - One instance per app: an `o.window` class match sends every window of that
   class to its workspace, which is correct for a one-pinned-instance-per-app
   setup.
-- Launch commands come from the app's `.desktop` `Exec` (StartupWMClass,
-  then Name, then desktop-file id), then the process command line. A small
-  `known_exec` table is only the last fallback when those do not exist
-  (some TUI hosts). An `exec` you set in `config.json` always wins.
+- Launch commands: terminal wrap, then `~/.config/omarchy-relaunch/overrides.json`
+  (your exceptions; starts empty), then the app's `.desktop` `Exec`, then the
+  process command line, then a lowercased class. The panel flags unverified
+  guesses and lets you type a command when the guessed binary is missing.
 - A terminal hosting another command (`foot -e cmd`, `omarchy-launch-terminal cmd`)
   is identified by that command and relaunched with
   `xdg-terminal-exec --app-id=<cmd> <cmd...>` so Hyprland gets a distinct class.

@@ -24,6 +24,8 @@ Panel {
   property string pendingStatus: ""
   property bool busy: false
   property bool confirmRemove: false
+  property string execEditClass: ""
+  property var warnings: []
 
   // Plugin-manager clones land the script next to this file, not on PATH.
   readonly property string enginePath: {
@@ -102,8 +104,18 @@ Panel {
       if (r.boot !== undefined) root.boot = r.boot
       if (r.lastBoot !== undefined) root.lastBoot = r.lastBoot
       if (r.staggerSeconds !== undefined) root.staggerSeconds = r.staggerSeconds
-      if (r.added !== undefined)
+      if (r.warnings !== undefined) root.warnings = r.warnings
+      if (r.added !== undefined) {
         root.statusText = "Saved: " + r.added + " new, " + r.updated + " updated."
+        if (r.warnings && r.warnings.length > 0)
+          root.statusText += " Warning: " + r.warnings.map(function(w) {
+            return w.class + " — " + (w.message || "command not found")
+          }).join(" ")
+      } else if (root.statusText === "" && r.warnings && r.warnings.length > 0) {
+        root.statusText = r.warnings.map(function(w) {
+          return w.class + " — " + (w.message || "command not found")
+        }).join(" ")
+      }
     } catch (e) {
       root.statusText = "Bad engine output"
     }
@@ -151,6 +163,21 @@ Panel {
       Quickshell.execDetached(["omarchy-shell", "shell", "summon", "io.github.laytonf.relaunch", payload])
   }
 
+  function saveExec(className, exec) {
+    var cmd = String(exec || "").replace(/^\s+|\s+$/g, "")
+    if (!className || !cmd) return
+    root.execEditClass = ""
+    root.run(["set-exec", "--class", className, "--exec", cmd, "--json"], "Saved launch command.")
+  }
+
+  function rowUnverified(row) {
+    return row && (row.execSource === "guess" || row.execSource === "cmdline" || row.unverified === true)
+  }
+
+  function rowBroken(row) {
+    return row && row.execOk === false
+  }
+
   component Chip: Rectangle {
     id: chip
     property string label: ""
@@ -193,6 +220,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      blocked: root.execEditClass !== ""
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
@@ -326,13 +354,55 @@ Panel {
                   font.pixelSize: Style.font.bodySmall
                 }
                 Text {
-                  text: modelData.label + (modelData.kind === "both" ? "  · also a startup app" : "")
+                  text: modelData.label
+                    + (modelData.kind === "both" ? "  · also a startup app" : "")
+                    + (root.rowUnverified(modelData) ? "  (unverified)" : "")
                   width: parent.width - Style.space(52)
                   elide: Text.ElideRight
-                  color: root.barForeground
+                  color: root.rowBroken(modelData) ? Color.urgent : root.barForeground
                   opacity: modelData.enabled ? 1.0 : 0.4
                   font.family: root.bar ? root.bar.fontFamily : Style.font.family
                   font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              Text {
+                visible: root.rowBroken(modelData)
+                width: parent.width
+                text: "Launch command not found. Type the command that starts this app."
+                wrapMode: Text.WordWrap
+                color: Color.urgent
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+
+              Row {
+                visible: root.rowBroken(modelData)
+                width: parent.width
+                spacing: Style.space(6)
+                TextField {
+                  id: execField
+                  width: parent.width - Style.space(70)
+                  text: modelData.exec || ""
+                  placeholderText: "launch command"
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                  foreground: root.barForeground
+                  horizontalPadding: Style.spacing.controlGap
+                  verticalPadding: Style.spacing.controlPaddingY
+                  onActiveFocusChanged: {
+                    if (activeFocus) root.execEditClass = modelData.class
+                    else if (root.execEditClass === modelData.class) root.execEditClass = ""
+                  }
+                  onAccepted: root.saveExec(modelData.class, text)
+                  Keys.onEscapePressed: {
+                    root.execEditClass = ""
+                    focus = false
+                  }
+                }
+                Chip {
+                  label: "Save"
+                  onClicked: root.saveExec(modelData.class, execField.text)
                 }
               }
 

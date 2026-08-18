@@ -145,7 +145,37 @@ EOF
 "$RELAUNCH" save --json | jq -e '
   [.entries[] | select(.class == "libreoffice-calc") | .exec] == ["localc --norestore"]
 ' >/dev/null || fail "recapture must keep a real user exec override"
+
+# Empty override file; user set-exec wins over .desktop on the next capture
+[[ -f "$RELAUNCH_CONFIG_DIR/overrides.json" ]] || fail "overrides.json should exist after save"
+jq -e 'type == "object"' "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null || fail "overrides.json must be an object"
+"$RELAUNCH" set-exec --class libreoffice-calc --exec "localc --norestore" --json >/dev/null
+jq -e '.["libreoffice-calc"] == "localc --norestore"' "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null \
+  || fail "set-exec must write overrides.json"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+"$RELAUNCH" save --json | jq -e '
+  ([.entries[] | select(.class == "libreoffice-calc") | .exec] == ["localc --norestore"])
+  and ([.entries[] | select(.class == "libreoffice-calc") | .execSource] == ["overrides-table"])
+' >/dev/null || fail "override must beat desktop-file on recapture"
+
+# Guess with a missing command is flagged immediately
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-empty"
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/nocmd"
+mkdir -p "$WORKDIR/xdg-empty/applications" "$WORKDIR/nocmd"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"NoSuchApp99","initialClass":"NoSuchApp99","pid":88,"floating":false,"workspace":{"id":9}}]
+EOF
+"$RELAUNCH" save --json | jq -e '
+  (.entries[] | select(.class == "NoSuchApp99") | .execSource == "guess" and .execOk == false)
+  and ([.warnings[] | select(.class == "NoSuchApp99")] | length == 1)
+' >/dev/null || fail "guess with missing command must warn at save"
 unset RELAUNCH_DATA_DIRS
+unset RELAUNCH_CMDLINE_DIR
 
 # Terminal identity walks to a parent foot --app-id / -e
 export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"

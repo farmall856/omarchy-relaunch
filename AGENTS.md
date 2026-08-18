@@ -25,6 +25,7 @@ hook) launches the list. Workspace pins live in generated `relaunch.lua`.
 Runtime files (user-owned, never commit):
 
 - `~/.config/omarchy-relaunch/config.json` — entries, ignored startup ids, `skipOnce`
+- `~/.config/omarchy-relaunch/overrides.json` — user `class → exec` exceptions (starts empty)
 - `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
 - `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags (skip is also in config.json so Save cannot drop it)
 - `~/.config/omarchy-relaunch/last-boot.log` / `last-boot.json` — last `relaunch boot` diagnostic
@@ -48,6 +49,7 @@ relaunch list [--json]                 # entries + startup inventory + rows + bo
 relaunch reload
 relaunch boot                          # hidden autostart hook
 relaunch import --exec CMD --workspace N
+relaunch set-exec --class CLASS --exec CMD
 relaunch drop --class CLASS
 relaunch drop-startup --id ID
 relaunch ignore --id ID
@@ -70,12 +72,11 @@ stable. `Panel.qml` parses that object.
   is identified by that command, and relaunched with
   `xdg-terminal-exec --app-id=<cmd> <cmd...>` so Hyprland gets a distinct class.
   Do not special-case individual wrappers like herdr.
-- Launch commands are resolved from the running window. Order: terminal-hosted
-  argv (including a parent `foot -e` / `--app-id`); then the `.desktop` `Exec`
-  matching `StartupWMClass`, then `Name=`, then the desktop-file id; then
-  `/proc/<pid>/cmdline`; then `known_exec`; then a lowercased class.
-  Recapture may replace that last-resort fallback when a real launcher is
-  found; a user-edited `exec` is preserved.
+- Launch commands: `terminal` → `overrides.json` → `.desktop` → cmdline →
+  lowercased class (`guess`). `overrides.json` starts empty and only grows
+  when the user saves a command (panel or `relaunch set-exec`). Do not seed
+  it from a built-in table. `--json` includes `execSource`, `execOk`,
+  `unverified`, and `warnings`.
 - Recapture refreshes workspace only (and heals a fallback exec). Preserve
   user `exec`, `enabled`, and `float` edits.
 - Skip special/negative workspaces (`Workspace.ID < 1`) and empty classes.

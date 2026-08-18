@@ -17,6 +17,7 @@ config_dir() {
 }
 
 config_path() { printf '%s\n' "$(config_dir)/config.json"; }
+overrides_path() { printf '%s\n' "$(config_dir)/overrides.json"; }
 snippet_path() { printf '%s\n' "$(config_dir)/relaunch.conf"; }
 lua_path() { printf '%s\n' "$(config_dir)/relaunch.lua"; }
 disabled_path() { printf '%s\n' "$(config_dir)/disabled"; }
@@ -60,51 +61,17 @@ need_jq() {
   command -v jq >/dev/null 2>&1 || die "jq not found (required; ships with Omarchy)"
 }
 
-# Shared jq helpers. known_exec is a last-resort fallback when no .desktop
-# file and no process cmdline can name a launcher (e.g. some TUI hosts).
+# Shared jq helpers. Launch commands are resolved in bash (terminal wrap,
+# overrides.json, .desktop, cmdline). guess_exec is the last-resort class fold.
 jq_lib='
-def known_exec:
-  {
-    "brave-browser": "brave",
-    "Brave-browser": "brave",
-    "google-chrome": "google-chrome-stable",
-    "chromium": "chromium",
-    "firefox": "firefox",
-    "zen": "zen-browser",
-    "Alacritty": "alacritty",
-    "kitty": "kitty",
-    "org.wezfurlong.wezterm": "wezterm",
-    "foot": "foot",
-    "code": "code",
-    "code-oss": "code",
-    "VSCodium": "codium",
-    "codium": "codium",
-    "org.telegram.desktop": "telegram-desktop",
-    "Slack": "slack",
-    "discord": "discord",
-    "vesktop": "vesktop",
-    "obsidian": "obsidian",
-    "thunderbird": "thunderbird",
-    "org.gnome.Nautilus": "nautilus",
-    "thunar": "thunar",
-    "mpv": "mpv",
-    "Spotify": "spotify",
-    "spotify": "spotify",
-    "herdr": "xdg-terminal-exec --app-id=herdr herdr",
-    "Proton Mail": "proton-mail",
-    "Proton Pass": "proton-pass",
-    "signal": "signal-desktop",
-    "libreoffice-calc": "libreoffice --calc",
-    "libreoffice-writer": "libreoffice --writer",
-    "libreoffice-impress": "libreoffice --impress",
-    "libreoffice-draw": "libreoffice --draw",
-    "libreoffice-base": "libreoffice --base",
-    "libreoffice-math": "libreoffice --math",
-    "libreoffice-startcenter": "libreoffice"
-  };
-
 def guess_exec:
-  known_exec[.] // ascii_downcase;
+  ascii_downcase;
+
+def known_exec_sources:
+  ["terminal", "overrides-table", "desktop-file", "cmdline", "guess"];
+
+def normalize_exec_source:
+  if (known_exec_sources | index(.)) != null then . else "" end;
 
 def match_class:
   if ((.initialClass // "") != "") then .initialClass else (.class // "") end;
@@ -135,6 +102,7 @@ def normalize_entry:
     class: (.class // ""),
     workspace: ((.workspace // 0) | tonumber),
     exec: (.exec // ""),
+    execSource: ((.execSource // "") | normalize_exec_source),
     enabled: (.enabled == true)
   }
   + (if .float == true then {float: true} else {} end);
@@ -175,11 +143,19 @@ def capture($clients):
               .by[$cl.match].workspace = $cl.workspace.id
               | .updated += 1
             else . end
-            | if (.by[$cl.match].exec == ($cl.match | ascii_downcase))
-                and (($cl.relaunchExec // "") != "")
-                and ($cl.relaunchExec != .by[$cl.match].exec)
-              then
+            | (
+                (.by[$cl.match].execSource | normalize_exec_source) as $src
+                | (($cl.relaunchExecSource // "") | normalize_exec_source) as $nsrc
+                | (($cl.relaunchExec // "") != "")
+                  and ($nsrc == "terminal" or $nsrc == "overrides-table" or $nsrc == "desktop-file")
+                  and (
+                    $src == "guess" or $src == "cmdline"
+                    or ($src == "" and .by[$cl.match].exec == ($cl.match | ascii_downcase))
+                  )
+              ) as $heal
+            | if $heal then
                 .by[$cl.match].exec = $cl.relaunchExec
+                | .by[$cl.match].execSource = $cl.relaunchExecSource
                 | .updated += 1
               else . end
           else
@@ -188,6 +164,12 @@ def capture($clients):
                 class: $cl.match,
                 workspace: $cl.workspace.id,
                 exec: (if ($cl.relaunchExec // "") != "" then $cl.relaunchExec else ($cl.match | guess_exec) end),
+                execSource: (
+                  if ($cl.relaunchExecSource // "") != "" then $cl.relaunchExecSource
+                  elif ($cl.relaunchExec // "") != "" then "guess"
+                  else "guess"
+                  end
+                ),
                 enabled: true
               }
               + (if $cl.floating == true then {float: true} else {} end)
@@ -635,24 +617,92 @@ class_for_startup_exec() {
   printf '%s\n' "${first:-${argv[0]:-}}"
 }
 
+ensure_overrides_file() {
+  local p
+  p="$(overrides_path)"
+  mkdir -p "$(config_dir)"
+  if [[ ! -f "$p" ]]; then
+    printf '{}\n' >"$p"
+  fi
+}
+
+load_overrides_json() {
+  local p
+  ensure_overrides_file
+  p="$(overrides_path)"
+  jq -e 'if type == "object" then . else {} end' "$p" 2>/dev/null || printf '{}\n'
+}
+
+override_exec_for_class() {
+  local class="$1"
+  load_overrides_json | jq -r --arg c "$class" '
+    to_entries
+    | map(select((.key | ascii_downcase) == ($c | ascii_downcase)))
+    | .[0].value // empty
+  '
+}
+
+set_override_exec() {
+  local class="$1" exec="$2" json
+  ensure_overrides_file
+  json="$(load_overrides_json | jq --arg c "$class" --arg e "$exec" '
+    with_entries(select((.key | ascii_downcase) != ($c | ascii_downcase)))
+    + {($c): $e}
+  ')"
+  printf '%s\n' "$json" | atomic_write "$(overrides_path)"
+}
+
+exec_is_ok() {
+  local exec="$1" token
+  token="${exec%% *}"
+  [[ -n "$token" ]] || return 1
+  command -v "$token" >/dev/null 2>&1 && return 0
+  [[ -x "$token" ]]
+}
+
+resolve_launch() {
+  # Prints: exec<TAB>source
+  local class="$1" pid="$2"
+  local ident exec
+  ident="$(identity_from_pid "$pid")"
+  if jq -e '.wrapped == true' >/dev/null <<<"$ident"; then
+    jq -r '[.exec, "terminal"] | @tsv' <<<"$ident"
+    return
+  fi
+  exec="$(override_exec_for_class "$class")"
+  if [[ -n "$exec" ]]; then
+    printf '%s\t%s\n' "$exec" "overrides-table"
+    return
+  fi
+  exec="$(desktop_exec_for_class "$class")"
+  if [[ -n "$exec" ]]; then
+    printf '%s\t%s\n' "$exec" "desktop-file"
+    return
+  fi
+  exec="$(cmdline_exec_for_pid "$pid" || true)"
+  if [[ -n "$exec" ]]; then
+    printf '%s\t%s\n' "$exec" "cmdline"
+    return
+  fi
+  printf '%s\t%s\n' "$(printf '%s' "$class" | tr '[:upper:]' '[:lower:]')" "guess"
+}
+
 annotate_clients() {
-  local clients="$1" pid class ident exec patches
+  local clients="$1" pid class exec source patches line
   patches='[]'
   while IFS=$'\t' read -r pid class; do
     [[ -z "$pid" || "$pid" == null ]] && continue
-    ident="$(identity_from_pid "$pid")"
-    if jq -e '.wrapped == true' >/dev/null <<<"$ident"; then
-      patches="$(jq --argjson pid "$pid" --argjson ident "$ident" \
-        '. + [{pid: $pid, wrapped: true, class: $ident.class, exec: $ident.exec}]' <<<"$patches")"
+    line="$(resolve_launch "$class" "$pid")"
+    exec="${line%%$'\t'*}"
+    source="${line#*$'\t'}"
+    if [[ "$source" == terminal ]]; then
+      ident="$(identity_from_pid "$pid")"
+      patches="$(jq --argjson pid "$pid" --argjson ident "$ident" --arg exec "$exec" \
+        '. + [{pid: $pid, wrapped: true, class: $ident.class, exec: $exec, execSource: "terminal"}]' <<<"$patches")"
       continue
     fi
-    exec="$(desktop_exec_for_class "$class")"
-    [[ -n "$exec" ]] || exec="$(cmdline_exec_for_pid "$pid" || true)"
-    if [[ -z "$exec" ]]; then
-      exec="$(jq -r --arg c "$class" "$jq_lib" '$c | guess_exec')"
-    fi
-    patches="$(jq --argjson pid "$pid" --arg class "$class" --arg exec "$exec" \
-      '. + [{pid: $pid, wrapped: false, class: $class, exec: $exec}]' <<<"$patches")"
+    patches="$(jq --argjson pid "$pid" --arg class "$class" --arg exec "$exec" --arg src "$source" \
+      '. + [{pid: $pid, wrapped: false, class: $class, exec: $exec, execSource: $src}]' <<<"$patches")"
   done < <(jq -r '
     .[] | select(.pid != null)
     | [
@@ -673,8 +723,10 @@ annotate_clients() {
             .class = $p.class
             | .initialClass = $p.class
             | .relaunchExec = $p.exec
+            | .relaunchExecSource = $p.execSource
           else
             .relaunchExec = $p.exec
+            | .relaunchExecSource = $p.execSource
           end
       )
   ' <<<"$clients"
@@ -743,6 +795,7 @@ build_rows() {
             class: $e.class,
             label: $e.class,
             exec: (if $e.exec != "" then $e.exec else ($e.class | guess_exec) end),
+            execSource: ($e.execSource // ""),
             workspace: $e.workspace,
             enabled: $e.enabled,
             inRelaunch: true,
@@ -790,6 +843,7 @@ build_rows() {
             class: $c.match,
             label: $c.match,
             exec: (if ($c.relaunchExec // "") != "" then $c.relaunchExec else ($c.match | guess_exec) end),
+            execSource: (if ($c.relaunchExecSource // "") != "" then $c.relaunchExecSource else "guess" end),
             workspace: $c.workspace.id,
             enabled: false,
             inRelaunch: false,
@@ -801,13 +855,73 @@ build_rows() {
   ' <<<"$cfg"
 }
 
+decorate_items() {
+  local _items="$1"
+  local _meta='[]'
+  local _class _exec _src _ok _unverified
+  while IFS=$'\t' read -r _class _exec _src; do
+    [[ -n "$_class" ]] || continue
+    if [[ -z "$_src" ]]; then
+      if [[ -n "$(override_exec_for_class "$_class")" ]]; then
+        _src="overrides-table"
+      elif [[ "$_exec" == "$(printf '%s' "$_class" | tr '[:upper:]' '[:lower:]')" ]]; then
+        _src="guess"
+      fi
+    fi
+    if exec_is_ok "$_exec"; then _ok=true; else _ok=false; fi
+    if [[ "$_src" == guess || "$_src" == cmdline ]]; then _unverified=true; else _unverified=false; fi
+    _meta="$(jq --arg class "$_class" --arg exec "$_exec" --arg src "$_src" \
+      --argjson ok "$_ok" --argjson unverified "$_unverified" '
+        . + [{
+          class: $class,
+          exec: $exec,
+          execSource: $src,
+          execOk: $ok,
+          unverified: $unverified
+        }]
+      ' <<<"$_meta")"
+  done < <(jq -r '.[] | [(.class // ""), (.exec // ""), (.execSource // "")] | @tsv' <<<"$_items")
+  jq --argjson meta "$_meta" '
+    ($meta | map({key: .class, value: .}) | from_entries) as $by
+    | map(
+        . as $it
+        | ($by[$it.class] // {execSource: ($it.execSource // ""), execOk: true, unverified: false}) as $m
+        | .execSource = $m.execSource
+        | .execOk = $m.execOk
+        | .unverified = $m.unverified
+      )
+  ' <<<"$_items"
+}
+
 emit_state() {
-  local cfg startup rows extra clients
+  local cfg startup rows extra clients entries warnings
+  ensure_overrides_file
   cfg="$(load_config_json)"
   startup="$(scan_startup)"
   clients="$(clients_json)"
   rows="$(build_rows "$cfg" "$startup" "$clients")"
-  extra="${1:-{\}}"
+  local _entf _rowf
+  _entf="$(mktemp)"
+  _rowf="$(mktemp)"
+  decorate_items "$(jq -c '.entries' <<<"$cfg")" >"$_entf"
+  decorate_items "$rows" >"$_rowf"
+  entries="$(cat "$_entf")"
+  rows="$(cat "$_rowf")"
+  rm -f "$_entf" "$_rowf"
+  if ! jq -e . >/dev/null 2>&1 <<<"$entries"; then
+    entries="$(jq -c '.entries' <<<"$cfg")"
+  fi
+  if ! jq -e . >/dev/null 2>&1 <<<"$rows"; then
+    rows='[]'
+  fi
+  cfg="$(jq --argjson entries "$entries" '.entries = $entries' <<<"$cfg")"
+  warnings="$(jq '[.[] | select(.execOk == false) | {
+    class, exec, execSource, execOk,
+    message: ("command not found: " + ((.exec | split(" "))[0] // .exec))
+  }]' <<<"$entries")"
+  extra='{}'
+  if [[ -n "${1:-}" ]]; then extra="$1"; fi
+  extra="$(jq --argjson warnings "$warnings" '. + {warnings: $warnings}' <<<"$extra")"
   jq -n --argjson cfg "$cfg" --argjson startup "$startup" --argjson rows "$rows" \
     --argjson boot "$(boot_state_json)" --argjson lastBoot "$(last_boot_state_json)" \
     --argjson extra "$extra" \
@@ -822,7 +936,8 @@ emit_state() {
       boot: $boot,
       lastBoot: $lastBoot,
       snippetPath: $snippet,
-      configPath: $config
+      configPath: $config,
+      warnings: $extra.warnings
     } + $extra'
 }
 
@@ -1111,9 +1226,34 @@ cmd_import() {
       .entries += [{class: $class, workspace: $ws, exec: $exec, enabled: true}]
     ' <<<"$cfg")"
   fi
+  cfg="$(jq --arg class "$class" '.entries |= map(if .class == $class then .execSource = "overrides-table" else . end)' <<<"$cfg")"
   jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
+  set_override_exec "$class" "$exec"
   jq "$jq_lib"' load_config' <<<"$cfg" | write_generated
   if $json_out; then emit_state; else printf 'Imported %s -> workspace %s\n' "$class" "$ws"; fi
+}
+
+cmd_set_exec() {
+  local class exec cfg
+  class="$(arg_value --class "$@" || true)"
+  exec="$(arg_value --exec "$@" || true)"
+  [[ -n "$class" ]] || die "set-exec requires --class"
+  [[ -n "$exec" ]] || die "set-exec requires --exec"
+  cfg="$(load_config_json)"
+  if ! jq -e --arg class "$class" '.entries[] | select(.class == $class)' >/dev/null <<<"$cfg"; then
+    die "no relaunch entry for class: $class"
+  fi
+  cfg="$(jq --arg class "$class" --arg exec "$exec" '
+    .entries |= map(if .class == $class then .exec = $exec | .execSource = "overrides-table" else . end)
+  ' <<<"$cfg")"
+  jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
+  set_override_exec "$class" "$exec"
+  jq "$jq_lib"' load_config' <<<"$cfg" | write_generated
+  if $json_out; then
+    emit_state
+  else
+    printf 'Set %s exec to %s\n' "$class" "$exec"
+  fi
 }
 
 cmd_drop() {
@@ -1255,6 +1395,7 @@ ensure_hooks() {
   lua="$(hyprland_lua_path)"
   hook="$(hyprland_hook_line)"
   mkdir -p "$(dirname "$auto")" "$(config_dir)"
+  ensure_overrides_file
   remove_legacy_conf
   # Create the rules file before touching hyprland.lua. Hyprland reloads
   # as soon as that file changes; dofile of a missing path is a hard error.
@@ -1297,6 +1438,7 @@ relaunch — engine for omarchy-relaunch
   relaunch boot                          hidden autostart hook
   relaunch last-boot [--json] [--open]   show or open the last boot log
   relaunch import --exec CMD --workspace N
+  relaunch set-exec --class CLASS --exec CMD
   relaunch drop --class CLASS            remove from relaunch list
   relaunch drop-startup --id ID          delete the Hyprland startup line
   relaunch ignore --id ID                leave startup alone, remember it
@@ -1330,6 +1472,7 @@ main() {
     boot) cmd_boot ;;
     last-boot) cmd_last_boot "$@" ;;
     import) cmd_import "$@" ;;
+    set-exec) cmd_set_exec "$@" ;;
     drop) cmd_drop "$@" ;;
     drop-startup) cmd_drop_startup "$@" ;;
     ignore) cmd_ignore "$@" ;;
