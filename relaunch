@@ -345,9 +345,24 @@ is_generic_terminal_class() {
   return 1
 }
 
+# Join argv into one shell-safe line. /proc preserves argument boundaries that
+# a plain "${argv[*]}" join throws away: Omarchy's Disk Usage runs as
+# `foot --app-id=TUI.float -e bash -c 'dua i /'`, where `dua i /` is a single
+# argument. Flattened and re-split, that becomes `bash -c dua i /`, which runs
+# dua with no arguments — it prints and exits, so the window is gone before the
+# workspace pin can apply.
+quote_argv() {
+  local out="" a q
+  for a in "$@"; do
+    printf -v q '%q' "$a"
+    out+="${out:+ }${q}"
+  done
+  printf '%s' "$out"
+}
+
 # Print JSON {wrapped, class, exec} from argv. A terminal hosting another
 # command (foot -e herdr, omarchy-launch-terminal nvim) becomes class=that
-# command and exec=xdg-terminal-exec --app-id=<class> <command...>, so the
+# command and exec=xdg-terminal-exec --app-id=<class> -e <command...>, so the
 # next launch has a distinct Hyprland class. No per-app special cases.
 identity_from_argv() {
   local -a argv=("$@")
@@ -386,17 +401,21 @@ identity_from_argv() {
     done
   fi
 
+  # -e is kept, not dropped. xdg-terminal-exec accepts it as the explicit end of
+  # options, so an inner command that begins with a dash cannot be reparsed as
+  # one. The rebuilt line then matches what a packaged TUI .desktop already
+  # ships, e.g. Omarchy's Disk Usage.desktop.
   local class="" exec=""
   if [[ -n "$app_id" ]] && ! is_generic_terminal_class "$app_id"; then
     class="$app_id"
     if ((${#inner[@]} > 0)); then
-      exec="xdg-terminal-exec --app-id=${class} ${inner[*]}"
+      exec="xdg-terminal-exec --app-id=${class} -e $(quote_argv "${inner[@]}")"
     else
       exec="xdg-terminal-exec --app-id=${class}"
     fi
   elif ((${#inner[@]} > 0)); then
     class="${inner[0]##*/}"
-    exec="xdg-terminal-exec --app-id=${class} ${inner[*]}"
+    exec="xdg-terminal-exec --app-id=${class} -e $(quote_argv "${inner[@]}")"
   fi
 
   if [[ -n "$class" ]]; then
@@ -706,7 +725,9 @@ resolve_launch() {
   local ident exec
   ident="$(identity_from_pid "$pid")"
   if jq -e '.wrapped == true' >/dev/null <<<"$ident"; then
-    jq -r '[.exec, "terminal"] | @tsv' <<<"$ident"
+    # Not @tsv: it escapes backslashes, and a shell-quoted hosted command
+    # legitimately contains them (bash -c dua\ i\ /).
+    printf '%s\t%s\n' "$(jq -r '.exec' <<<"$ident")" "terminal"
     return
   fi
   exec="$(override_exec_for_class "$class")"
@@ -911,7 +932,7 @@ decorate_items() {
   local _items="$1"
   local _meta='[]'
   local _class _exec _src _ok _unverified
-  while IFS=$'\t' read -r _class _exec _src; do
+  while IFS=$'\037' read -r _class _exec _src; do
     [[ -n "$_class" ]] || continue
     if [[ -z "$_src" ]]; then
       if [[ -n "$(override_exec_for_class "$_class")" ]]; then
@@ -932,7 +953,9 @@ decorate_items() {
           unverified: $unverified
         }]
       ' <<<"$_meta")"
-  done < <(jq -r '.[] | [(.class // ""), (.exec // ""), (.execSource // "")] | @tsv' <<<"$_items")
+  # Unit separator, not @tsv: @tsv escapes backslashes and a shell-quoted
+  # hosted command legitimately contains them.
+  done < <(jq -r '.[] | [(.class // ""), (.exec // ""), (.execSource // "")] | join("\u001f")' <<<"$_items")
   jq --argjson meta "$_meta" '
     ($meta | map({key: .class, value: .}) | from_entries) as $by
     | map(
@@ -1150,8 +1173,8 @@ cmd_list() {
           .class,
           (if .exec != "" then .exec else (.class | guess_exec) + " *" end)
         ]
-      | @tsv
-    ' <<<"$cfg" | while IFS=$'\t' read -r ws on class exec; do
+      | join("\u001f")
+    ' <<<"$cfg" | while IFS=$'\037' read -r ws on class exec; do
       printf '%-4s [%s] %-24s %s\n' "$ws" "$on" "$class" "$exec"
     done
   fi
@@ -1191,7 +1214,7 @@ cmd_boot() {
   stagger="$(jq -r '.staggerSeconds' <<<"$cfg")"
   launches='[]'
   first_launch=true
-  while IFS=$'\t' read -r class ws exec; do
+  while IFS=$'\037' read -r class ws exec; do
     [[ -z "$exec" ]] && continue
     is_relaunch_exec "$exec" && continue
     if [[ "$stagger" =~ ^[1-9][0-9]*$ ]]; then
@@ -1234,10 +1257,13 @@ cmd_boot() {
           error: (if $error == "" then null else $error end)
         }]
       ' <<<"$launches")"
+  # Unit separator, not @tsv: @tsv escapes backslashes, and boot runs this exec
+  # through bash -c, so a doubled backslash would break a shell-quoted hosted
+  # command (bash -c dua\ i\ /) right at launch.
   done < <(jq -r "$jq_lib"'
     enabled_entries[]
     | [ .class, (.workspace | tostring), (if .exec != "" then .exec else (.class | guess_exec) end) ]
-    | @tsv
+    | join("\u001f")
   ' <<<"$cfg")
   launches="$(verify_launches "$launches")"
   write_last_boot "$started" launched "" "$launches" "$stagger"

@@ -71,8 +71,17 @@ stable. `Panel.qml` parses that object.
 - Match `initialClass`, not `class`. Brave/Electron mutate class after launch.
 - A terminal hosting another command (`foot -e cmd`, `omarchy-launch-terminal cmd`)
   is identified by that command, and relaunched with
-  `xdg-terminal-exec --app-id=<cmd> <cmd...>` so Hyprland gets a distinct class.
-  Do not special-case individual wrappers like herdr.
+  `xdg-terminal-exec --app-id=<cmd> -e <cmd...>` so Hyprland gets a distinct
+  class. Do not special-case individual wrappers like herdr.
+- Hosted argv keeps its argument boundaries. `/proc` reports Omarchy's Disk
+  Usage as `foot --app-id=TUI.float -e bash -c 'dua i /'`, where `dua i /` is
+  one argument. Quote each element (`printf %q`) instead of joining with
+  `"${argv[*]}"`; boot runs the string through `bash -c`, so a flattened join
+  re-splits and runs `dua` bare — it prints and exits before the pin applies.
+  Keep the `-e`: `xdg-terminal-exec` accepts it as the explicit end of options.
+- Never carry an exec string through jq's `@tsv`. It escapes backslashes, and
+  a shell-quoted hosted command legitimately contains them; doubling them
+  breaks the launch. Use `join("\u001f")` with `IFS=$'\037'`.
 - Launch commands: `terminal` → `overrides.json` → `.desktop` (via
   `gio launch <file>`, user `~/.local/share/applications` first, then
   `$XDG_DATA_DIRS`) → cmdline → lowercased class (`guess`).
@@ -161,6 +170,20 @@ https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/new?template=
 
 `.gitignore` already excludes generated `config.json` (and a leftover
 `relaunch.conf` name from older installs). Keep it that way.
+
+## Known limitations
+
+- **Shared generic TUI classes.** Omarchy launches every floating TUI under
+  `TUI.float` and every tiled one under `TUI.tile`. One entry per class means
+  two different TUIs cannot hold different workspaces — the second capture
+  overwrites the first. Do not "fix" this by relaunching under a synthesized
+  app-id: `/usr/share/omarchy/default/hypr/apps/system.lua` matches `TUI.float`
+  to apply float + center + 875×600, so a renamed class silently loses its
+  floating treatment. Same for `terminals.lua` and `TUI.*`.
+- A `.desktop` file cannot be found from a generic class either — `Disk
+  Usage.desktop` has no `StartupWMClass` and its `Name` is "Disk Usage", so
+  nothing keys back to `TUI.float`. The hosted-argv path above is what makes
+  these apps relaunch correctly, not the `.desktop` index.
 
 ## Out of scope unless asked
 
