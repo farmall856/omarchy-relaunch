@@ -35,7 +35,22 @@ esac
 EOF
 chmod +x "$HYPRCTL_STUB"
 
+# Monitor fixture for the hyprctl stub. Shared by the session-snapshot and
+# diff blocks below, so it lives in the harness rather than inside whichever
+# test happens to run first.
+cat >"$WORKDIR/monitors.json" <<'EOF'
+[
+  {"id": 0, "name": "eDP-1", "description": "BOE 0x0BCA"},
+  {"id": 1, "name": "DP-3", "description": "Dell Inc. DELL U2720Q ABCD123"}
+]
+EOF
+
 export RELAUNCH_VERIFY_SLEEP=0
+# No bounded re-sampling in the suite: fixtures never grow a window, so every
+# boot would otherwise wait out the full deadline. The re-sampling behaviour
+# has its own test below, which sets these explicitly.
+export RELAUNCH_VERIFY_DEADLINE=0
+export RELAUNCH_VERIFY_INTERVAL=0
 export RELAUNCH_CONFIG_DIR="$WORKDIR/cfg"
 export RELAUNCH_AUTOSTART="$WORKDIR/autostart.lua"
 export RELAUNCH_HYPRLAND_LUA="$WORKDIR/hyprland.lua"
@@ -665,84 +680,6 @@ assert_not_contains "$lua" 'legacy)$" }, { workspace = "2 silent", tile'
 # …and import, which has no window to read, leaves it unknown too.
 "$RELAUNCH" import --exec legacy2 --workspace 5 --json >/dev/null
 jq -e '[.entries[] | select(.class == "legacy2") | has("float")] == [false]'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "import has no live window, so float must stay unknown"
-
-# --- per-window snapshot (recorded for future use; changes nothing today) ---
-# entries[] stays one-per-class and the pins stay identical. windows[] is a
-# raw record of every observed window, so a future per-window feature has
-# real data to work from.
-cat >"$WORKDIR/monitors.json" <<'EOF'
-[
-  {"id": 0, "name": "eDP-1", "description": "BOE 0x0BCA"},
-  {"id": 1, "name": "DP-3", "description": "Dell Inc. DELL U2720Q ABCD123"}
-]
-EOF
-export FAKE_MONITORS="$WORKDIR/monitors.json"
-cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
-EOF
-cat >"$FAKE_CLIENTS" <<'EOF'
-[
-  {"class":"foot","initialClass":"foot","pid":600,"floating":false,"monitor":0,"workspace":{"id":1}},
-  {"class":"foot","initialClass":"foot","pid":601,"floating":true,"monitor":1,"workspace":{"id":5}},
-  {"class":"brave-browser","initialClass":"brave-browser","pid":602,"floating":false,"monitor":1,"workspace":{"id":2}},
-  {"class":"scratchpad","initialClass":"scratchpad","pid":603,"floating":true,"monitor":0,"workspace":{"id":-98}}
-]
-EOF
-"$RELAUNCH" save >/dev/null
-snap="$(jq -c '.windows' "$RELAUNCH_CONFIG_DIR/config.json")"
-
-# Every window, not just the first of each class.
-jq -e '(.windows | length) == 4' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "snapshot must record every window, got: $snap"
-jq -e '[.windows[] | select(.class == "foot")] | length == 2' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "snapshot must not dedupe by class: $snap"
-
-# …while entries[] and the pins keep the one-entry-per-class model.
-jq -e '[.entries[] | select(.class == "foot")] | length == 1' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "snapshot must not change the one-entry-per-class model"
-jq -e '[.entries[] | select(.class == "foot") | .workspace] == [1]' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "first-seen lowest workspace still wins for the entry"
-lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
-# Count placement rules only: a tiled entry also emits a tag-removal line.
-[[ "$(grep -c 'class = "\^(foot)\$" }, { workspace' <<<"$lua")" -eq 1 ]]   || fail "snapshot must not add pins; expected exactly one foot placement rule"
-assert_not_contains "$lua" 'scratchpad'
-
-# Monitor id, name and description all land. Output names are reassigned
-# across reboots, so the description is what identifies the physical panel.
-jq -e '
-  ([.windows[] | select(.class == "brave-browser")]
-    | .[0]
-    | .monitor == 1
-      and .monitorName == "DP-3"
-      and .monitorDescription == "Dell Inc. DELL U2720Q ABCD123")
-' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "snapshot must record monitor id, name and description: $snap"
-jq -e '
-  ([.windows[] | select(.class == "foot" and .monitor == 0)]
-    | .[0] | .monitorName == "eDP-1" and .monitorDescription == "BOE 0x0BCA")
-' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "per-window monitor lookup must not collapse to one monitor: $snap"
-
-# Float state is per window here, not per class.
-jq -e '[.windows[] | select(.class == "foot") | .floating] | sort == [false, true]'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "snapshot must record per-window float: $snap"
-
-# A snapshot loses information if it applies capture's filters, so special
-# and negative workspaces are kept even though they can never be pinned.
-jq -e '[.windows[] | select(.workspace == -98) | .class] == ["scratchpad"]'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "snapshot must keep special workspaces: $snap"
-jq -e '[.entries[] | select(.class == "scratchpad")] | length == 0'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "special workspaces must still be excluded from entries"
-
-# Commands that rewrite config.json must carry the snapshot through.
-"$RELAUNCH" import --exec somethingelse --workspace 8 --json >/dev/null
-jq -e --argjson want "$snap" '.windows == $want' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "import must not drop the window snapshot"
-"$RELAUNCH" drop --class somethingelse --json >/dev/null
-jq -e --argjson want "$snap" '.windows == $want' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "drop must not drop the window snapshot"
-"$RELAUNCH" generate >/dev/null
-jq -e --argjson want "$snap" '.windows == $want' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "generate must not drop the window snapshot"
-
-# hyprctl monitors failing is not a save failure: names degrade to empty.
-unset FAKE_MONITORS
-cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
-EOF
-"$RELAUNCH" save >/dev/null || fail "save must survive hyprctl monitors failing"
-jq -e '
-  ([.windows[] | select(.class == "brave-browser")]
-    | .[0] | .monitor == 1 and .monitorName == "" and .monitorDescription == "")
-' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "unreadable monitors must degrade to empty names, keeping the id"
 
 # --- display labels: stored at save time, one tier at a time ---
 # class stays the identity and the only lookup key; label is display only.
@@ -1592,6 +1529,170 @@ jq -e '[.entries[] | select(.class == "brave-browser") | .startupKeys] | .[0] | 
   [.rows[] | select(.class == "brave-browser") | .kind] == ["both"]
 ' >/dev/null || fail "after the upgrade Save the legacy entry must correlate"
 unset RELAUNCH_DATA_DIRS
+
+# --- normalize_desktop_key derivation is pinned (github issue #13) ---
+# The builtin rewrite replaced `printf | tr | tr`. Key derivation decides
+# which .desktop file a window class resolves to, so a future rewrite must
+# not change it silently. Values verified byte-identical against the old
+# pipeline over all 93 .desktop basenames on the development machine.
+keycheck() {
+  local got
+  got="$(head -n -1 "$RELAUNCH" >"$WORKDIR/keylib.sh"; \
+    bash -c 'source "$1"; normalize_desktop_key "$2"' _ "$WORKDIR/keylib.sh" "$2")"
+  [[ "$got" == "$1" ]] || fail "normalize_desktop_key '$2': want '$1', got '$got'"
+}
+keycheck "a-b-c"           "A B..C"
+keycheck "foo-bar"         "Foo___Bar"
+keycheck "x"               "x"
+keycheck ""                ""
+keycheck "a-b-c-d"         "A.B_C D"
+keycheck "-"               "___"
+keycheck "a-b-c-d"         "a..b__c  d"
+keycheck "brave-browser"   "brave-browser"
+keycheck "org-gnome-nautilus" "org.gnome.Nautilus"
+# Non-ASCII: the builtin ${v,,} is locale-aware Unicode folding, while the
+# tr '[:upper:]' '[:lower:]' it replaced folded ASCII only. Under a UTF-8
+# locale those disagree, and a changed key can collapse formerly distinct
+# entries in DESKTOP_EXEC_BY_*. The expected values here are what the old
+# pipeline produced: multibyte uppercase is left alone.
+keycheck "Äpp"             "Äpp"
+keycheck "ÉΣЖ"             "ÉΣЖ"
+keycheck "Ä-Ö-Ü"           "Ä_Ö.Ü"
+keycheck "naïve-app"       "naïve App"
+# ASCII letters still fold, multibyte ones do not -- the old pipeline gives
+# "Ünïcödé-näme", not "Ünïcödé-Näme".
+keycheck "Ünïcödé-näme"    "Ünïcödé-Näme"
+# …and the folding must not depend on the caller's locale.
+( export LC_ALL=en_US.UTF-8
+  keycheck "Äpp" "Äpp"
+  keycheck "foo" "Foo" ) || fail "key derivation must not vary with locale"
+
+# --- boot placement has three outcomes (github issue #15) ---
+# A single immediate sample cannot tell a wrong workspace from a window that
+# has not mapped yet. LibreOffice and the Chromium web app were both reported
+# MISPLACED after restoring correctly.
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"ontarget","workspace":3,"exec":"true","execSource":"guess","enabled":true},
+  {"class":"wrongws","workspace":4,"exec":"true","execSource":"guess","enabled":true},
+  {"class":"nowindow","workspace":5,"exec":"true","execSource":"guess","enabled":true}
+]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"address":"0x1","class":"ontarget","initialClass":"ontarget","pid":3001,"floating":false,"workspace":{"id":3}},
+  {"address":"0x2","class":"wrongws","initialClass":"wrongws","pid":3002,"floating":false,"workspace":{"id":9}}
+]
+EOF
+"$RELAUNCH" boot >/dev/null 2>&1
+lb="$RELAUNCH_CONFIG_DIR/last-boot.json"
+jq -e '[.launches[] | select(.class == "ontarget") | .outcome] == ["landed"]' "$lb" >/dev/null \
+  || fail "a window on the expected workspace must be landed"
+jq -e '[.launches[] | select(.class == "wrongws") | .outcome] == ["misplaced"]' "$lb" >/dev/null \
+  || fail "a window on the wrong workspace must be misplaced"
+jq -e '[.launches[] | select(.class == "nowindow") | .outcome] == ["pending"]' "$lb" >/dev/null \
+  || fail "a class with no window yet must be pending, not misplaced"
+# Only a real misplacement is a failure, so `placed` must not be false for a
+# pending entry in the way it used to be read.
+jq -e '[.launches[] | select(.class == "wrongws") | .placed] == [false]' "$lb" >/dev/null \
+  || fail "misplaced must still report placed=false"
+jq -e '[.launches[] | select(.class == "ontarget") | .placed] == [true]' "$lb" >/dev/null \
+  || fail "landed must report placed=true"
+# The distinction is visible in the human log too.
+log="$(cat "$RELAUNCH_CONFIG_DIR/last-boot.log")"
+assert_contains "$log" "MISPLACED"
+assert_contains "$log" "PENDING (no window yet)"
+[[ "$(grep -c 'MISPLACED' <<<"$log")" -eq 1 ]] \
+  || fail "only the genuinely misplaced entry may be marked MISPLACED"
+# …and in --json.
+"$RELAUNCH" last-boot --json | jq -e '
+  [.launches[] | select(.class == "nowindow") | .outcome] == ["pending"]
+' >/dev/null || fail "the outcome must be visible in last-boot --json"
+# …and through the panel contract, which reads .lastBoot.
+"$RELAUNCH" list --json | jq -e '
+  [.lastBoot.launches[] | select(.class == "wrongws") | .outcome] == ["misplaced"]
+' >/dev/null || fail "the outcome must be visible in the panel --json contract"
+
+# A window that appears late is picked up by re-sampling, not reported wrong.
+# The stub grows a window on the second call.
+GROW="$WORKDIR/grow.json"
+cat >"$GROW" <<'EOF'
+[]
+EOF
+cat >"$WORKDIR/hyprctl-grow" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  clients)
+    n=0
+    [[ -f "$WORKDIR/grow.count" ]] && n="\$(cat "$WORKDIR/grow.count")"
+    n=\$((n + 1)); printf '%s' "\$n" >"$WORKDIR/grow.count"
+    if ((n >= 2)); then
+      cat "$WORKDIR/grow-late.json"
+    else
+      printf '[]\n'
+    fi
+    ;;
+  monitors) exit 1 ;;
+  reload) printf 'ok\n' ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$WORKDIR/hyprctl-grow"
+cat >"$WORKDIR/grow-late.json" <<'EOF'
+[{"address":"0xL","class":"slowapp","initialClass":"slowapp","pid":3100,"floating":false,"workspace":{"id":7}}]
+EOF
+rm -f "$WORKDIR/grow.count"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"slowapp","workspace":7,"exec":"true","execSource":"guess","enabled":true}
+]}
+EOF
+HYPRCTL="$WORKDIR/hyprctl-grow" RELAUNCH_VERIFY_DEADLINE=4 RELAUNCH_VERIFY_INTERVAL=1 \
+  "$RELAUNCH" boot >/dev/null 2>&1
+jq -e '[.launches[] | select(.class == "slowapp") | .outcome] == ["landed"]' "$lb" >/dev/null \
+  || fail "a slow-starting app that restores correctly must not be reported misplaced"
+assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/last-boot.log")" "MISPLACED"
+
+# --- CRLF .desktop files parse (PR #16 review) ---
+# The optimized parser matched the section header before stripping the
+# trailing \r, so "[Desktop Entry]\r" matched nothing and the whole file
+# contributed no Exec, Name or StartupWMClass. For a web app that is worse
+# than losing the file: it can still claim its case-sensitive desktop id and
+# then register no launcher, masking a valid lower-priority file.
+CRLF="$WORKDIR/crlf/applications"
+mkdir -p "$CRLF"
+printf '[Desktop Entry]\r\nName=CRLF App\r\nExec=crlf-app %%U\r\nStartupWMClass=crlf-app\r\nType=Application\r\n' \
+  >"$CRLF/crlf-app.desktop"
+printf '[Desktop Entry]\nName=LF App\nExec=lf-app %%U\nStartupWMClass=lf-app\nType=Application\n' \
+  >"$CRLF/lf-app.desktop"
+printf '[Desktop Entry]\r\nName=CRLF Web\r\nExec=omarchy-launch-webapp https://crlf.example.com\r\nType=Application\r\n' \
+  >"$CRLF/crlf-web.desktop"
+export RELAUNCH_DATA_DIRS="$WORKDIR/crlf"
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/crlfcmd"
+mkdir -p "$RELAUNCH_CMDLINE_DIR"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"address":"0x1","class":"crlf-app","initialClass":"crlf-app","pid":4000,"floating":false,"workspace":{"id":1}},
+  {"address":"0x2","class":"lf-app","initialClass":"lf-app","pid":4001,"floating":false,"workspace":{"id":2}},
+  {"address":"0x3","class":"brave-crlf.example.com__-Default","initialClass":"brave-crlf.example.com__-Default","pid":4002,"floating":false,"workspace":{"id":3}}
+]
+EOF
+out="$("$RELAUNCH" save --json)"
+cex() { jq -r --arg c "$1" '[.entries[] | select(.class == $c) | .exec] | .[0] // "(none)"' <<<"$out"; }
+[[ "$(cex crlf-app)" == "gio launch $CRLF/crlf-app.desktop" ]] \
+  || fail "a CRLF .desktop must resolve by StartupWMClass, got $(cex crlf-app)"
+[[ "$(cex lf-app)" == "gio launch $CRLF/lf-app.desktop" ]] \
+  || fail "an LF .desktop must still resolve, got $(cex lf-app)"
+[[ "$(cex 'brave-crlf.example.com__-Default')" == "gio launch $CRLF/crlf-web.desktop" ]] \
+  || fail "a CRLF web-app .desktop must resolve, got $(cex 'brave-crlf.example.com__-Default')"
+# The Name= from a CRLF file must not carry the carriage return into a label.
+jq -e '[.entries[] | select(.class == "crlf-app") | .label] == ["CRLF App"]' <<<"$out" >/dev/null \
+  || fail "a CRLF Name= must not keep its carriage return"
+unset RELAUNCH_DATA_DIRS
+unset RELAUNCH_CMDLINE_DIR
 
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"

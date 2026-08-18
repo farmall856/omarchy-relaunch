@@ -121,55 +121,12 @@ def normalize_entry:
       if (.float | type) == "boolean" then {float: .float} else {} end
     );
 
-# Raw per-window snapshot, written on every save. Nothing reads it yet: it
-# exists so a future per-window feature has real data to work from. It never
-# feeds entries[] or the generated pins, which stay one-entry-per-class.
-def normalize_window:
-  {
-    class: (.class // ""),
-    workspace: ((.workspace // 0) | tonumber),
-    floating: (.floating == true),
-    monitor: ((.monitor // -1) | tonumber),
-    monitorName: (.monitorName // ""),
-    monitorDescription: (.monitorDescription // "")
-  };
-
-def window_snapshot($clients; $monitors):
-  (
-    $monitors
-    | map({
-        key: ((.id // -1) | tostring),
-        value: {name: (.name // ""), description: (.description // "")}
-      })
-    | from_entries
-  ) as $mon
-  | $clients
-  # Deliberately unfiltered: no first-per-class dedupe, and special or
-  # negative workspaces are kept. capture() drops those because it cannot
-  # pin them; a snapshot loses information by doing the same.
-  | map(
-      ((.monitor // -1) | tostring) as $mid
-      | {
-          class: match_class,
-          workspace: ((.workspace.id // 0) | tonumber),
-          floating: (.floating == true),
-          monitor: ((.monitor // -1) | tonumber),
-          # Output names (DP-1) are reassigned across reboots; the
-          # description (BOE 0x0BCA) identifies the physical panel. Store
-          # both so a future feature can match on whichever is available.
-          monitorName: ($mon[$mid].name // ""),
-          monitorDescription: ($mon[$mid].description // "")
-        }
-    )
-  | sort_by(.workspace, .class);
-
 def load_config:
   {
     staggerSeconds: ((.staggerSeconds // 0) | tonumber),
     ignored: ((.ignored // []) | map(tostring)),
     skipOnce: (.skipOnce == true),
-    entries: ((.entries // []) | map(normalize_entry)),
-    windows: ((.windows // []) | map(normalize_window))
+    entries: ((.entries // []) | map(normalize_entry))
   };
 
 def dump_config:
@@ -177,8 +134,7 @@ def dump_config:
     staggerSeconds: .staggerSeconds,
     ignored: (.ignored // []),
     skipOnce: (.skipOnce == true),
-    entries: ([.entries[] | normalize_entry] | sort_by(.workspace, .class)),
-    windows: ((.windows // []) | map(normalize_window))
+    entries: ([.entries[] | normalize_entry] | sort_by(.workspace, .class))
   };
 
 def capture($clients):
@@ -277,7 +233,6 @@ def capture($clients):
       ignored: $cfg.ignored,
       skipOnce: $cfg.skipOnce,
       entries: [ .order[] as $c | .by[$c] ],
-      windows: $cfg.windows,
       added, updated
     };
 
@@ -479,9 +434,17 @@ quote_argv() {
 # .desktop file. eval would unquote correctly but would also run command
 # substitution in a string the user can edit in overrides.json, and this runs
 # at save time, not launch time.
-unquote_argv() {
+unquote_argv_arr() {
   local s="$1" cur="" q="" c i=0 n=${#1} started=0
   local -a out=()
+  # Fast path: nothing to unquote, so plain IFS word splitting is exact and
+  # skips the character loop. That loop is O(length) in bash and runs over
+  # every .desktop Exec during indexing, which was most of a save.
+  if [[ "$s" != *[\\\'\"]* ]]; then
+    _UARGV=()
+    read -r -a _UARGV <<<"$s"
+    return 0
+  fi
   while ((i < n)); do
     c="${s:i:1}"
     if [[ -n "$q" ]]; then
@@ -517,13 +480,25 @@ unquote_argv() {
     ((i++)) || true
   done
   ((started)) && out+=("$cur")
-  ((${#out[@]})) && printf '%s\0' "${out[@]}"
+  _UARGV=(${out[@]+"${out[@]}"})
+  return 0
+}
+
+# NUL-separated form, for callers that still read it through mapfile.
+unquote_argv() {
+  unquote_argv_arr "$1"
+  ((${#_UARGV[@]})) && printf '%s\0' "${_UARGV[@]}"
   return 0
 }
 
 # The command a launch line actually runs, with wrappers, terminals and a
 # `bash -c` shim walked off. Display only: the label is never a lookup key.
 leaf_command_from_argv() {
+  leaf_from_argv_into "$@" || return 1
+  printf '%s\n' "$_LEAF"
+}
+
+leaf_from_argv_into() {
   local -a argv=("$@")
   local i=0 n=${#argv[@]} a
   local -a inner=()
@@ -554,7 +529,7 @@ leaf_command_from_argv() {
     inner=("${argv[@]:i}")
   fi
 
-  ((${#inner[@]})) || return 1
+  ((${#inner[@]})) || { _LEAF=""; return 1; }
 
   # `bash -c "dua i /"` names dua, not bash.
   case "${inner[0]##*/}" in
@@ -562,25 +537,29 @@ leaf_command_from_argv() {
       if [[ "${inner[1]:-}" == -c && -n "${inner[2]:-}" ]]; then
         local script="${inner[2]}"
         script="${script%% *}"
-        [[ -n "$script" ]] && { printf '%s\n' "${script##*/}"; return 0; }
+        [[ -n "$script" ]] && { _LEAF="${script##*/}"; return 0; }
       fi
       ;;
   esac
-  printf '%s\n' "${inner[0]##*/}"
+  _LEAF="${inner[0]##*/}"
+}
+
+leaf_for_exec_into() {
+  unquote_argv_arr "$1"
+  ((${#_UARGV[@]})) || { _LEAF=""; return 1; }
+  leaf_from_argv_into "${_UARGV[@]}"
 }
 
 leaf_command_for_exec() {
-  local -a argv=()
-  mapfile -t -d '' argv < <(unquote_argv "$1")
-  ((${#argv[@]})) || return 1
-  leaf_command_from_argv "${argv[@]}"
+  leaf_for_exec_into "$1" || return 1
+  printf '%s\n' "$_LEAF"
 }
 
 # Print JSON {wrapped, class, exec} from argv. A terminal hosting another
 # command (foot -e herdr, omarchy-launch-terminal nvim) becomes class=that
 # command and exec=xdg-terminal-exec --app-id=<class> -e <command...>, so the
 # next launch has a distinct Hyprland class. No per-app special cases.
-identity_from_argv() {
+identity_into_globals() {
   local -a argv=("$@")
   local i=0 n=${#argv[@]}
   local app_id="" terminal=""
@@ -637,8 +616,23 @@ identity_from_argv() {
     exec="xdg-terminal-exec $(quote_argv "--app-id=${class}") -e $(quote_argv "${inner[@]}")"
   fi
 
+  _ID_WRAPPED=false
+  _ID_CLASS=""
+  _ID_EXEC=""
   if [[ -n "$class" ]]; then
-    jq -n --arg class "$class" --arg exec "$exec" '{wrapped: true, class: $class, exec: $exec}'
+    _ID_WRAPPED=true
+    _ID_CLASS="$class"
+    _ID_EXEC="$exec"
+  fi
+}
+
+# JSON form, for callers and docs that still want it. The hot paths use the
+# globals directly: jq costs ~10ms per spawn and this used to run several
+# times per window.
+identity_from_argv() {
+  identity_into_globals "$@"
+  if [[ "$_ID_WRAPPED" == true ]]; then
+    jq -n --arg class "$_ID_CLASS" --arg exec "$_ID_EXEC" '{wrapped: true, class: $class, exec: $exec}'
   else
     jq -n '{wrapped: false}'
   fi
@@ -674,43 +668,89 @@ ppid_of() {
   awk '/^PPid:/{print $2; exit}' "/proc/${pid}/status" 2>/dev/null || printf '0\n'
 }
 
-identity_from_pid() {
+identity_pid_into_globals() {
   local pid="$1" hops=0 next
   local -a argv=()
-  local ident
-  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { jq -n '{wrapped: false}'; return; }
+  _ID_WRAPPED=false
+  _ID_CLASS=""
+  _ID_EXEC=""
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
   while [[ "$pid" =~ ^[1-9][0-9]*$ ]] && ((hops < 8)); do
     if read_pid_argv "$pid" argv; then
-      ident="$(identity_from_argv "${argv[@]}")"
-      if jq -e '.wrapped == true' >/dev/null <<<"$ident"; then
-        printf '%s\n' "$ident"
-        return
-      fi
+      identity_into_globals "${argv[@]}"
+      [[ "$_ID_WRAPPED" == true ]] && return 0
     fi
     next="$(ppid_of "$pid")"
     [[ "$next" == "$pid" || "$next" == 0 ]] && break
     pid="$next"
     hops=$((hops + 1))
   done
-  jq -n '{wrapped: false}'
+  _ID_WRAPPED=false
+  _ID_CLASS=""
+  _ID_EXEC=""
+  return 0
+}
+
+identity_from_pid() {
+  identity_pid_into_globals "$1"
+  if [[ "$_ID_WRAPPED" == true ]]; then
+    jq -n --arg class "$_ID_CLASS" --arg exec "$_ID_EXEC" '{wrapped: true, class: $class, exec: $exec}'
+  else
+    jq -n '{wrapped: false}'
+  fi
+}
+
+# Pure builtins on purpose. This is called once per key per .desktop file --
+# 93 files on a normal machine -- and the previous
+# `printf | tr | tr` forked a subshell and two processes every time, which
+# put `save` at 10-18 seconds with jq accounting for 2% of it. Byte-identical
+# output to the old pipeline; the suite pins the edge cases.
+# Sets _NKEY instead of printing. A $(...) substitution forks a subshell even
+# when the callee is pure builtins, and the index calls this six times per
+# .desktop file, so the fork is the cost, not the work.
+nkey() {
+  # LC_ALL=C is load-bearing, not tidiness. ${v,,} is locale-aware Unicode
+  # case folding, while the tr '[:upper:]' '[:lower:]' this replaced folded
+  # ASCII only: under en_US.UTF-8, "Apps" stayed "Apps" before and would
+  # become "apps" now. Key derivation decides which .desktop a class resolves
+  # to, so a changed key can collapse formerly distinct entries in
+  # DESKTOP_EXEC_BY_* and let the first-indexed launcher win. Byte semantics
+  # keep this a pure performance change. `local` restores the previous value
+  # on return, so nothing else in the script sees C.
+  local LC_ALL=C
+  local v="${1,,}"
+  v="${v//[ _.]/-}"
+  # tr -s squeezed runs of the replaced characters into one dash.
+  while [[ "$v" == *--* ]]; do
+    v="${v//--/-}"
+  done
+  _NKEY="$v"
 }
 
 normalize_desktop_key() {
-  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -s ' _.' '-'
+  nkey "$1"
+  printf '%s' "$_NKEY"
+}
+
+dlaunch_into() {
+  local file="$1" id
+  if command -v gio >/dev/null 2>&1; then
+    printf -v _DLAUNCH 'gio launch %q' "$file"
+    return 0
+  fi
+  if command -v gtk-launch >/dev/null 2>&1; then
+    id="${file##*/}"
+    id="${id%.desktop}"
+    printf -v _DLAUNCH 'gtk-launch %q' "$id"
+    return 0
+  fi
+  _DLAUNCH=""
+  return 1
 }
 
 desktop_launch_cmd() {
-  local file="$1" id
-  if command -v gio >/dev/null 2>&1; then
-    printf 'gio launch %q\n' "$file"
-    return
-  fi
-  if command -v gtk-launch >/dev/null 2>&1; then
-    id="$(basename "$file" .desktop)"
-    printf 'gtk-launch %q\n' "$id"
-    return
-  fi
-  return 1
+  dlaunch_into "$1" || return 1
+  printf '%s\n' "$_DLAUNCH"
 }
 
 index_set_if_empty() {
@@ -764,6 +804,15 @@ declare -A WEBAPP_AMBIGUOUS=()
 # first-wins-per-key behaviour; general masking is a separate issue.
 declare -A WEBAPP_ID_CLAIMED=()
 _desktop_indexed=0
+# Scratch globals for the fork-free helpers used by the indexing hot path.
+_NKEY=""
+_DLAUNCH=""
+_DFID=""
+_LEAF=""
+_ID_WRAPPED=false
+_ID_CLASS=""
+_ID_EXEC=""
+declare -a _UARGV=()
 
 # Chromium identity for a URL: lowercase host, then the path with each / as
 # an underscore. Query and fragment are excluded because Chromium discards
@@ -851,7 +900,11 @@ chromium_identity_from_url() {
 webapp_url_from_exec() {
   local raw="$1" i n a
   local -a argv=()
-  mapfile -t -d '' argv < <(unquote_argv "$raw")
+  # Cheap reject before tokenizing: only an omarchy-launch-webapp line can
+  # produce a web-app identity, and that is one file out of ninety-odd.
+  [[ "$raw" == *omarchy-launch-webapp* ]] || return 1
+  unquote_argv_arr "$raw"
+  argv=(${_UARGV[@]+"${_UARGV[@]}"})
   n=${#argv[@]}
   ((n)) || return 1
   i=0
@@ -877,23 +930,46 @@ webapp_url_from_exec() {
 # XDG desktop-file ID: the path relative to the applications/ root with each
 # / replaced by -, case preserved. foo/bar.desktop is the id foo-bar, and
 # Foo.desktop and foo.desktop are distinct ids that must not mask each other.
-desktop_file_id() {
+dfid_into() {
   local file="$1" root="$2" rel
   rel="${file#"$root"/}"
   rel="${rel%.desktop}"
-  printf '%s\n' "${rel//\//-}"
+  _DFID="${rel//\//-}"
+}
+
+desktop_file_id() {
+  dfid_into "$1" "$2"
+  printf '%s\n' "$_DFID"
 }
 
 index_desktop_file() {
   local file="$1" root="${2:-}"
   local section="" raw_exec="" wmclass="" name="" hidden=false
   local line key val id launch
+  # Cheap filter first. A .desktop file is mostly translated keys
+  # (Name[de]=, Comment[fr]=, ...) -- ~600 lines each across 93 files -- and
+  # only four keys matter. Matching the literal prefixes up front skips the
+  # \r trim, the two parameter expansions and the section compare for every
+  # line we do not want. Also stops at the first section after
+  # [Desktop Entry], since nothing after it is read.
   while IFS= read -r line || [[ -n "$line" ]]; do
+    # Strip CR before anything else. The old parser did, and matching the
+    # section header first meant "[Desktop Entry]\r" matched nothing, so a
+    # CRLF file contributed no Exec, Name or StartupWMClass -- and a web app
+    # could still claim its desktop id while registering no launcher, masking
+    # a valid lower-priority file.
     line="${line%$'\r'}"
-    if [[ "$line" == \[*] ]]; then
-      section="$line"
-      continue
-    fi
+    case "$line" in
+      \[*])
+        if [[ "$section" == "[Desktop Entry]" ]]; then
+          break
+        fi
+        section="$line"
+        continue
+        ;;
+      Exec=* | Name=* | StartupWMClass=* | Hidden=* | hidden=*) ;;
+      *) continue ;;
+    esac
     [[ "$section" == "[Desktop Entry]" ]] || continue
     key="${line%%=*}"
     val="${line#*=}"
@@ -911,11 +987,13 @@ index_desktop_file() {
   # Case-sensitive XDG id, not the lowercased basename: normalize_desktop_key
   # collapses case, spaces, underscores and dots, which would let distinct
   # launchers mask one another or hide a real ambiguity.
-  _widkey="$(desktop_file_id "$file" "${root:-${file%/*}}")"
+  dfid_into "$file" "${root:-${file%/*}}"
+  _widkey="$_DFID"
   if [[ -z "${WEBAPP_ID_CLAIMED[$_widkey]:-}" ]]; then
     WEBAPP_ID_CLAIMED[$_widkey]=1
     if ! $hidden && [[ -n "$raw_exec" ]]; then
       _wurl="$(webapp_url_from_exec "$raw_exec" 2>/dev/null || true)"
+      # (one fork, only for entries that actually name a web app)
       if [[ -n "$_wurl" ]]; then
         _wident="$(chromium_identity_from_url "$_wurl" 2>/dev/null || true)"
         if [[ -n "$_wident" ]]; then
@@ -925,7 +1003,7 @@ index_desktop_file() {
             WEBAPP_AMBIGUOUS[$_wident]=1
           else
             WEBAPP_ID_BY_IDENTITY[$_wident]="$_widkey"
-            WEBAPP_LAUNCH_BY_IDENTITY[$_wident]="$(desktop_launch_cmd "$file")"
+            dlaunch_into "$file" && WEBAPP_LAUNCH_BY_IDENTITY[$_wident]="$_DLAUNCH"
           fi
         fi
       fi
@@ -934,26 +1012,43 @@ index_desktop_file() {
 
   $hidden && return 0
   [[ -n "$raw_exec" ]] || return 0
-  launch="$(desktop_launch_cmd "$file")" || return 0
-  id="$(basename "$file" .desktop)"
-  index_set_if_empty DESKTOP_EXEC_BY_CLASS "$(normalize_desktop_key "$wmclass")" "$launch"
-  index_set_if_empty DESKTOP_EXEC_BY_ID "$(normalize_desktop_key "$id")" "$launch"
+  dlaunch_into "$file" || return 0
+  launch="$_DLAUNCH"
+  id="${file##*/}"
+  id="${id%.desktop}"
+  nkey "$wmclass"; local wmkey="$_NKEY"
+  nkey "$id"; local idkey="$_NKEY"
+  nkey "$name"; local namekey="$_NKEY"
+  index_set_if_empty DESKTOP_EXEC_BY_CLASS "$wmkey" "$launch"
+  index_set_if_empty DESKTOP_EXEC_BY_ID "$idkey" "$launch"
   # Name is a last-resort fallback. A Brave PWA named "Proton Mail" has
   # StartupWMClass=crx_… — do not let that Name steal the official app class.
-  if [[ -z "$wmclass" || "$(normalize_desktop_key "$wmclass")" == "$(normalize_desktop_key "$name")" ]]; then
-    index_set_if_empty DESKTOP_EXEC_BY_NAME "$(normalize_desktop_key "$name")" "$launch"
+  if [[ -z "$wmclass" || "$wmkey" == "$namekey" ]]; then
+    index_set_if_empty DESKTOP_EXEC_BY_NAME "$namekey" "$launch"
   fi
   # Reverse map uses the raw Exec token so startup-line matching still works.
-  index_set_if_empty DESKTOP_CLASS_BY_EXEC "$(normalize_desktop_key "$raw_exec")" "${wmclass:-$id}"
-  index_set_if_empty DESKTOP_CLASS_BY_EXEC "$(normalize_desktop_key "${raw_exec%% *}")" "${wmclass:-$id}"
+  nkey "$raw_exec"
+  index_set_if_empty DESKTOP_CLASS_BY_EXEC "$_NKEY" "${wmclass:-$id}"
+  nkey "${raw_exec%% *}"
+  index_set_if_empty DESKTOP_CLASS_BY_EXEC "$_NKEY" "${wmclass:-$id}"
   if [[ -n "$name" ]]; then
     local leaf
-    leaf="$(leaf_command_for_exec "$raw_exec" 2>/dev/null || true)"
+    leaf=""
+    # Only a wrapping Exec can yield a leaf that differs from its first word,
+    # which is the condition below. Checking first avoids tokenizing the
+    # other ninety files.
+    local _first="${raw_exec%% *}"
+    if is_terminal_cmd "$_first" || is_wrapper_cmd "$_first" \
+      || [[ "${_first##*/}" == bash || "${_first##*/}" == sh \
+         || "${_first##*/}" == zsh || "${_first##*/}" == dash ]]; then
+      leaf_for_exec_into "$raw_exec" 2>/dev/null && leaf="$_LEAF"
+    fi
     # Only a terminal wrap: a plain Exec=brave would map `brave` -> "Brave",
     # which tier 1 already covers from the exact file, and which would let any
     # app claim a bare command name.
     if [[ -n "$leaf" && "$leaf" != "${raw_exec%% *}" ]]; then
-      index_set_if_empty DESKTOP_NAME_BY_LEAF "$(normalize_desktop_key "$leaf")" "$name"
+      nkey "$leaf"
+      index_set_if_empty DESKTOP_NAME_BY_LEAF "$_NKEY" "$name"
     fi
   fi
 }
@@ -1031,7 +1126,8 @@ startup_keys_for() {
 }
 
 startup_keys_json() {
-  startup_keys_for "$1" "$2" "$3" | jq -R . | jq -s .
+  startup_keys_for "$1" "$2" "$3" \
+    | jq -R -s 'split("\n") | map(select(length > 0))'
 }
 
 desktop_name_for_leaf() {
@@ -1273,12 +1369,12 @@ exec_is_ok() {
 resolve_launch() {
   # Prints: exec<TAB>source
   local class="$1" pid="$2"
-  local ident exec
-  ident="$(identity_from_pid "$pid")"
-  if jq -e '.wrapped == true' >/dev/null <<<"$ident"; then
+  local exec
+  identity_pid_into_globals "$pid"
+  if [[ "$_ID_WRAPPED" == true ]]; then
     # Not @tsv: it escapes backslashes, and a shell-quoted hosted command
     # legitimately contains them (bash -c dua\ i\ /).
-    printf '%s\t%s\n' "$(jq -r '.exec' <<<"$ident")" "terminal"
+    printf '%s\t%s\n' "$_ID_EXEC" "terminal"
     return
   fi
   exec="$(override_exec_for_class "$class")"
@@ -1296,15 +1392,25 @@ resolve_launch() {
     printf '%s\t%s\n' "$exec" "cmdline"
     return
   fi
-  printf '%s\t%s\n' "$(printf '%s' "$class" | tr '[:upper:]' '[:lower:]')" "guess"
+  printf '%s\t%s\n' "${class,,}" "guess"
 }
 
 annotate_clients() {
   # mode=display: only unwrap terminal hosts (cheap /proc walk). Do not
   # index .desktop files or read cmdline launchers — that is save/import.
   local clients="$1" mode="${2:-full}"
-  local addr pid class exec source patches line ident label skeys
+  local addr pid class exec source patches line label skeys
+  # One JSON object per window, assembled into the array once at the end.
+  # Re-running jq over the whole accumulator per window was O(n) spawns of an
+  # O(n) document.
+  local -a rows=()
   patches='[]'
+  # Warm the index in THIS shell before the loop. resolve_launch runs inside
+  # a $(...) subshell, which gets a copy of _desktop_indexed and of the index
+  # arrays; with a cold parent every window rebuilt the whole index and threw
+  # it away, turning a 170ms scan into 170ms x windows. Display mode must not
+  # index at all, so it is excluded.
+  [[ "$mode" == display ]] || ensure_desktop_index
   # Keyed by window address, not pid. Chromium serves every web app from one
   # process, so a Google Maps window and the ordinary browser window share a
   # pid; keying patches by pid collapsed them through from_entries and gave
@@ -1313,11 +1419,10 @@ annotate_clients() {
     [[ -z "$pid" || "$pid" == null ]] && continue
     [[ -z "$addr" || "$addr" == null ]] && continue
     if [[ "$mode" == display ]]; then
-      ident="$(identity_from_pid "$pid")"
-      if jq -e '.wrapped == true' >/dev/null <<<"$ident"; then
-        exec="$(jq -r '.exec' <<<"$ident")"
-        patches="$(jq --arg addr "$addr" --argjson ident "$ident" --arg exec "$exec" \
-          '. + [{addr: $addr, wrapped: true, class: $ident.class, exec: $exec, execSource: "terminal"}]' <<<"$patches")"
+      identity_pid_into_globals "$pid"
+      if [[ "$_ID_WRAPPED" == true ]]; then
+        rows+=("$(jq -nc --arg addr "$addr" --arg class "$_ID_CLASS" --arg exec "$_ID_EXEC" \
+          '{addr: $addr, wrapped: true, class: $class, exec: $exec, execSource: "terminal"}')")
       fi
       continue
     fi
@@ -1325,17 +1430,17 @@ annotate_clients() {
     exec="${line%%$'\t'*}"
     source="${line#*$'\t'}"
     if [[ "$source" == terminal ]]; then
-      ident="$(identity_from_pid "$pid")"
-      label="$(display_label_for "$(jq -r '.class' <<<"$ident")" "$exec" "$source")"
-      skeys="$(startup_keys_json "$(jq -r '.class' <<<"$ident")" "$exec" "$source")"
-      patches="$(jq --arg addr "$addr" --argjson ident "$ident" --arg exec "$exec" --arg label "$label" --argjson skeys "$skeys" \
-        '. + [{addr: $addr, wrapped: true, class: $ident.class, exec: $exec, execSource: "terminal", label: $label, startupKeys: $skeys}]' <<<"$patches")"
+      identity_pid_into_globals "$pid"
+      label="$(display_label_for "$_ID_CLASS" "$exec" "$source")"
+      skeys="$(startup_keys_json "$_ID_CLASS" "$exec" "$source")"
+      rows+=("$(jq -nc --arg addr "$addr" --arg class "$_ID_CLASS" --arg exec "$exec" --arg label "$label" --argjson skeys "$skeys" \
+        '{addr: $addr, wrapped: true, class: $class, exec: $exec, execSource: "terminal", label: $label, startupKeys: $skeys}')")
       continue
     fi
     label="$(display_label_for "$class" "$exec" "$source")"
     skeys="$(startup_keys_json "$class" "$exec" "$source")"
-    patches="$(jq --arg addr "$addr" --arg class "$class" --arg exec "$exec" --arg src "$source" --arg label "$label" --argjson skeys "$skeys" \
-      '. + [{addr: $addr, wrapped: false, class: $class, exec: $exec, execSource: $src, label: $label, startupKeys: $skeys}]' <<<"$patches")"
+    rows+=("$(jq -nc --arg addr "$addr" --arg class "$class" --arg exec "$exec" --arg src "$source" --arg label "$label" --argjson skeys "$skeys" \
+      '{addr: $addr, wrapped: false, class: $class, exec: $exec, execSource: $src, label: $label, startupKeys: $skeys}')")
   done < <(jq -r '
     .[] | select(.pid != null)
     | [
@@ -1346,10 +1451,11 @@ annotate_clients() {
         (if (.initialClass // "") != "" then .initialClass else (.class // "") end)
       ] | @tsv
   ' <<<"$clients")
-  if [[ "$patches" == "[]" ]]; then
+  if ((${#rows[@]} == 0)); then
     printf '%s\n' "$clients"
     return
   fi
+  patches="$(printf '%s\n' "${rows[@]}" | jq -sc .)"
   jq --argjson patches "$patches" '
     ($patches | map({key: .addr, value: .}) | from_entries) as $by
     | map(
@@ -1515,7 +1621,7 @@ decorate_items() {
     if [[ -z "$_src" ]]; then
       if [[ -n "$(override_exec_for_class "$_class")" ]]; then
         _src="overrides-table"
-      elif [[ "$_exec" == "$(printf '%s' "$_class" | tr '[:upper:]' '[:lower:]')" ]]; then
+      elif [[ "$_exec" == "${_class,,}" ]]; then
         _src="guess"
       fi
     fi
@@ -1636,7 +1742,11 @@ write_last_boot() {
         .[] |
         "  ws \(.workspace)  \(.class)  \(.status)  pid=\(.pid // "-")"
         + (if .actualWorkspace != null then "  landed=ws \(.actualWorkspace) class=\(.actualClass // "?")" else "" end)
-        + (if .placed == false then "  MISPLACED" else "" end)
+        + (
+            if (.outcome // "") == "misplaced" then "  MISPLACED"
+            elif (.outcome // "") == "pending" then "  PENDING (no window yet)"
+            else "" end
+          )
         + "  \(.exec)"
         + (if .error then "  (\(.error))" else "" end)
       ' <<<"$launches"
@@ -1644,31 +1754,83 @@ write_last_boot() {
   } | atomic_write "$(last_boot_log_path)"
 }
 
+# Placement has three outcomes, not two. A single immediate sample cannot
+# tell "came back on the wrong workspace" from "has not mapped a window yet":
+# LibreOffice and Chromium web apps take tens of seconds, and both were
+# reported MISPLACED after restoring correctly. Only `misplaced` is a
+# failure.
+#
+#   landed    a window of this class is on the expected workspace
+#   misplaced a window exists, on a different workspace
+#   pending   no window of this class yet, within the deadline
+#
+# Bounded re-sampling, not a watcher: this runs at boot. Entries still
+# pending are re-checked until the deadline, and everything that has already
+# resolved is left alone.
 verify_launches() {
   local launches="$1" clients
-  if [[ "${RELAUNCH_VERIFY_SLEEP:-2}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !(${RELAUNCH_VERIFY_SLEEP:-2} > 0)}"; then
-    sleep "${RELAUNCH_VERIFY_SLEEP:-2}"
+  local wait_total="${RELAUNCH_VERIFY_SLEEP:-2}"
+  local deadline="${RELAUNCH_VERIFY_DEADLINE:-20}"
+  local interval="${RELAUNCH_VERIFY_INTERVAL:-2}"
+  local elapsed=0
+
+  if [[ "$wait_total" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($wait_total > 0)}"; then
+    sleep "$wait_total"
   fi
   if ! clients="$(clients_raw)"; then
     printf '%s\n' "$launches"
     return
   fi
+  launches="$(verify_sample "$launches" "$clients")"
+
+  # Re-sample only while something is still pending and the deadline allows.
+  while [[ "$deadline" =~ ^[0-9]+$ ]] && ((deadline > 0)) \
+    && [[ "$interval" =~ ^[0-9]+$ ]] && ((interval > 0)) \
+    && ((elapsed < deadline)); do
+    jq -e 'any(.[]; .outcome == "pending")' >/dev/null <<<"$launches" || break
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+    clients="$(clients_raw)" || break
+    launches="$(verify_sample "$launches" "$clients")"
+  done
+  printf '%s\n' "$launches"
+}
+
+verify_sample() {
+  local launches="$1" clients="$2"
   jq --argjson clients "$clients" '
     map(
       . as $l
-      | (
-          $clients
-          | map(select(
-              (.pid == $l.pid)
-              or ((.initialClass // .class // "") == $l.class)
-            ))
-          | .[0] // null
-        ) as $w
-      | . + {
-          actualClass: (if $w == null then null else ($w.initialClass // $w.class) end),
-          actualWorkspace: (if $w == null then null else $w.workspace.id end),
-          placed: (if $w == null then false else ($w.workspace.id == $l.workspace) end)
-        }
+      # Already resolved: do not re-open a decision a later sample cannot
+      # improve. Only pending entries are re-examined.
+      | if (.outcome // "pending") != "pending" then .
+        else
+          (
+            $clients
+            | map(select(
+                (.pid == $l.pid)
+                or ((.initialClass // .class // "") == $l.class)
+              ))
+          ) as $all
+          | (
+              $all
+              | map(select(.workspace.id == $l.workspace))
+              | .[0]
+            ) as $onTarget
+          | ($onTarget // ($all | .[0]) // null) as $w
+          | . + {
+              actualClass: (if $w == null then null else ($w.initialClass // $w.class) end),
+              actualWorkspace: (if $w == null then null else $w.workspace.id end),
+              outcome: (
+                if $w == null then "pending"
+                elif $onTarget != null then "landed"
+                else "misplaced" end
+              ),
+              # Kept for compatibility: true only when it really landed, so
+              # an unresolved entry no longer reads as a failure.
+              placed: ($onTarget != null)
+            }
+        end
     )
   ' <<<"$launches"
 }
@@ -1707,7 +1869,7 @@ clients_display() {
 }
 
 pid_for_running_class() {
-  local class="$1" clients pid hit ident
+  local class="$1" clients pid hit
   clients="$(clients_raw)" || return 1
   hit="$(jq -r --arg c "$class" '
     map(select(
@@ -1727,9 +1889,9 @@ pid_for_running_class() {
   # so the /proc walk stays off the common path.
   while IFS= read -r pid; do
     [[ -n "$pid" ]] || continue
-    ident="$(identity_from_pid "$pid")"
-    jq -e '.wrapped == true' >/dev/null <<<"$ident" || continue
-    if [[ "$(jq -r '.class | ascii_downcase' <<<"$ident")" == "${class,,}" ]]; then
+    identity_pid_into_globals "$pid"
+    [[ "$_ID_WRAPPED" == true ]] || continue
+    if [[ "${_ID_CLASS,,}" == "${class,,}" ]]; then
       printf '%s\n' "$pid"
       return 0
     fi
@@ -1738,14 +1900,11 @@ pid_for_running_class() {
 }
 
 cmd_save() {
-  local cfg clients monitors merged extra
+  local cfg clients merged extra
   ensure_hooks
   cfg="$(load_config_json)"
   clients="$(clients_json)"
-  monitors="$(monitors_raw)"
-  merged="$(jq --argjson clients "$clients" --argjson monitors "$monitors" "$jq_lib"'
-    capture($clients) + {windows: window_snapshot($clients; $monitors)}
-  ' <<<"$cfg")"
+  merged="$(jq --argjson clients "$clients" "$jq_lib"' capture($clients)' <<<"$cfg")"
   jq "$jq_lib"' del(.added, .updated) | dump_config' <<<"$merged" | atomic_write "$(config_path)"
   jq "$jq_lib"' del(.added, .updated)' <<<"$merged" | write_generated
   extra="$(jq '{added: .added, updated: .updated}' <<<"$merged")"
