@@ -1434,6 +1434,134 @@ echo "$report" | jq -e '[.classes[] | select(.class == "moved") | .missing] == [
   || fail "the human diff must show a MOVED row"
 unset FAKE_MONITORS
 
+# --- RFC 3986 5.2.4 and GURL edge cases (PR #12 re-review) ---
+# A segment-stack approximation drops empty segments and the trailing slash a
+# final "." or ".." produces. Those are different Chromium identities, so each
+# case gets a launcher and a window and must resolve to its own file.
+RFC="$WORKDIR/rfc/applications"
+mkdir -p "$RFC"
+mkrfc() { printf '%s\n' '[Desktop Entry]' "Name=$1" "Exec=omarchy-launch-webapp $2" 'Type=Application' >"$RFC/$1.desktop"; }
+# /a/b/..  -> /a/   -> identity host__a_
+mkrfc "TrailA" "https://trail-a.example.com/a/b/.."
+# /a/b/../ -> /a/   (same shape, distinct host so both can be asserted)
+mkrfc "TrailB" "https://trail-b.example.com/a/b/../"
+# /a//b    -> /a//b -> empty segment preserved
+mkrfc "Empty" "https://empty.example.com/a//b"
+# /a/.     -> /a/
+mkrfc "Dot" "https://dot.example.com/a/."
+# bracketed IPv6 host, which had no regression test at all
+mkrfc "Six" "https://[2001:db8::1]:8443/x/../y"
+export RELAUNCH_DATA_DIRS="$WORKDIR/rfc"
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/rfccmd"
+mkdir -p "$RELAUNCH_CMDLINE_DIR"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"address":"0x1","class":"brave-trail-a.example.com__a_-Default","initialClass":"brave-trail-a.example.com__a_-Default","pid":2000,"floating":false,"workspace":{"id":1}},
+  {"address":"0x2","class":"brave-trail-b.example.com__a_-Default","initialClass":"brave-trail-b.example.com__a_-Default","pid":2001,"floating":false,"workspace":{"id":2}},
+  {"address":"0x3","class":"brave-empty.example.com__a__b-Default","initialClass":"brave-empty.example.com__a__b-Default","pid":2002,"floating":false,"workspace":{"id":3}},
+  {"address":"0x4","class":"brave-dot.example.com__a_-Default","initialClass":"brave-dot.example.com__a_-Default","pid":2003,"floating":false,"workspace":{"id":4}},
+  {"address":"0x5","class":"brave-[2001:db8::1]__y-Default","initialClass":"brave-[2001:db8::1]__y-Default","pid":2004,"floating":false,"workspace":{"id":5}}
+]
+EOF
+out="$("$RELAUNCH" save --json)"
+rex() { jq -r --arg c "$1" '[.entries[] | select(.class == $c) | .exec] | .[0] // "(none)"' <<<"$out"; }
+[[ "$(rex 'brave-trail-a.example.com__a_-Default')" == "gio launch $RFC/TrailA.desktop" ]] \
+  || fail "/a/b/.. must canonicalize to /a/ (trailing slash kept), got $(rex 'brave-trail-a.example.com__a_-Default')"
+[[ "$(rex 'brave-trail-b.example.com__a_-Default')" == "gio launch $RFC/TrailB.desktop" ]] \
+  || fail "/a/b/../ must canonicalize to /a/, got $(rex 'brave-trail-b.example.com__a_-Default')"
+[[ "$(rex 'brave-empty.example.com__a__b-Default')" == "gio launch $RFC/Empty.desktop" ]] \
+  || fail "/a//b must keep its empty segment, got $(rex 'brave-empty.example.com__a__b-Default')"
+[[ "$(rex 'brave-dot.example.com__a_-Default')" == "gio launch $RFC/Dot.desktop" ]] \
+  || fail "/a/. must canonicalize to /a/, got $(rex 'brave-dot.example.com__a_-Default')"
+[[ "$(rex 'brave-[2001:db8::1]__y-Default')" == "gio launch $RFC/Six.desktop" ]] \
+  || fail "a bracketed IPv6 host must keep its brackets and drop the port, got $(rex 'brave-[2001:db8::1]__y-Default')"
+
+# A scheme-less URL is not a GURL: reject it instead of indexing a bogus
+# identity. The guard used to be unreachable and accepted it.
+mkrfc "Schemeless" "example.com/app"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"address":"0x9","class":"brave-example.com__app-Default","initialClass":"brave-example.com__app-Default","pid":2100,"floating":false,"workspace":{"id":7}}]
+EOF
+out="$("$RELAUNCH" save --json)"
+[[ "$(jq -r '.entries[0].execSource' <<<"$out")" != "desktop-file" ]] \
+  || fail "a scheme-less Exec URL must not produce a web-app identity, got $(rex 'brave-example.com__app-Default')"
+rm -f "$RFC/Schemeless.desktop"
+unset RELAUNCH_DATA_DIRS
+unset RELAUNCH_CMDLINE_DIR
+
+# --- an overrides-table entry keeps exec, label AND startupKeys ---
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"herdr","workspace":1,"exec":"my-custom-herdr","execSource":"overrides-table",
+   "label":"My Custom Herdr","startupKeys":["herdr","my-custom-herdr"],"enabled":true}
+]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"herdr","initialClass":"herdr","pid":90,"floating":false,"workspace":{"id":1}}]
+EOF
+"$RELAUNCH" save --json | jq -e '
+  [.entries[] | select(.class == "herdr")] | .[0]
+  | .exec == "my-custom-herdr"
+    and .label == "My Custom Herdr"
+    and (.startupKeys | index("my-custom-herdr")) != null
+' >/dev/null || fail "an overrides-table entry must keep exec, label and startupKeys"
+unset RELAUNCH_CMDLINE_DIR
+
+# --- a config written before startupKeys existed upgrades cleanly ---
+# Not an empty config: a real pre-schema entry, exercising load/list/generate/
+# boot before any Save, then the Save that fills the keys in.
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
+cat >"$RELAUNCH_AUTOSTART" <<'EOF'
+o.launch_on_start("brave")
+EOF
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{
+  "staggerSeconds": 0,
+  "ignored": [],
+  "skipOnce": false,
+  "entries": [
+    {"class":"brave-browser","workspace":2,
+     "exec":"gio launch /tmp/does-not-matter/brave-browser.desktop",
+     "execSource":"desktop-file","enabled":true}
+  ]
+}
+EOF
+legacy="$("$RELAUNCH" list --json)"
+echo "$legacy" | jq -e '
+  ([.entries[] | select(.class == "brave-browser") | .startupKeys] == [[]])
+' >/dev/null || fail "a pre-startupKeys config must normalize the field to []: $legacy"
+echo "$legacy" | jq -e '.ok == true' >/dev/null || fail "a legacy config must list cleanly"
+"$RELAUNCH" generate >/dev/null || fail "a legacy config must generate cleanly"
+assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'class = "^(brave-browser)$"'
+assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'startupKeys'
+echo '[]' >"$FAKE_CLIENTS"
+"$RELAUNCH" boot >/dev/null 2>&1
+jq -e '.outcome == "launched"' "$RELAUNCH_CONFIG_DIR/last-boot.json" >/dev/null \
+  || fail "a legacy config must boot cleanly"
+# Before a Save the association is simply absent -- same as before the field.
+"$RELAUNCH" list --json | jq -e '
+  [.rows[] | select(.class == "brave-browser") | .kind] == ["relaunch"]
+' >/dev/null || fail "a legacy entry correlates only after a Save"
+# The Save fills them in, and the association appears.
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"brave-browser","initialClass":"brave-browser","pid":2200,"floating":false,"workspace":{"id":2}}]
+EOF
+"$RELAUNCH" save >/dev/null
+jq -e '[.entries[] | select(.class == "brave-browser") | .startupKeys] | .[0] | index("brave") != null' \
+  "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null \
+  || fail "a Save must populate startupKeys on a legacy entry"
+"$RELAUNCH" list --json | jq -e '
+  [.rows[] | select(.class == "brave-browser") | .kind] == ["both"]
+' >/dev/null || fail "after the upgrade Save the legacy entry must correlate"
+unset RELAUNCH_DATA_DIRS
+
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"
 printf '' >"$WORKDIR/globdir/not-the-class"
