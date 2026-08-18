@@ -461,14 +461,26 @@ normalize_desktop_key() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -s ' _.' '-'
 }
 
-clean_desktop_exec() {
-  local e="$1"
-  # Desktop Entry spec: %% is a literal percent; %f %F %u %U %i %c %k are codes.
-  e="${e//%%/$'\x01'}"
-  e="${e//%[fFuUdDnNickvm]/}"
-  e="${e//$'\x01'/%}"
-  e="$(printf '%s' "$e" | sed 's/[[:space:]]\{1,\}/ /g; s/^[[:space:]]*//; s/[[:space:]]*$//; s/ --$//')"
-  printf '%s\n' "$e"
+desktop_launch_cmd() {
+  local file="$1" id
+  if command -v gio >/dev/null 2>&1; then
+    printf 'gio launch %q\n' "$file"
+    return
+  fi
+  if command -v gtk-launch >/dev/null 2>&1; then
+    id="$(basename "$file" .desktop)"
+    printf 'gtk-launch %q\n' "$id"
+    return
+  fi
+  return 1
+}
+
+index_set_if_empty() {
+  local -n _map="$1"
+  local key="$2" val="$3"
+  [[ -n "$key" && -n "$val" ]] || return 0
+  [[ -n "${_map[$key]:-}" ]] && return 0
+  _map["$key"]="$val"
 }
 
 xdg_application_dirs() {
@@ -498,8 +510,8 @@ _desktop_indexed=0
 
 index_desktop_file() {
   local file="$1"
-  local section="" exec="" wmclass="" name="" hidden=false
-  local line key val id
+  local section="" raw_exec="" wmclass="" name="" hidden=false
+  local line key val id launch
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%$'\r'}"
     if [[ "$line" == \[*] ]]; then
@@ -511,21 +523,21 @@ index_desktop_file() {
     val="${line#*=}"
     case "$key" in
       Hidden|hidden) [[ "${val,,}" == true ]] && hidden=true ;;
-      Exec) [[ -z "$exec" ]] && exec="$val" ;;
+      Exec) [[ -z "$raw_exec" ]] && raw_exec="$val" ;;
       StartupWMClass) wmclass="$val" ;;
       Name) [[ -z "$name" ]] && name="$val" ;;
     esac
   done <"$file"
   $hidden && return 0
-  [[ -n "$exec" ]] || return 0
-  exec="$(clean_desktop_exec "$exec")"
-  [[ -n "$exec" ]] || return 0
+  [[ -n "$raw_exec" ]] || return 0
+  launch="$(desktop_launch_cmd "$file")" || return 0
   id="$(basename "$file" .desktop)"
-  [[ -n "$wmclass" ]] && DESKTOP_EXEC_BY_CLASS["$(normalize_desktop_key "$wmclass")"]="$exec"
-  DESKTOP_EXEC_BY_ID["$(normalize_desktop_key "$id")"]="$exec"
-  [[ -n "$name" ]] && DESKTOP_EXEC_BY_NAME["$(normalize_desktop_key "$name")"]="$exec"
-  DESKTOP_CLASS_BY_EXEC["$(normalize_desktop_key "$exec")"]="${wmclass:-$id}"
-  DESKTOP_CLASS_BY_EXEC["$(normalize_desktop_key "${exec%% *}")"]="${wmclass:-$id}"
+  index_set_if_empty DESKTOP_EXEC_BY_CLASS "$(normalize_desktop_key "$wmclass")" "$launch"
+  index_set_if_empty DESKTOP_EXEC_BY_ID "$(normalize_desktop_key "$id")" "$launch"
+  index_set_if_empty DESKTOP_EXEC_BY_NAME "$(normalize_desktop_key "$name")" "$launch"
+  # Reverse map uses the raw Exec token so startup-line matching still works.
+  index_set_if_empty DESKTOP_CLASS_BY_EXEC "$(normalize_desktop_key "$raw_exec")" "${wmclass:-$id}"
+  index_set_if_empty DESKTOP_CLASS_BY_EXEC "$(normalize_desktop_key "${raw_exec%% *}")" "${wmclass:-$id}"
 }
 
 ensure_desktop_index() {

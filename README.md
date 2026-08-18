@@ -132,10 +132,11 @@ use the panel action or `relaunch uninstall --yes` for a full teardown.
 - One instance per app: an `o.window` class match sends every window of that
   class to its workspace, which is correct for a one-pinned-instance-per-app
   setup.
-- Launch commands: terminal wrap, then `~/.config/omarchy-relaunch/overrides.json`
-  (your exceptions; starts empty), then the app's `.desktop` `Exec`, then the
+- Launch commands: terminal wrap, then `overrides.json` (your exceptions;
+  starts empty), then `gio launch` of the matching `.desktop` (your
+  `~/.local/share/applications` first, then the system dirs), then the
   process command line, then a lowercased class. The panel flags unverified
-  guesses and lets you type a command when the guessed binary is missing.
+  guesses and lets you type a command when the binary is missing.
 - A terminal hosting another command (`foot -e cmd`, `omarchy-launch-terminal cmd`)
   is identified by that command and relaunched with
   `xdg-terminal-exec --app-id=<cmd> <cmd...>` so Hyprland gets a distinct class.

@@ -72,11 +72,12 @@ stable. `Panel.qml` parses that object.
   is identified by that command, and relaunched with
   `xdg-terminal-exec --app-id=<cmd> <cmd...>` so Hyprland gets a distinct class.
   Do not special-case individual wrappers like herdr.
-- Launch commands: `terminal` → `overrides.json` → `.desktop` → cmdline →
-  lowercased class (`guess`). `overrides.json` starts empty and only grows
-  when the user saves a command (panel or `relaunch set-exec`). Do not seed
-  it from a built-in table. `--json` includes `execSource`, `execOk`,
-  `unverified`, and `warnings`.
+- Launch commands: `terminal` → `overrides.json` → `.desktop` (via
+  `gio launch <file>`, user `~/.local/share/applications` first, then
+  `$XDG_DATA_DIRS`) → cmdline → lowercased class (`guess`).
+  `overrides.json` starts empty and only grows when the user saves a
+  command. `--json` includes `execSource`, `execOk`, `unverified`, and
+  `warnings`.
 - Recapture refreshes workspace only (and heals a fallback exec). Preserve
   user `exec`, `enabled`, and `float` edits.
 - Skip special/negative workspaces (`Workspace.ID < 1`) and empty classes.

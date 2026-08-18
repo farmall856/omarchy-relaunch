@@ -124,18 +124,22 @@ EOF
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"ignored":[],"entries":[]}
 EOF
-"$RELAUNCH" save --json | jq -e '
-  ([.entries[] | select(.class == "libreoffice-calc") | .exec] == ["libreoffice --calc"])
-  and ([.entries[] | select(.class == "Proton Mail") | .exec] == ["proton-mail"])
-  and ([.entries[] | select(.class == "pct-app") | .exec] == ["pct-app --token %user"])
-' >/dev/null || fail "desktop Exec must resolve calc, Proton Mail, and %% field codes"
+CALC_DESK="$XDG_APPS/libreoffice-calc.desktop"
+MAIL_DESK="$XDG_APPS/proton-mail.desktop"
+PCT_DESK="$XDG_APPS/pct-app.desktop"
+"$RELAUNCH" save --json | jq -e --arg calc "gio launch $CALC_DESK" --arg mail "gio launch $MAIL_DESK" --arg pct "gio launch $PCT_DESK" '
+  ([.entries[] | select(.class == "libreoffice-calc") | .exec] == [$calc])
+  and ([.entries[] | select(.class == "Proton Mail") | .exec] == [$mail])
+  and ([.entries[] | select(.class == "pct-app") | .exec] == [$pct])
+  and ([.entries[] | select(.class == "libreoffice-calc") | .execSource] == ["desktop-file"])
+' >/dev/null || fail "desktop match must store gio launch <desktop-file>"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"ignored":[],"entries":[
   {"class":"libreoffice-calc","workspace":7,"exec":"libreoffice-calc","enabled":true}
 ]}
 EOF
-"$RELAUNCH" save --json | jq -e '
-  [.entries[] | select(.class == "libreoffice-calc") | .exec] == ["libreoffice --calc"]
+"$RELAUNCH" save --json | jq -e --arg calc "gio launch $CALC_DESK" '
+  [.entries[] | select(.class == "libreoffice-calc") | .exec] == [$calc]
 ' >/dev/null || fail "recapture must heal fallback exec from desktop"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"ignored":[],"entries":[
@@ -145,6 +149,32 @@ EOF
 "$RELAUNCH" save --json | jq -e '
   [.entries[] | select(.class == "libreoffice-calc") | .exec] == ["localc --norestore"]
 ' >/dev/null || fail "recapture must keep a real user exec override"
+
+# User applications dir wins over a later system dir with the same Name=
+mkdir -p "$WORKDIR/xdg-user/applications" "$WORKDIR/xdg-system/applications"
+printf '%s\n' '[Desktop Entry]' 'Name=X' 'Exec=omarchy-launch-webapp https://x.com/' >"$WORKDIR/xdg-user/applications/X.desktop"
+printf '%s\n' '[Desktop Entry]' 'Name=X' 'Exec=should-not-win' >"$WORKDIR/xdg-system/applications/X.desktop"
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-user:$WORKDIR/xdg-system"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[]}
+EOF
+cat >"$FAKE_CLIENTS" <<'EOF'
+[{"class":"X","initialClass":"X","pid":74,"floating":false,"workspace":{"id":8}}]
+EOF
+"$RELAUNCH" save --json | jq -e --arg exec "gio launch $WORKDIR/xdg-user/applications/X.desktop" '
+  [.entries[] | select(.class == "X") | .exec] == [$exec]
+' >/dev/null || fail "user applications dir must win over system .desktop"
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
+cat >"$FAKE_CLIENTS" <<'EOF'
+[
+  {"class":"libreoffice-calc","initialClass":"libreoffice-calc","pid":71,"floating":false,"workspace":{"id":7}}
+]
+EOF
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"libreoffice-calc","workspace":7,"exec":"libreoffice-calc","enabled":true,"execSource":"guess"}
+]}
+EOF
 
 # Empty override file; user set-exec wins over .desktop on the next capture
 [[ -f "$RELAUNCH_CONFIG_DIR/overrides.json" ]] || fail "overrides.json should exist after save"
