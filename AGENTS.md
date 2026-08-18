@@ -413,7 +413,7 @@ the clients, ordering earlier means the session has not begun shutting down.
 
 More importantly, it recorded window titles to disk on a schedule the user
 neither saw nor controlled. See "Stored data must be visible and
-manageable" below. A periodic systemd timer was considered as the
+manageable" above. A periodic systemd timer was considered as the
 replacement and **rejected on the same grounds** — a timer plus a oneshot
 avoids the letter of the no-daemon rule while being exactly the background
 recorder the principle forbids. Do not propose it again.
