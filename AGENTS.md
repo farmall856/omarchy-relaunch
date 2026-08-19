@@ -302,6 +302,34 @@ or nothing.
   parent directory is absent, which is why `ensure_file_with` exists and
   creates the resolved target's parent first. Temp files go **beside the resolved target**, never `mktemp`
   in `/tmp`, or the move is cross-filesystem and not atomic either.
+- **File modes: preserved for the user's files, enforced for ours.** These
+  read as contradictory until you split them by owner. `rewrite_through_link`
+  writes `hyprland.lua`, `autostart.lua` and `hyprland.conf` — the user's
+  files — and copies the destination's mode onto the temp with
+  `chmod --reference`, because a rename does not carry it and a `0444` file
+  would come back `0644`. `atomic_write` and `ensure_file_with` write only
+  Relaunch's own files, all under the config directory, and those are
+  **0600 regardless of what was there before** (`0700` on the directory).
+  Preserving there would mean an install predating this kept `0644` forever,
+  since nothing else revisits the bits. They are created private, never
+  created wide and tightened after: the temp file is renamed into place, so
+  its mode becomes the final mode, and a file that exists even briefly at
+  `0644` is a file that could be read. `tighten_config_dir` fixes older
+  installs on the next `ensure_hooks` — one `stat` over the directory and its
+  contents, chmod only for what is wrong, because that runs on the
+  `list`/`save` path. The material is not hypothetical: `last-session.json`
+  stores window titles, which is the same sensitivity that got the snapshot
+  hook removed. Relaunch creates its own directory and everything in it and
+  never symlinks any of it; a user who symlinks our files is in an
+  unsupported configuration, and no symlink handling belongs on this path.
+- **`relaunch boot` runs `bash -c "$exec"`, and that is accepted, not a
+  defect.** Launching what the user chose is the entire product. Anything
+  able to write `config.json` as this user already has code execution at
+  their next login by a dozen easier routes, so no privilege boundary is
+  crossed and no sandbox belongs here. It is, however, exactly why
+  `config.json` and `overrides.json` refuse to load when they will not parse
+  rather than falling back to a default: a parse fallback is a silent edit to
+  the list of things this machine will execute at login.
 - **Relaunch owns two Lua files, and no automatic path writes into the
   user's `autostart.lua`** — only `drop-startup`, which the user invokes
   deliberately from the panel. `relaunch.lua` is a stable loader that registers the
