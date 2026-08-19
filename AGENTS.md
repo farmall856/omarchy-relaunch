@@ -337,7 +337,12 @@ or nothing.
   with `pcall`. The split is fault isolation: a malformed rules file loses
   the pins without losing boot. Boot registration comes **before** the
   disable/skip gate — gate it and a skipped session never registers the
-  handler that consumes skip-once, so skip becomes permanent. `$SELF` is **shell-quoted first**
+  handler that consumes skip-once, so skip becomes permanent. The command it registers is the **canonical engine path**
+  (`${PREFIX:-$HOME/.local}/bin/relaunch`), never `$SELF`: `$SELF` is whichever
+  copy is running, so the loader used to be re-pointed at a source checkout the
+  moment one ran `list`, and boot silently did nothing once that directory was
+  deleted. `$SELF` remains the *source* of the self-install, which now fires
+  only from the plugin copy. That path is **shell-quoted first**
   (`printf %q`, because `hl.exec_cmd` word-splits the command) and the
   resulting complete command is **then** Lua-escaped (because it sits in a
   Lua string literal). One layer is not enough; a path with a space needs the
