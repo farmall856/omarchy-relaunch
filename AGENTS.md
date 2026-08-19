@@ -68,6 +68,39 @@ relaunch uninstall --yes
 `entries`, `rows`, `startup`, `ignored`, `boot`, `snippetPath`, `configPath`
 stable. `Panel.qml` parses that object.
 
+## What Relaunch promises
+
+Read this before proposing any mechanism. It decides how much engineering a problem is worth,
+and several past rounds were spent building elaborate answers to problems this section says are
+not ours.
+
+**Best effort, not guaranteed.** Relaunch makes its best effort to launch the user's chosen
+applications into their chosen workspaces. That is the whole ambition. A restore that misses one
+window is a normal outcome, not a defect to be engineered away.
+
+**Application startup behaviour is not ours to control.** An application that restores its own
+session, opens on the wrong workspace, takes thirty seconds to map a window, or spawns a second
+window of its own accord is doing something Relaunch cannot see coming and must not try to
+correct. Do not add reconciliation, window-closing, retry loops or heuristics to compensate.
+**When an application does not come back correctly, the user's remedy is to stop launching that
+application through Relaunch.** That is an acceptable answer and should be documented as one.
+
+**Edits made outside Relaunch's UI are not our concern.** If a user hand-edits `autostart.lua`,
+`hyprland.lua` or anything in the config directory, Relaunch does not owe them correct behaviour
+and must not grow machinery to detect, classify, adopt or repair what they did. Relaunch reads
+its own files and the inventory it presents in the panel; that is the boundary.
+
+**The one guarantee: clean removal.** Uninstalling Relaunch completely removes Relaunch's own
+files and restores Hyprland to the state it was found in. This is the only promise the project
+makes unconditionally, and it is the one place where thoroughness is warranted — every file
+written must be removable, and teardown must be ordered so it still works when the pieces it
+depends on are about to be deleted.
+
+**Sizing rule.** When a proposal adds locking, retries, parsing, reconciliation or session
+bookkeeping, check it against the four statements above. If it exists to cope with a misbehaving
+application or a hand-edited config, it is almost certainly over-built. Propose the smaller thing,
+or nothing.
+
 ## Invariants
 
 - **Stored data must be visible and manageable by the user.** Everything
