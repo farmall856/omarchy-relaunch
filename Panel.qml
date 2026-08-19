@@ -1015,13 +1015,16 @@ Panel {
             Chip {
               id: removeChip
               anchors.horizontalCenter: parent.horizontalCenter
-              label: root.confirmRemove ? "Click again to remove permanently" : "Remove Relaunch permanently"
+              label: root.confirmRemove ? "Confirm removing relaunch" : "Remove relaunch permanently"
               danger: true
               onClicked: {
+                // The armed state lives in the button's own label. It used to
+                // also set statusText, but that renders in a wrapping Text
+                // above this chip, which pushed the button below the panel
+                // edge -- the one control the user then needed to reach.
                 if (!root.confirmRemove) {
                   root.confirmRemove = true
                   root.statusIsError = false
-                  root.statusText = "Click again to uninstall Relaunch."
                   disarmRemove.restart()
                   return
                 }
