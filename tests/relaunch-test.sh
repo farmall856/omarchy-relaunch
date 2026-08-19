@@ -351,6 +351,31 @@ cp "$RELAUNCH_CONFIG_DIR/overrides.json" "$WORKDIR/overrides.array"
   && fail "set-exec must refuse a non-object overrides.json"
 cmp -s "$WORKDIR/overrides.array" "$RELAUNCH_CONFIG_DIR/overrides.json" \
   || fail "a refused set-exec must leave a non-object overrides.json alone"
+# save, import and the non-JSON list refuse too, and save must refuse BEFORE
+# it captures or writes: emit_state validates only on the --json path, and
+# only after config.json and rules.lua have already been rewritten.
+printf '%s\n' '{"other-app":"keep-this",' >"$RELAUNCH_CONFIG_DIR/overrides.json"
+cp "$RELAUNCH_CONFIG_DIR/overrides.json" "$WORKDIR/overrides.bad2"
+cp "$RELAUNCH_CONFIG_DIR/config.json" "$WORKDIR/config.before-save"
+cp "$RELAUNCH_CONFIG_DIR/rules.lua" "$WORKDIR/rules.before-save"
+out="$("$RELAUNCH" save 2>&1)" && fail "non-JSON save must refuse a malformed overrides.json"
+[[ "$out" == *"parse overrides"* ]] || fail "save must name the parse error, got: $out"
+cmp -s "$WORKDIR/config.before-save" "$RELAUNCH_CONFIG_DIR/config.json" \
+  || fail "a refused save must not have rewritten config.json"
+cmp -s "$WORKDIR/rules.before-save" "$RELAUNCH_CONFIG_DIR/rules.lua" \
+  || fail "a refused save must not have rewritten rules.lua"
+"$RELAUNCH" save --json >/dev/null 2>&1 && fail "save --json must refuse too"
+cmp -s "$WORKDIR/config.before-save" "$RELAUNCH_CONFIG_DIR/config.json" \
+  || fail "a refused save --json must not have rewritten config.json"
+out="$("$RELAUNCH" list 2>&1)" && fail "non-JSON list must refuse a malformed overrides.json"
+[[ "$out" == *"parse overrides"* ]] || fail "list must name the parse error, got: $out"
+"$RELAUNCH" import --class newthing --workspace 2 >/dev/null 2>&1 \
+  && fail "import must refuse a malformed overrides.json"
+cmp -s "$WORKDIR/config.before-save" "$RELAUNCH_CONFIG_DIR/config.json" \
+  || fail "a refused import must not have rewritten config.json"
+cmp -s "$WORKDIR/overrides.bad2" "$RELAUNCH_CONFIG_DIR/overrides.json" \
+  || fail "save/list/import must leave a malformed overrides.json byte-identical"
+
 # Repair must still work over a broken overrides file. ensure-hooks does not
 # read the table, and refusing to install or fix an installation because of a
 # file the install path never touches would be stricter than config.json,
@@ -402,6 +427,59 @@ jq -e '
   and ([.launches[] | select(.class == "missing") | .status] == ["not_found"])
 ' "$RELAUNCH_CONFIG_DIR/last-boot.json" >/dev/null \
   || fail "boot must launch a quoted path and still skip a missing one: $(jq -c '[.launches[] | {class, status}]' "$RELAUNCH_CONFIG_DIR/last-boot.json")"
+
+# --- the command token is the program, not the prefix (#3) ---
+# One helper decides what will actually run, and BOTH the panel row and the
+# boot preflight call it. They disagreed before: the row warned about
+# `FOO=bar /bin/true` while boot saw the `=`, skipped its own check and
+# launched it. And judging the wrapper reported `env FOO=bar /nope` as fine,
+# which is worse than a warning -- it says a missing command is present.
+mkdir -p "$WORKDIR/relbin"
+printf '#!/bin/sh\nexit 0\n' >"$WORKDIR/relbin/relok"
+chmod +x "$WORKDIR/relbin/relok"
+jq -n --arg dir "$WORKDIR" '{
+  staggerSeconds: 0, ignored: [],
+  entries: [
+    {class: "envassign",   workspace: 1, exec: "FOO=bar /bin/true"},
+    {class: "envwrapok",   workspace: 1, exec: "env FOO=bar /bin/true"},
+    {class: "envwrapbad",  workspace: 1, exec: "env FOO=bar /definitely/not/here"},
+    {class: "setsidbad",   workspace: 1, exec: "setsid /definitely/not/here"},
+    {class: "setsidok",    workspace: 1, exec: "setsid /bin/true"},
+    {class: "singlequote", workspace: 1, exec: ("\u0027" + $dir + "/My App/app\u0027 --flag")},
+    {class: "relative",    workspace: 1, exec: "./relbin/relok"},
+    {class: "barepath",    workspace: 1, exec: "true"},
+    {class: "emptyexec",   workspace: 1, exec: ""}
+  ] | map(. + {execSource: "desktop-file", enabled: true})
+}' >"$RELAUNCH_CONFIG_DIR/config.json"
+
+( cd "$WORKDIR"
+  "$RELAUNCH" list --json ) | jq -e '
+  ([.entries[] | select(.class == "envassign")   | .execOk] == [true])
+  and ([.entries[] | select(.class == "envwrapok")   | .execOk] == [true])
+  and ([.entries[] | select(.class == "envwrapbad")  | .execOk] == [false])
+  and ([.entries[] | select(.class == "setsidbad")   | .execOk] == [false])
+  and ([.entries[] | select(.class == "setsidok")    | .execOk] == [true])
+  and ([.entries[] | select(.class == "singlequote") | .execOk] == [true])
+  and ([.entries[] | select(.class == "relative")    | .execOk] == [true])
+  and ([.entries[] | select(.class == "barepath")    | .execOk] == [true])
+  and ([.entries[] | select(.class == "emptyexec")   | .execOk] == [false])
+' >/dev/null || fail "exec token selection: $( cd "$WORKDIR"; "$RELAUNCH" list --json | jq -c '[.entries[] | {class, execOk}]')"
+
+# The panel and boot must reach the SAME verdict for every one of those forms:
+# execOk true means boot launched it, execOk false means boot skipped it.
+( cd "$WORKDIR"; "$RELAUNCH" boot >/dev/null 2>&1 )
+( cd "$WORKDIR"; "$RELAUNCH" list --json ) >"$WORKDIR/agree-list.json"
+jq -s -e '
+  (.[0].entries | map({key: .class, value: .execOk}) | from_entries) as $ok
+  | (.[1].launches | map({key: .class, value: (.status != "not_found")}) | from_entries) as $boot
+  | ($boot | keys) as $ks
+  | all($ks[]; $ok[.] == $boot[.])
+' "$WORKDIR/agree-list.json" "$RELAUNCH_CONFIG_DIR/last-boot.json" >/dev/null \
+  || fail "the panel row and boot disagree: $(jq -s -c '[.[0].entries[] | {class, execOk}], [.[1].launches[] | {class, status}]' "$WORKDIR/agree-list.json" "$RELAUNCH_CONFIG_DIR/last-boot.json")"
+# …and the agreement is not vacuous: both sides must contain a rejection.
+jq -e '[.launches[] | select(.status == "not_found")] | length >= 2' \
+  "$RELAUNCH_CONFIG_DIR/last-boot.json" >/dev/null \
+  || fail "boot must still skip the genuinely missing commands"
 
 # Guess with a missing command is flagged immediately
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-empty"

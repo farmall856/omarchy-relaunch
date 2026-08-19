@@ -1485,19 +1485,62 @@ unset_override_exec() {
   printf '%s\n' "$json" | atomic_write "$(overrides_path)"
 }
 
-# Boot runs the exec through `bash -c`, so validation has to split it the way
-# bash will. Cutting at the first space reported `"/opt/My App/app" --flag`
-# and `/opt/My\ App/app --flag` as missing, which put a false warning on the
-# panel row and made boot skip a launch that works. unquote_argv_arr is the
-# parser this script already uses for .desktop Exec lines; there is no second
-# one to keep in step.
-exec_is_ok() {
-  local exec="$1" token
+# The program an exec will actually run, into _EXEC_TOKEN.
+#
+# Boot runs the exec through `bash -c`, so this has to split it the way bash
+# will. Cutting at the first space reported `"/opt/My App/app" --flag` as
+# missing; taking argv[0] afterwards was still wrong in both directions:
+# `FOO=bar /bin/true` judged the assignment (a warning on a row that boots
+# fine), and `env FOO=bar /nope` judged the wrapper, reporting a missing
+# command as present. unquote_argv_arr does the quoting; this walks the
+# prefix bash would consume before reaching the program.
+#
+# Two outcomes are deliberately different:
+#   return 1              nothing to run at all -- an empty or blank exec.
+#   return 0, token ""    a form we decline to judge, so nobody warns about it
+#                         and nobody refuses to launch it. `env -i cmd` is the
+#                         example: the option grammar of a wrapper is not
+#                         something this script is going to reimplement, and
+#                         guessing would put us back to judging the wrong word.
+_EXEC_TOKEN=""
+exec_command_token() {
+  local exec="$1" i=0 n tok
+  _EXEC_TOKEN=""
   unquote_argv_arr "$exec"
-  token="${_UARGV[0]:-}"
-  [[ -n "$token" ]] || return 1
-  command -v "$token" >/dev/null 2>&1 && return 0
-  [[ -x "$token" ]]
+  n=${#_UARGV[@]}
+  ((n > 0)) || return 1
+  while ((i < n)); do
+    tok="${_UARGV[i]}"
+    # VAR=value: an assignment bash applies to the environment, not the
+    # program. Only before the program, and only with a name-shaped left side.
+    if [[ "$tok" =~ ^[A-Za-z_][A-Za-z_0-9]*= ]]; then
+      ((i++))
+      continue
+    fi
+    # Wrappers whose whole job is to run the command that follows them.
+    if [[ "$tok" == env || "$tok" == /usr/bin/env || "$tok" == setsid || "$tok" == /usr/bin/setsid ]]; then
+      ((i++))
+      # An option we would have to understand to know which word is the
+      # program. Decline rather than judge the wrong one.
+      [[ $i -lt $n && "${_UARGV[i]}" == -* ]] && return 0
+      continue
+    fi
+    _EXEC_TOKEN="$tok"
+    return 0
+  done
+  # All prefix and no program: `FOO=bar` on its own, or a bare `env`.
+  return 0
+}
+
+# Boot and the panel MUST reach the same verdict, so they call one function.
+# They disagreed before: the row warned about `FOO=bar /bin/true` while boot
+# spotted the `=`, skipped its own check and launched it happily.
+exec_is_ok() {
+  exec_command_token "$1" || return 1
+  # A form we do not judge is not a form we warn about.
+  [[ -n "$_EXEC_TOKEN" ]] || return 0
+  command -v "$_EXEC_TOKEN" >/dev/null 2>&1 && return 0
+  [[ -x "$_EXEC_TOKEN" ]]
 }
 
 resolve_launch() {
@@ -2036,6 +2079,10 @@ pid_for_running_class() {
 cmd_save() {
   local cfg clients merged extra
   ensure_hooks
+  # Before anything is loaded, captured or written. emit_state validates too,
+  # but only on the --json path and only after config.json and rules.lua have
+  # already been rewritten -- which is not "before the first write".
+  require_overrides_parseable
   cfg="$(load_config_json)"
   clients="$(clients_json)"
   merged="$(jq --argjson clients "$clients" "$jq_lib"' capture($clients)' <<<"$cfg")"
@@ -2063,6 +2110,9 @@ cmd_generate() {
 
 cmd_list() {
   ensure_hooks
+  # Both output paths, not just --json: a corrupt overrides table is worth
+  # saying out loud whoever is reading.
+  require_overrides_parseable
   if $json_out; then
     emit_state
     return
@@ -2110,7 +2160,7 @@ cmd_reload() {
 cmd_boot() {
   # Registered by the owned loader module, not by a hook in the user config.
   # Never listed as a startup app.
-  local started cfg stagger line class ws exec token argv0 status pid err launches first_launch
+  local started cfg stagger line class ws exec status pid err launches first_launch
   started="$(date -Iseconds)"
   mkdir -p "$(config_dir)"
   if [[ -f "$(disabled_path)" ]]; then
@@ -2141,16 +2191,14 @@ cmd_boot() {
         fi
       fi
     fi
-    # Same parser as exec_is_ok, and for the same reason: this decides whether
-    # to launch, and bash -c would have run a quoted path just fine.
-    unquote_argv_arr "$exec"
-    argv0="${_UARGV[0]:-}"
-    token="${argv0##*/}"
     pid=""
     err=""
-    if [[ "$token" != *=* ]] && ! command -v "$argv0" >/dev/null 2>&1 && [[ ! -x "$argv0" ]]; then
+    # Literally the same check the panel row shows, so the two cannot drift:
+    # a row marked launchable is launched, and a row marked missing is the
+    # one boot skips.
+    if ! exec_is_ok "$exec"; then
       status="not_found"
-      err="command not found: $argv0"
+      err="command not found: ${_EXEC_TOKEN:-$exec}"
     else
       bash -c "$exec" &
       pid=$!

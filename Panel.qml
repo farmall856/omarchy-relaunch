@@ -39,6 +39,17 @@ Panel {
   // both have arrived.
   property int lastExitCode: -1
   property bool sawOutput: false
+  property bool sawStderr: false
+  // settle() can run more than once for one request -- a stream that arrives
+  // late still gets to improve the message -- but the queue must only advance
+  // once, and busy must only be released once.
+  property bool settled: false
+  // True from the moment settle() hands the queue to Qt.callLater until that
+  // callback has started the request. In that window actionProc.running is
+  // already false, so `running` alone would let a request through and the
+  // pending callback would then write its command onto a live Process: the
+  // dropped action again, one tick later.
+  property bool startingNext: false
   // Failures get their own bordered box under the Save button; ordinary
   // results stay in the quiet line at the bottom.
   property bool statusIsError: false
@@ -122,7 +133,9 @@ Panel {
   // requests are equivalent is how actions get dropped again.
   function run(args, okText) {
     root.confirmRemove = false
-    if (actionProc.running) {
+    // Not `busy`: refresh() sets that BEFORE calling run(), so testing it
+    // would queue the ordinary idle open path behind nothing.
+    if (actionProc.running || root.startingNext) {
       root.requestQueue = root.requestQueue.concat([{ args: args, okText: okText || "" }])
       root.busy = true
       return
@@ -139,15 +152,45 @@ Panel {
     root.stderrText = ""
     root.lastExitCode = -1
     root.sawOutput = false
+    root.sawStderr = false
+    root.settled = false
+    root.startingNext = false
     root.busy = true
     actionProc.command = [root.enginePath].concat(args)
     actionProc.running = true
   }
 
-  // Called from both the exit handler and the stdout collector; does nothing
-  // until both have reported.
+  // Every signal calls this; it does nothing until all three have reported.
+  // stderr counts: a nonzero run with no JSON settled as "Command failed"
+  // while the stderr callback was still in flight, and that callback only
+  // assigned the text -- it never asked for the decision to be made again.
+  // That is the same ordering bug as the stdout one, on the other stream.
   function settle() {
-    if (root.lastExitCode === -1 || !root.sawOutput) return
+    if (root.lastExitCode === -1 || !root.sawOutput || !root.sawStderr) return
+    root.decideStatus()
+    if (root.settled) return
+    root.settled = true
+    root.pendingStatus = ""
+    if (root.requestQueue.length > 0) {
+      var next = root.requestQueue[0]
+      root.requestQueue = root.requestQueue.slice(1)
+      // Keep the finished operation's message: a queued refresh should not
+      // wipe the result the user is reading. callLater so any straggling
+      // callback from the run that just ended lands first; startingNext keeps
+      // the gap closed meanwhile.
+      root.startingNext = true
+      Qt.callLater(function() {
+        root.startingNext = false
+        root.startRequest(next.args, next.okText, true)
+      })
+      return
+    }
+    root.busy = false
+  }
+
+  // Idempotent on purpose: a stream that arrives after a forced settle can
+  // call this again and upgrade the message.
+  function decideStatus() {
     if (root.engineReportedError) {
       // applyResult already put the engine's own message up ("parse
       // overrides: …", "no relaunch entry for class: …"). That names the
@@ -163,17 +206,6 @@ Panel {
       root.statusText = root.pendingStatus
       root.statusIsError = false
     }
-    root.pendingStatus = ""
-    if (root.requestQueue.length > 0) {
-      var next = root.requestQueue[0]
-      root.requestQueue = root.requestQueue.slice(1)
-      // Keep the finished operation's message: a queued refresh should not
-      // wipe the result the user is reading. callLater so any straggling
-      // callback from the run that just ended lands first.
-      Qt.callLater(function() { root.startRequest(next.args, next.okText, true) })
-      return
-    }
-    root.busy = false
   }
 
   Component.onCompleted: root.run(["list", "--json"])
@@ -264,11 +296,32 @@ Panel {
     // nothing to show but "Command failed".
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.stderrText = String(text || "").trim()
+      onStreamFinished: {
+        // First line, and bounded: this ends up in the ERROR box, and a stuck
+        // engine should not be able to grow it without limit.
+        var raw = String(text || "").trim()
+        var nl = raw.indexOf("\n")
+        if (nl >= 0) raw = raw.slice(0, nl)
+        root.stderrText = raw.length > 500 ? raw.slice(0, 500) + "…" : raw
+        root.sawStderr = true
+        root.settle()
+      }
     }
     onExited: function(exitCode) {
       root.lastExitCode = exitCode
       root.settle()
+      // If a stream never reports -- a process that dies without its
+      // collectors finishing -- the panel would stay busy with every chip
+      // dead until it is restarted. One event-loop turn after the exit,
+      // settle with what arrived. Not a timeout, and not a retry: settle() is
+      // re-runnable, so a stream that does arrive afterwards still gets to
+      // improve the message.
+      Qt.callLater(function() {
+        if (root.settled || root.lastExitCode === -1) return
+        root.sawOutput = true
+        root.sawStderr = true
+        root.settle()
+      })
     }
   }
 
