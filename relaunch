@@ -1262,20 +1262,23 @@ display_label_for() {
   local leaf name file
 
   if [[ -n "$exec" ]]; then
+    # `gio launch <file>.desktop`: read Name= from the file the command
+    # already names, whatever execSource says. This was gated on
+    # execSource == desktop-file, so editing the launch command by hand --
+    # which changes the SOURCE and not the command -- turned Signal into
+    # "gio", the leaf of its own launcher.
+    #
+    # Ungating it does not reopen the reverse .desktop lookup that was
+    # rejected for resolving execs: there is no search and no ambiguity, the
+    # exec states which file to read, and only the cosmetic Name= comes back.
+    # A missing or mistyped path simply falls through to the leaf.
+    mapfile -t -d '' argv < <(unquote_argv "$exec")
+    if ((${#argv[@]} >= 3)) && [[ "${argv[0]##*/}" == gio && "${argv[1]}" == launch ]]; then
+      file="${argv[2]}"
+      name="$(desktop_name_from_file "$file" 2>/dev/null || true)"
+      [[ -n "$name" ]] && { printf '%s\n' "$name"; return 0; }
+    fi
     case "$source" in
-      desktop-file)
-        mapfile -t -d '' argv < <(unquote_argv "$exec")
-        # gio launch <file>
-        if ((${#argv[@]} >= 3)) && [[ "${argv[0]##*/}" == gio && "${argv[1]}" == launch ]]; then
-          file="${argv[2]}"
-        else
-          file=""
-        fi
-        if [[ -n "$file" ]]; then
-          name="$(desktop_name_from_file "$file" 2>/dev/null || true)"
-          [[ -n "$name" ]] && { printf '%s\n' "$name"; return 0; }
-        fi
-        ;;
       terminal)
         leaf="$(leaf_command_for_exec "$exec" 2>/dev/null || true)"
         if [[ -n "$leaf" ]]; then
@@ -1431,11 +1434,30 @@ ensure_overrides_file() {
 '
 }
 
-load_overrides_json() {
-  local p
+# Validate where the table is actually read or written, which is where
+# load_config_json validates config.json, and for the same reason.
+#
+# Deliberately NOT inside ensure_overrides_file: ensure_hooks calls that, and
+# refusing to install or repair over a file the install path never touches
+# would be stricter than config.json, which ensure_hooks does not read at all.
+# It has to run in the CALLER's shell, though -- a `die` inside a $( ) writes
+# its message into the captured output and never reaches the user -- and
+# before the command's first write, or a refusal still leaves a half-applied
+# edit behind.
+require_overrides_parseable() {
   ensure_overrides_file
-  p="$(overrides_path)"
-  jq -e 'if type == "object" then . else {} end' "$p" 2>/dev/null || printf '{}\n'
+  jq -e 'type == "object"' "$(overrides_path)" >/dev/null 2>&1 \
+    || die "parse overrides: $(overrides_path)"
+}
+
+load_overrides_json() {
+  # require_overrides_parseable has already refused a file that will not parse, in
+  # the caller's own shell where the message can reach the user. There is
+  # deliberately no {} fallback here: substituting an empty table for a file we
+  # could not read is exactly what let set_override_exec write that empty table
+  # back and discard every override the user had.
+  ensure_overrides_file
+  jq -e '.' "$(overrides_path)"
 }
 
 override_exec_for_class() {
@@ -1466,12 +1488,74 @@ unset_override_exec() {
   printf '%s\n' "$json" | atomic_write "$(overrides_path)"
 }
 
+# The program an exec will actually run, into _EXEC_TOKEN.
+#
+# Boot runs the exec through `bash -c`, so this has to split it the way bash
+# will. Cutting at the first space reported `"/opt/My App/app" --flag` as
+# missing; taking argv[0] afterwards was still wrong in both directions:
+# `FOO=bar /bin/true` judged the assignment (a warning on a row that boots
+# fine), and `env FOO=bar /nope` judged the wrapper, reporting a missing
+# command as present. unquote_argv_arr does the quoting; this walks the
+# prefix bash would consume before reaching the program.
+#
+# Two outcomes are deliberately different:
+#   return 1              nothing to run at all -- an empty or blank exec.
+#   return 0, token ""    a form we decline to judge, so nobody warns about it
+#                         and nobody refuses to launch it. `env -i cmd` is the
+#                         example: the option grammar of a wrapper is not
+#                         something this script is going to reimplement, and
+#                         guessing would put us back to judging the wrong word.
+_EXEC_TOKEN=""
+exec_command_token() {
+  local exec="$1" i=0 n tok mode=shell
+  _EXEC_TOKEN=""
+  unquote_argv_arr "$exec"
+  n=${#_UARGV[@]}
+  ((n > 0)) || return 1
+  # `mode` is whose argument list we are reading, and it decides what a
+  # VAR=value word means. Treating every prefix the same accepted
+  # `setsid FOO=bar /bin/true` as fine: bash has already chosen setsid by
+  # then, so FOO=bar is an ordinary argument and setsid tries to exec a
+  # program with that literal name. It fails either way -- the defect was
+  # reporting it as launchable.
+  while ((i < n)); do
+    tok="${_UARGV[i]}"
+    # An option we would have to understand to know which word is the
+    # program. Decline rather than judge the wrong one.
+    if [[ "$mode" != shell && "$tok" == -* ]]; then
+      return 0
+    fi
+    # An assignment only where something actually consumes one: bash, while it
+    # is still choosing the command word, and env, which takes assignment
+    # operands. Not after setsid.
+    if [[ "$mode" == shell || "$mode" == env ]] \
+      && [[ "$tok" =~ ^[A-Za-z_][A-Za-z_0-9]*= ]]; then
+      ((i++))
+      continue
+    fi
+    # Wrappers whose whole job is to run the command that follows them. Each
+    # hands the rest of the line to the next reader, so `env setsid FOO=bar x`
+    # ends up judging FOO=bar, which is exactly what setsid would try to run.
+    case "$tok" in
+      env | /usr/bin/env) mode=env; ((i++)); continue ;;
+      setsid | /usr/bin/setsid) mode=setsid; ((i++)); continue ;;
+    esac
+    _EXEC_TOKEN="$tok"
+    return 0
+  done
+  # All prefix and no program: `FOO=bar` on its own, or a bare `env`.
+  return 0
+}
+
+# Boot and the panel MUST reach the same verdict, so they call one function.
+# They disagreed before: the row warned about `FOO=bar /bin/true` while boot
+# spotted the `=`, skipped its own check and launched it happily.
 exec_is_ok() {
-  local exec="$1" token
-  token="${exec%% *}"
-  [[ -n "$token" ]] || return 1
-  command -v "$token" >/dev/null 2>&1 && return 0
-  [[ -x "$token" ]]
+  exec_command_token "$1" || return 1
+  # A form we do not judge is not a form we warn about.
+  [[ -n "$_EXEC_TOKEN" ]] || return 0
+  command -v "$_EXEC_TOKEN" >/dev/null 2>&1 && return 0
+  [[ -x "$_EXEC_TOKEN" ]]
 }
 
 resolve_launch() {
@@ -1762,7 +1846,7 @@ decorate_items() {
 
 emit_state() {
   local cfg startup rows extra clients entries warnings
-  ensure_overrides_file
+  require_overrides_parseable
   cfg="$(load_config_json)"
   startup="$(scan_startup)"
   clients="$(clients_display)"
@@ -2010,6 +2094,10 @@ pid_for_running_class() {
 cmd_save() {
   local cfg clients merged extra
   ensure_hooks
+  # Before anything is loaded, captured or written. emit_state validates too,
+  # but only on the --json path and only after config.json and rules.lua have
+  # already been rewritten -- which is not "before the first write".
+  require_overrides_parseable
   cfg="$(load_config_json)"
   clients="$(clients_json)"
   merged="$(jq --argjson clients "$clients" "$jq_lib"' capture($clients)' <<<"$cfg")"
@@ -2037,6 +2125,9 @@ cmd_generate() {
 
 cmd_list() {
   ensure_hooks
+  # Both output paths, not just --json: a corrupt overrides table is worth
+  # saying out loud whoever is reading.
+  require_overrides_parseable
   if $json_out; then
     emit_state
     return
@@ -2084,7 +2175,7 @@ cmd_reload() {
 cmd_boot() {
   # Registered by the owned loader module, not by a hook in the user config.
   # Never listed as a startup app.
-  local started cfg stagger line class ws exec token status pid err launches first_launch
+  local started cfg stagger line class ws exec status pid err launches first_launch
   started="$(date -Iseconds)"
   mkdir -p "$(config_dir)"
   if [[ -f "$(disabled_path)" ]]; then
@@ -2115,13 +2206,14 @@ cmd_boot() {
         fi
       fi
     fi
-    token="${exec%% *}"
-    token="${token##*/}"
     pid=""
     err=""
-    if [[ "$token" != *=* ]] && ! command -v "${exec%% *}" >/dev/null 2>&1 && [[ ! -x "${exec%% *}" ]]; then
+    # Literally the same check the panel row shows, so the two cannot drift:
+    # a row marked launchable is launched, and a row marked missing is the
+    # one boot skips.
+    if ! exec_is_ok "$exec"; then
       status="not_found"
-      err="command not found: ${exec%% *}"
+      err="command not found: ${_EXEC_TOKEN:-$exec}"
     else
       bash -c "$exec" &
       pid=$!
@@ -2375,6 +2467,9 @@ cmd_import() {
   class="$(arg_value --class "$@" || true)"
   [[ "$ws" =~ ^[1-9][0-9]*$ ]] || die "import requires --workspace N (N>=1)"
   [[ -n "$class" || -n "$exec" ]] || die "import requires --class or --exec"
+  # Import can write an override, so refuse an unparseable one up front rather
+  # than after config.json has been rewritten.
+  require_overrides_parseable
   if [[ -n "$class" && -z "$exec" ]]; then
     pid="$(pid_for_running_class "$class" || true)"
     line="$(resolve_launch "$class" "${pid:-}")"
@@ -2414,6 +2509,9 @@ cmd_set_exec() {
   exec="$(arg_value --exec "$@" || true)"
   [[ -n "$class" ]] || die "set-exec requires --class"
   [[ -n "$exec" ]] || die "set-exec requires --exec"
+  # Before load_config_json, so a bad overrides.json refuses the whole command
+  # instead of aborting after config.json has already been rewritten.
+  require_overrides_parseable
   cfg="$(load_config_json)"
   if ! jq -e --arg class "$class" '.entries[] | select(.class == $class)' >/dev/null <<<"$cfg"; then
     die "no relaunch entry for class: $class"
@@ -2437,6 +2535,7 @@ cmd_drop() {
   local class cfg
   class="$(arg_value --class "$@" || true)"
   [[ -n "$class" ]] || die "drop requires --class"
+  require_overrides_parseable
   cfg="$(load_config_json)"
   cfg="$(jq --arg class "$class" '.entries |= map(select(.class != $class))' <<<"$cfg")"
   jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"

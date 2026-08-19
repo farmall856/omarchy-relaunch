@@ -24,6 +24,38 @@ Panel {
   property string pendingStatus: ""
   property bool busy: false
   property bool confirmRemove: false
+  // One Process serves every action, so requests that arrive while it is
+  // running have to wait their turn rather than vanish. See run().
+  property var requestQueue: []
+  // Set when applyResult parsed a real error out of the engine's JSON, so the
+  // fallback knows there is already a better message than "Command failed".
+  property bool engineReportedError: false
+  property bool outputUnparseable: false
+  property string stderrText: ""
+  // Omarchy's own plugins put it plainly: the exit and stream-finished
+  // signals have NO guaranteed order. Deciding the status message in
+  // whichever handler happens to run last is how the engine's real error got
+  // replaced by a generic one. Both are recorded, and settle() decides once
+  // both have arrived.
+  property int lastExitCode: -1
+  property bool sawOutput: false
+  property bool sawStderr: false
+  // The command could not be executed at all -- engine missing, or not
+  // executable. Process emits no error signal to QML, so this is inferred.
+  property bool startFailed: false
+  // settle() can run more than once for one request -- a stream that arrives
+  // late still gets to improve the message -- but the queue must only advance
+  // once, and busy must only be released once.
+  property bool settled: false
+  // True from the moment settle() hands the queue to Qt.callLater until that
+  // callback has started the request. In that window actionProc.running is
+  // already false, so `running` alone would let a request through and the
+  // pending callback would then write its command onto a live Process: the
+  // dropped action again, one tick later.
+  property bool startingNext: false
+  // Failures get their own bordered box under the Save button; ordinary
+  // results stay in the quiet line at the bottom.
+  property bool statusIsError: false
   property string execEditClass: ""
   property var warnings: []
 
@@ -91,13 +123,113 @@ Panel {
     run(["list", "--json"])
   }
 
+  // Setting `running = true` on a Process that is ALREADY running does
+  // nothing: the command property changes but no process starts. Every
+  // request that arrived while one was in flight was therefore dropped --
+  // silently, and after pendingStatus had already been replaced, so the panel
+  // could show the previous operation's success message for an action that
+  // never ran. Reopening the panel calls refresh(), and the launch-command
+  // field submits on Enter, so this was reachable by ordinary clicking.
+  //
+  // Queue instead of refusing: a request either runs now or runs next, and
+  // nothing is discarded. FIFO with no coalescing, because deciding which
+  // requests are equivalent is how actions get dropped again.
   function run(args, okText) {
     root.confirmRemove = false
-    root.pendingStatus = okText || ""
-    root.statusText = ""
+    // Not `busy`: refresh() sets that BEFORE calling run(), so testing it
+    // would queue the ordinary idle open path behind nothing.
+    if (actionProc.running || root.startingNext) {
+      root.requestQueue = root.requestQueue.concat([{ args: args, okText: okText || "" }])
+      root.busy = true
+      return
+    }
+    root.startRequest(args, okText || "", false)
+  }
+
+  function startRequest(args, okText, keepStatus) {
+    root.pendingStatus = okText
+    if (!keepStatus) root.statusText = ""
+    root.engineReportedError = false
+    root.outputUnparseable = false
+    if (!keepStatus) root.statusIsError = false
+    root.stderrText = ""
+    root.lastExitCode = -1
+    root.sawOutput = false
+    root.sawStderr = false
+    root.startFailed = false
+    root.settled = false
+    root.startingNext = false
     root.busy = true
     actionProc.command = [root.enginePath].concat(args)
     actionProc.running = true
+  }
+
+  // Every signal calls this; it does nothing until all three have reported.
+  // stderr counts: a nonzero run with no JSON settled as "Command failed"
+  // while the stderr callback was still in flight, and that callback only
+  // assigned the text -- it never asked for the decision to be made again.
+  // That is the same ordering bug as the stdout one, on the other stream.
+  function settle() {
+    if (root.lastExitCode === -1 || !root.sawOutput || !root.sawStderr) return
+    root.decideStatus()
+    if (root.settled) return
+    root.settled = true
+    root.pendingStatus = ""
+    if (root.requestQueue.length > 0) {
+      var next = root.requestQueue[0]
+      root.requestQueue = root.requestQueue.slice(1)
+      // Keep the finished operation's message: a queued refresh should not
+      // wipe the result the user is reading. callLater so any straggling
+      // callback from the run that just ended lands first; startingNext keeps
+      // the gap closed meanwhile.
+      root.startingNext = true
+      Qt.callLater(function() {
+        root.startingNext = false
+        root.startRequest(next.args, next.okText, true)
+      })
+      return
+    }
+    root.busy = false
+  }
+
+  // Last resort, from runningChanged. A command that cannot be executed never
+  // emits `exited` at all, so waiting for signals that will never come left
+  // the panel on "Working…" with every chip dead until the shell restarted.
+  function recoverIfUnsettled() {
+    if (root.settled || actionProc.running) return
+    if (root.lastExitCode === -1) {
+      // No exit code ever arrived: the process never started.
+      root.startFailed = true
+      root.lastExitCode = 127
+    }
+    root.sawOutput = true
+    root.sawStderr = true
+    root.settle()
+  }
+
+  // Idempotent on purpose: a stream that arrives after a forced settle can
+  // call this again and upgrade the message.
+  function decideStatus() {
+    if (root.engineReportedError) {
+      // applyResult already put the engine's own message up ("parse
+      // overrides: …", "no relaunch entry for class: …"). That names the
+      // actual problem; never replace it with a generic one.
+      root.statusIsError = true
+    } else if (root.startFailed && root.stderrText === "") {
+      // Name the thing that could not be run: "Command failed" for a command
+      // that never ran is the least useful sentence available.
+      root.statusText = "Could not run the engine: " + root.enginePath
+      root.statusIsError = true
+    } else if (root.lastExitCode !== 0) {
+      root.statusText = root.stderrText !== "" ? root.stderrText : "Command failed"
+      root.statusIsError = true
+    } else if (root.outputUnparseable) {
+      root.statusText = "Bad engine output"
+      root.statusIsError = true
+    } else if (root.statusText === "" && root.pendingStatus !== "") {
+      root.statusText = root.pendingStatus
+      root.statusIsError = false
+    }
   }
 
   Component.onCompleted: root.run(["list", "--json"])
@@ -112,11 +244,13 @@ Panel {
     try {
       const r = JSON.parse(text)
       if (r.ok === false) {
-        root.statusText = "Error: " + (r.error || "unknown")
+        root.statusText = r.error || "unknown"
+        root.engineReportedError = true
         return
       }
       if (r.uninstalled === true) {
         root.statusText = "Relaunch removed."
+        root.statusIsError = false
         root.rows = []
         root.entries = []
         root.close()
@@ -130,18 +264,23 @@ Panel {
       if (r.staggerSeconds !== undefined) root.staggerSeconds = r.staggerSeconds
       if (r.warnings !== undefined) root.warnings = r.warnings
       if (r.added !== undefined) {
+        root.statusIsError = false
         root.statusText = "Saved: " + r.added + " new, " + r.updated + " updated."
         if (r.warnings && r.warnings.length > 0)
           root.statusText += " Warning: " + r.warnings.map(function(w) {
             return w.class + " — " + (w.message || "command not found")
           }).join(" ")
       } else if (root.statusText === "" && r.warnings && r.warnings.length > 0) {
+        root.statusIsError = false
         root.statusText = r.warnings.map(function(w) {
           return w.class + " — " + (w.message || "command not found")
         }).join(" ")
       }
     } catch (e) {
-      root.statusText = "Bad engine output"
+      // Do not caption it here: an unparseable body on a FAILED run means the
+      // real message is on stderr, and settle() is the only place that knows
+      // the exit code.
+      root.outputUnparseable = true
     }
   }
 
@@ -164,16 +303,54 @@ Panel {
   Process {
     id: actionProc
     command: [root.enginePath, "list", "--json"]
+    // waitForEnd, because without it the collector can report a stream that
+    // has not been fully read: on a failing run the engine's JSON error was
+    // still in flight, applyResult saw an empty body, and the panel fell all
+    // the way through to "Command failed".
     stdout: StdioCollector {
-      onStreamFinished: { root.applyResult(this.text); root.busy = false }
+      waitForEnd: true
+      onStreamFinished: {
+        root.applyResult(String(text || ""))
+        root.sawOutput = true
+        root.settle()
+      }
+    }
+    // Failures that produce no JSON at all -- a die before --json is parsed,
+    // a missing engine -- say why on stderr. Without this the panel had
+    // nothing to show but "Command failed".
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        // First line, and bounded: this ends up in the ERROR box, and a stuck
+        // engine should not be able to grow it without limit.
+        var raw = String(text || "").trim()
+        var nl = raw.indexOf("\n")
+        if (nl >= 0) raw = raw.slice(0, nl)
+        root.stderrText = raw.length > 500 ? raw.slice(0, 500) + "…" : raw
+        root.sawStderr = true
+        root.settle()
+      }
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0)
-        root.statusText = "Command failed"
-      else if (root.statusText === "" && root.pendingStatus !== "")
-        root.statusText = root.pendingStatus
-      root.pendingStatus = ""
-      root.busy = false
+      // A real exit code retracts the inference: recovery may have already
+      // decided the process never started, and decideStatus checks that
+      // before the exit code, so the caption would otherwise stay
+      // "Could not run the engine" after a successful run reported 0.
+      root.startFailed = false
+      root.lastExitCode = exitCode
+      root.settle()
+    }
+    // Covers BOTH failure shapes, because `running` drops to false for both:
+    // a process that exited without its collectors finishing, and a command
+    // that could not be executed and therefore never emitted `exited` at all.
+    // Process exposes no error signal to QML, so this property change is the
+    // only observation available. One event-loop turn later, so an ordinary
+    // exit settles through its own signals first -- and settle() stays
+    // re-runnable, so a stream arriving afterwards can still improve the
+    // message. Not a timeout and not a retry.
+    onRunningChanged: {
+      if (actionProc.running) return
+      Qt.callLater(root.recoverIfUnsettled)
     }
   }
 
@@ -286,6 +463,7 @@ Panel {
   component BorderLegend: Rectangle {
     id: legendChip
     property string title: ""
+    property color tint: root.barForeground
     x: Style.space(10)
     width: legendLabel.implicitWidth + Style.space(8)
     height: legendLabel.implicitHeight
@@ -296,7 +474,7 @@ Panel {
       id: legendLabel
       anchors.centerIn: parent
       text: legendChip.title
-      color: root.barForeground
+      color: legendChip.tint
       opacity: 0.75
       font.family: root.bar ? root.bar.fontFamily : Style.font.family
       font.pixelSize: Style.font.caption
@@ -404,8 +582,48 @@ Panel {
               enabled: !root.busy
               onClicked: {
                 root.statusText = ""
+                root.statusIsError = false
                 root.run(["save", "--json"])
               }
+            }
+          }
+
+          // Failures used to land in the quiet grey line at the very bottom of
+          // the panel, below everything else, where they were easy to miss.
+          // They get their own box here, under the button that most often
+          // causes them.
+          Item {
+            width: parent.width
+            visible: root.statusIsError && root.statusText.length > 0
+            height: visible ? errBox.height + errLegend.height / 2 : 0
+
+            Rectangle {
+              id: errBox
+              y: errLegend.height / 2
+              width: parent.width
+              height: errBody.implicitHeight + Style.space(18)
+              radius: Style.space(6)
+              color: "transparent"
+              border.color: Color.urgent
+              border.width: 1
+            }
+
+            BorderLegend {
+              id: errLegend
+              title: "ERROR"
+              tint: Color.urgent
+            }
+
+            Text {
+              id: errBody
+              x: Style.space(10)
+              y: errBox.y + Style.space(9)
+              width: parent.width - Style.space(20)
+              text: root.statusText
+              color: Color.urgent
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
             }
           }
 
@@ -755,7 +973,7 @@ Panel {
 
           Text {
             width: parent.width
-            visible: root.statusText.length > 0
+            visible: root.statusText.length > 0 && !root.statusIsError
             text: root.statusText
             color: root.barForeground
             opacity: 0.75
@@ -776,6 +994,7 @@ Panel {
               onClicked: {
                 if (!root.confirmRemove) {
                   root.confirmRemove = true
+                  root.statusIsError = false
                   root.statusText = "Click again to uninstall Relaunch."
                   disarmRemove.restart()
                   return
