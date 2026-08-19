@@ -281,12 +281,34 @@ load_config_json() {
   jq -e "$jq_lib"' load_config' "$path" || die "parse config: $path"
 }
 
+# The path a write should actually land on. A rename replaces whatever sits
+# at the destination, so renaming onto a symlink destroys the link and
+# silently disconnects a dotfiles-managed file. Resolve the chain first and
+# rename onto the *target*, leaving the user-facing symlink untouched.
+#
+# The `[[ -L ]]` test is a builtin, so the ordinary regular-file case costs
+# nothing; readlink only runs for a path that really is a link.
+resolve_write_target() {
+  local path="$1" target
+  [[ -L "$path" ]] || { printf '%s\n' "$path"; return 0; }
+  # -f resolves the whole chain and tolerates a dangling final component, so
+  # a symlink pointing at a file that does not exist yet still writes through
+  # to the named target. -m is the fallback when an intermediate directory is
+  # missing too, which -f refuses.
+  target="$(readlink -f -- "$path" 2>/dev/null || true)"
+  [[ -n "$target" ]] || target="$(readlink -m -- "$path" 2>/dev/null || true)"
+  # Never silently replace a link we cannot resolve.
+  [[ -n "$target" ]] || die "cannot resolve symlink, refusing to replace it: $path"
+  printf '%s\n' "$target"
+}
+
 atomic_write() {
-  local dest="$1"
-  local tmp="${dest}.tmp"
-  mkdir -p "$(dirname "$dest")"
+  local dest="$1" real tmp
+  real="$(resolve_write_target "$dest")"
+  tmp="${real}.tmp"
+  mkdir -p "$(dirname "$real")"
   cat >"$tmp"
-  mv -f "$tmp" "$dest"
+  mv -f "$tmp" "$real"
 }
 
 config_skip_once() {
@@ -2415,9 +2437,13 @@ hyprland_hook_line() {
 }
 
 remove_managed_block() {
-  local file="$1" tmp
-  [[ -f "$file" ]] || return 0
-  tmp="$(mktemp)"
+  local file="$1" real tmp
+  [[ -e "$file" ]] || return 0
+  real="$(resolve_write_target "$file")"
+  [[ -f "$real" ]] || return 0
+  # Beside the resolved target, not mktemp's /tmp: a cross-filesystem mv is
+  # a copy plus unlink, so it is neither atomic nor symlink-preserving.
+  tmp="${real}.rl.tmp"
   # Drop only our marker comment and the immediately following line when
   # that line is our hook (relaunch boot) or our dofile. Never eat the next
   # user launch/source line just because it sits under the comment.
@@ -2428,8 +2454,8 @@ remove_managed_block() {
       if ($0 ~ /relaunch boot/ || $0 ~ /omarchy-relaunch\/relaunch\.lua/) next
     }
     { print }
-  ' "$file" >"$tmp"
-  mv -f "$tmp" "$file"
+  ' "$real" >"$tmp" || { rm -f "$tmp"; die "could not rewrite $real"; }
+  mv -f "$tmp" "$real"
 }
 
 cmd_uninstall() {
@@ -2464,25 +2490,74 @@ cmd_uninstall() {
   fi
 }
 
+# One awk pass reporting everything the repair decision needs: how many
+# copies of the exact hook line, how many lines invoke `relaunch boot` at all
+# (managed or hand-written), and how many managed markers. One fork per file,
+# the same as the single grep this replaced -- ensure_hooks runs on every
+# list and save, and #13/#16 took that path from 18.3s to 0.5s.
+hook_counts() {
+  local hook="$1" file="$2"
+  awk -v hook="$hook" '
+    index($0, hook) { exact++ }
+    /relaunch[[:space:]]+boot/ { anyboot++ }
+    /^[[:space:]]*--[[:space:]]*omarchy-relaunch/ { marker++ }
+    END { printf "%d %d %d\n", exact + 0, anyboot + 0, marker + 0 }
+  ' "$file" 2>/dev/null || printf '0 0 0\n'
+}
+
+# Strip every line that invokes `relaunch boot`, plus our marker comments.
+# remove_managed_block only removes a marker and the hook directly under it,
+# which leaves a hand-written unmarked hook in place -- and that one launches
+# every entry a second time. Repair needs both gone before re-appending, so
+# the result is exactly one.
+remove_all_boot_hooks() {
+  local file="$1" real tmp
+  [[ -e "$file" ]] || return 0
+  real="$(resolve_write_target "$file")"
+  [[ -f "$real" ]] || return 0
+  tmp="${real}.rl.tmp"
+  awk '
+    /^[[:space:]]*--[[:space:]]*omarchy-relaunch/ { next }
+    /relaunch[[:space:]]+boot/ { next }
+    { print }
+  ' "$real" >"$tmp" || { rm -f "$tmp"; die "could not rewrite $real"; }
+  mv -f "$tmp" "$real"
+}
+
 ensure_hooks() {
-  local auto lua bin hook
+  local auto lua bin hook boot_hook counts exact anyboot marker
   auto="$(autostart_path)"
   lua="$(hyprland_lua_path)"
   hook="$(hyprland_hook_line)"
-  mkdir -p "$(dirname "$auto")" "$(config_dir)"
+  boot_hook="o.exec_on_start(\"${SELF} boot\")"
+  mkdir -p "$(dirname "$auto")" "$(dirname "$lua")" "$(config_dir)"
   ensure_overrides_file
   remove_legacy_conf
   # Create the rules file before touching hyprland.lua. Hyprland reloads
   # as soon as that file changes; dofile of a missing path is a hard error.
   [[ -f "$(lua_path)" ]] || printf 'return\n' >"$(lua_path)"
-  if [[ -f "$auto" ]] && ! grep -q 'omarchy-relaunch' "$auto"; then
+
+  # A missing file is not a reason to skip wiring: a fresh config would
+  # silently get no hook at all. Redirection writes *through* a symlink, so
+  # creating and appending are both link-safe; only a rename is not.
+  [[ -e "$auto" ]] || printf '%s\n' '-- Extra autostart processes.' >"$auto"
+  [[ -e "$lua" ]] || printf '%s\n' '-- Hyprland configuration.' >"$lua"
+
+  # Correct means exactly one of our hook, no other `relaunch boot` line, and
+  # exactly one marker. Anything else -- a marker whose hook was deleted, a
+  # malformed line under the marker, a stray hand-written hook, or duplicates
+  # from a moved SELF -- is repaired the same way: strip them all, append one.
+  read -r exact anyboot marker <<<"$(hook_counts "$boot_hook" "$auto")"
+  if [[ "$exact" != 1 || "$anyboot" != 1 || "$marker" != 1 ]]; then
+    remove_all_boot_hooks "$auto"
     {
       printf '\n'
       printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)'
-      printf '%s\n' "o.exec_on_start(\"${SELF} boot\")"
+      printf '%s\n' "$boot_hook"
     } >>"$auto"
   fi
-  if [[ -f "$lua" ]] && ! grep -Fq "$hook" "$lua"; then
+
+  if ! grep -Fq "$hook" "$lua"; then
     remove_managed_block "$lua"
     {
       printf '\n'

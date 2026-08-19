@@ -1694,6 +1694,147 @@ jq -e '[.entries[] | select(.class == "crlf-app") | .label] == ["CRLF App"]' <<<
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
+# --- symlinked config files survive every write (github issue #2) ---
+# A rename replaces whatever sits at the destination, so renaming onto a
+# symlink destroys the link and disconnects a dotfiles-managed file. mktemp
+# also defaults to /tmp, making the move cross-filesystem and therefore not
+# atomic either. Both are the same line.
+SYM="$WORKDIR/symlinks"
+mkdir -p "$SYM/dotfiles"
+printf '%s\n' '-- Extra autostart processes.' 'o.launch_on_start("sunsetr")' >"$SYM/dotfiles/autostart.lua"
+printf '%s\n' '-- Hyprland configuration.' 'require("hypr.autostart")' >"$SYM/dotfiles/hyprland.lua"
+ln -sf "$SYM/dotfiles/autostart.lua" "$SYM/autostart.lua"
+ln -sf "$SYM/dotfiles/hyprland.lua" "$SYM/hyprland.lua"
+symcheck() {
+  [[ -L "$SYM/autostart.lua" ]] || fail "$1: autostart.lua stopped being a symlink"
+  [[ -L "$SYM/hyprland.lua" ]] || fail "$1: hyprland.lua stopped being a symlink"
+  [[ "$(readlink "$SYM/autostart.lua")" == "$SYM/dotfiles/autostart.lua" ]] \
+    || fail "$1: autostart.lua points somewhere new"
+}
+symenv() {
+  env RELAUNCH_CONFIG_DIR="$SYM/cfg" RELAUNCH_AUTOSTART="$SYM/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$SYM/hyprland.lua" RELAUNCH_HYPR_CONF="$SYM/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$SYM/plugin" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS" \
+    RELAUNCH_VERIFY_SLEEP=0 RELAUNCH_VERIFY_DEADLINE=0 RELAUNCH_VERIFY_INTERVAL=0 \
+    "$RELAUNCH" "$@"
+}
+mkdir -p "$SYM/cfg"
+symenv ensure-hooks >/dev/null 2>&1 || fail "ensure-hooks failed against symlinked config"
+symcheck "after install"
+# The content must have changed on the TARGET, reached through the link.
+grep -q 'relaunch boot' "$SYM/dotfiles/autostart.lua" \
+  || fail "the hook must be written through the link into the dotfiles target"
+grep -q 'sunsetr' "$SYM/dotfiles/autostart.lua" || fail "install ate an unrelated autostart line"
+grep -q 'relaunch.lua' "$SYM/dotfiles/hyprland.lua" \
+  || fail "the dofile hook must reach the dotfiles target"
+# Repair path: remove_managed_block is the helper that used to break this.
+printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' >>"$SYM/autostart.lua"
+symenv ensure-hooks >/dev/null 2>&1
+symcheck "after repair"
+# config.json goes through the same writer.
+ln -sf "$SYM/dotfiles/config.json" "$SYM/cfg/config.json"
+printf '{"staggerSeconds":0,"ignored":[],"entries":[]}\n' >"$SYM/dotfiles/config.json"
+symenv save >/dev/null 2>&1 || fail "save failed against a symlinked config.json"
+[[ -L "$SYM/cfg/config.json" ]] || fail "save replaced the symlinked config.json with a regular file"
+jq -e '.entries' "$SYM/dotfiles/config.json" >/dev/null \
+  || fail "save must write through the link into the dotfiles target"
+# …and uninstall, which is the third caller of remove_managed_block.
+symenv uninstall --yes >/dev/null 2>&1
+symcheck "after uninstall"
+grep -q 'relaunch boot' "$SYM/dotfiles/autostart.lua" \
+  && fail "uninstall must remove the hook from the target"
+grep -q 'sunsetr' "$SYM/dotfiles/autostart.lua" \
+  || fail "uninstall ate an unrelated autostart line"
+
+# A dangling symlink writes through to the named target rather than being
+# replaced by a regular file.
+rm -rf "$SYM/dangle"; mkdir -p "$SYM/dangle"
+ln -sf "$SYM/dangle/not-there-yet.lua" "$SYM/dangling.lua"
+( export RELAUNCH_CONFIG_DIR="$SYM/cfg2" RELAUNCH_AUTOSTART="$SYM/dangling.lua" \
+    RELAUNCH_HYPRLAND_LUA="$SYM/hyprland2.lua" RELAUNCH_HYPR_CONF="$SYM/hyprland2.conf" \
+    RELAUNCH_PLUGIN_DIR="$SYM/plugin2"
+  "$RELAUNCH" ensure-hooks >/dev/null 2>&1 )
+[[ -L "$SYM/dangling.lua" ]] || fail "a dangling symlink must not be replaced by a regular file"
+grep -q 'relaunch boot' "$SYM/dangle/not-there-yet.lua" \
+  || fail "a dangling symlink must be written through to its named target"
+
+# A symlink chain resolves all the way to the final file.
+rm -f "$SYM/chain.lua"; ln -sf "$SYM/autostart.lua" "$SYM/chain.lua"
+: >"$SYM/dotfiles/autostart.lua"
+( export RELAUNCH_CONFIG_DIR="$SYM/cfg3" RELAUNCH_AUTOSTART="$SYM/chain.lua" \
+    RELAUNCH_HYPRLAND_LUA="$SYM/hyprland3.lua" RELAUNCH_HYPR_CONF="$SYM/hyprland3.conf" \
+    RELAUNCH_PLUGIN_DIR="$SYM/plugin3"
+  "$RELAUNCH" ensure-hooks >/dev/null 2>&1 )
+[[ -L "$SYM/chain.lua" ]] || fail "a symlink chain must stay a symlink"
+grep -q 'relaunch boot' "$SYM/dotfiles/autostart.lua" \
+  || fail "a symlink chain must resolve to the final target"
+
+# --- ensure_hooks creates and repairs (github issue #5) ---
+EH="$WORKDIR/ensurehooks"
+ehrun() {
+  env RELAUNCH_CONFIG_DIR="$EH/cfg" RELAUNCH_AUTOSTART="$EH/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$EH/hyprland.lua" RELAUNCH_HYPR_CONF="$EH/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$EH/plugin" "$RELAUNCH" ensure-hooks >/dev/null 2>&1
+}
+boots() { grep -c 'relaunch[[:space:]]*boot' "$EH/autostart.lua"; }
+marks() { grep -c -- '-- omarchy-relaunch' "$EH/autostart.lua"; }
+
+# Fresh config, both files absent: they must be created and wired, not
+# silently skipped.
+rm -rf "$EH"; mkdir -p "$EH/cfg"
+ehrun
+[[ -f "$EH/autostart.lua" ]] || fail "a missing autostart.lua must be created"
+[[ -f "$EH/hyprland.lua" ]] || fail "a missing hyprland.lua must be created"
+# Created with valid minimal content, not just an orphan hook under a blank
+# first line.
+head -n1 "$EH/autostart.lua" | grep -q '^-- Extra autostart processes\.$' \
+  || fail "a created autostart.lua must start with valid minimal content, got: $(head -n1 "$EH/autostart.lua")"
+head -n1 "$EH/hyprland.lua" | grep -q '^-- Hyprland configuration\.$' \
+  || fail "a created hyprland.lua must start with valid minimal content, got: $(head -n1 "$EH/hyprland.lua")"
+[[ "$(boots)" -eq 1 ]] || fail "fresh install must have exactly one boot hook, got $(boots)"
+[[ "$(grep -c 'omarchy-relaunch/relaunch.lua' "$EH/hyprland.lua")" -eq 1 ]] \
+  || fail "fresh install must have exactly one dofile hook"
+
+# Idempotent: three runs, identical content, exact counts.
+before="$(cat "$EH/autostart.lua")"
+beforelua="$(cat "$EH/hyprland.lua")"
+ehrun; ehrun
+[[ "$before" == "$(cat "$EH/autostart.lua")" ]] || fail "repeated ensure-hooks changed autostart.lua"
+[[ "$beforelua" == "$(cat "$EH/hyprland.lua")" ]] || fail "repeated ensure-hooks changed hyprland.lua"
+[[ "$(boots)" -eq 1 && "$(marks)" -eq 1 ]] \
+  || fail "repeated ensure-hooks must stay at one hook and one marker, got $(boots)/$(marks)"
+
+# A marker whose hook line was deleted is repaired, not treated as valid.
+printf '%s\n' 'o.launch_on_start("sunsetr")' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
+  >"$EH/autostart.lua"
+ehrun
+[[ "$(boots)" -eq 1 ]] || fail "a marker with no hook must be repaired, got $(boots) hooks"
+[[ "$(marks)" -eq 1 ]] || fail "repair must leave exactly one marker, got $(marks)"
+grep -q 'sunsetr' "$EH/autostart.lua" || fail "repair ate an unrelated autostart line"
+
+# A malformed hook line under the marker is repaired too.
+printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
+  'o.exec_on_start("relaunch boot --nonsense' >"$EH/autostart.lua"
+ehrun
+[[ "$(boots)" -eq 1 ]] || fail "a malformed managed hook must be repaired, got $(boots)"
+
+# A hand-written unmarked hook must not coexist with ours: that launches
+# every entry twice.
+printf '%s\n' 'o.launch_on_start("sunsetr")' 'o.exec_on_start("/elsewhere/relaunch boot")' \
+  >"$EH/autostart.lua"
+ehrun
+[[ "$(boots)" -eq 1 ]] || fail "an unmarked relaunch boot hook must not duplicate, got $(boots)"
+grep -q 'sunsetr' "$EH/autostart.lua" || fail "duplicate removal ate an unrelated line"
+
+# Duplicated managed blocks collapse to one.
+printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
+  "o.exec_on_start(\"$RELAUNCH boot\")" \
+  '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
+  "o.exec_on_start(\"$RELAUNCH boot\")" >"$EH/autostart.lua"
+ehrun
+[[ "$(boots)" -eq 1 && "$(marks)" -eq 1 ]] \
+  || fail "duplicate managed blocks must collapse to one, got $(boots)/$(marks)"
+
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"
 printf '' >"$WORKDIR/globdir/not-the-class"

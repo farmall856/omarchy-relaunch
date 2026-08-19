@@ -240,6 +240,25 @@ stable. `Panel.qml` parses that object.
   run per key per `.desktop` file. `save` went from 16.5s to 0.5s on a
   93-file machine; the suite pins `normalize_desktop_key` output so a rewrite
   cannot silently change which file a class resolves to.
+- **Never rename onto a user-facing path without resolving symlinks first.**
+  A rename replaces whatever sits at the destination, so writing over a
+  symlinked `hyprland.lua`, `autostart.lua` or `config.json` destroys the
+  link and silently disconnects a dotfiles-managed file. `[[ -f ]]` follows
+  the link, so nothing catches it. `resolve_write_target` resolves the chain
+  and the write lands on the target; the `[[ -L ]]` test is a builtin, so the
+  ordinary case costs nothing. A dangling link writes through to its named
+  target; an unresolvable one is a hard error, never a silent replacement.
+  Shell redirection (`>`, `>>`) already follows symlinks and is safe — only
+  `mv` is not. Temp files go **beside the resolved target**, never `mktemp`
+  in `/tmp`, or the move is cross-filesystem and not atomic either.
+- `ensure_hooks` creates as well as repairs, and is idempotent from any
+  starting state: exactly one boot hook, one marker, one generated-rule hook.
+  Detection matches the **exact** hook line, not an `omarchy-relaunch`
+  substring — a leftover marker comment is not proof the hook is valid — and
+  a hand-written unmarked `relaunch boot` line is removed rather than left to
+  launch every entry a second time. One `awk` pass per file reports all three
+  counts, so the already-correct case costs the same one fork it always did.
+  This runs on every `list` and `save`; do not put work back on it.
 - Persist with temp-file + rename (`config.json.tmp`, `relaunch.lua.tmp`).
 - Everything runs as the user. No sudo, no IPC beyond `hyprctl` and the
   `relaunch` script on `PATH`.
