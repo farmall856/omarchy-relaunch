@@ -269,7 +269,13 @@ stable. `Panel.qml` parses that object.
   deletion rule: it matches `notify-send relaunch boot ran`. A comment, a
   string, or a command that merely contains the words is user content and is
   never adopted, counted or deleted. Deleting user content is worse than the
-  duplicate-launch bug this repairs.
+  duplicate-launch bug this repairs. Recognition is **anchored to a complete
+  line** for exactly that reason: searching within a line counted
+  `local note = [[o.exec_on_start("relaunch boot")]]` as a hook. A line
+  carrying anything besides the call — before or after — is simply not
+  recognised and is left alone. Markers are matched against the two exact
+  texts this script emits, never a prefix: `-- omarchy-relaunch notes about
+  the plugin` is somebody documenting their config.
 - Persist with temp-file + rename (`config.json.tmp`, `relaunch.lua.tmp`).
 - Everything runs as the user. No sudo, no IPC beyond `hyprctl` and the
   `relaunch` script on `PATH`.
@@ -305,6 +311,13 @@ stable. `Panel.qml` parses that object.
   and a stale `~/.local/bin/relaunch` from an older install would otherwise
   win. **Uninstall does not restore the user's original line**; it removes
   the managed block and leaves the file without a boot hook.
+  The exception covers a **second adopted spelling**: a literal
+  `dofile("<path>/omarchy-relaunch/relaunch.lua")` in `hyprland.lua` is the
+  generated-rules hook written by hand, and is replaced by the managed block
+  on the same reasoning. It is not broadened beyond that — `loadfile(...)()`,
+  `dofile(p)` and every other indirection are left alone, and a benign double
+  load of the rules file is the correct trade against deleting a line we
+  cannot attribute.
 
 ## QML conventions
 

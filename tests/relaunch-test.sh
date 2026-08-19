@@ -1784,7 +1784,9 @@ ehrun() {
 # Properly closed call only: an unterminated `o.exec_on_start("relaunch boot`
 # is broken user text, not a hook that executes.
 boots() { grep -cE '^[[:space:]]*o\.(exec|launch)_on_start\("([^"]*/)?relaunch boot"\)' "$EH/autostart.lua"; }
-marks() { grep -cE '^[[:space:]]*--[[:space:]]*omarchy-relaunch' "$EH/autostart.lua"; }
+# Exact marker text only: `-- omarchy-relaunch notes about the plugin` is a
+# user comment, not our marker.
+marks() { grep -cxF -- '-- omarchy-relaunch (managed; hidden from the Relaunch list)' "$EH/autostart.lua"; }
 
 # Fresh config, both files absent: they must be created and wired, not
 # silently skipped.
@@ -1802,7 +1804,18 @@ head -n1 "$EH/hyprland.lua" | grep -q '^-- Hyprland configuration\.$' \
 [[ "$(grep -c 'omarchy-relaunch/relaunch.lua' "$EH/hyprland.lua")" -eq 1 ]] \
   || fail "fresh install must have exactly one dofile hook"
 
-# Idempotent: three runs, identical content, exact counts.
+# Idempotent from a state the pre-fix implementation could not reach: start
+# from a file that already has a canonical block PLUS a stray unmarked hook,
+# so the first run must repair and the next two must change nothing. A plain
+# already-canonical file was idempotent before this branch too, so asserting
+# only that proved nothing.
+printf '%s\n' 'o.launch_on_start("sunsetr")' \
+  '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
+  "o.exec_on_start(\"$RELAUNCH boot\")" 'o.exec_on_start("relaunch boot")' \
+  >"$EH/autostart.lua"
+ehrun
+[[ "$(boots)" -eq 1 && "$(marks)" -eq 1 ]] \
+  || fail "first run must converge on one hook, got $(boots)/$(marks)"
 before="$(cat "$EH/autostart.lua")"
 beforelua="$(cat "$EH/hyprland.lua")"
 ehrun; ehrun
@@ -1928,6 +1941,46 @@ env RELAUNCH_CONFIG_DIR="$EH/cfg" RELAUNCH_AUTOSTART="$EH/autostart.lua" \
 grep -q 'sunsetr' "$EH/autostart.lua" || fail "uninstall ate an unrelated line"
 grep -q 'brave' "$EH/autostart.lua" || fail "uninstall ate an unrelated line"
 
+# --- a string is never a hook (PR #18 round 3) ---
+# Recognition is anchored to a complete line, so a Lua long-bracket string
+# containing a full call is user content: not counted, not adopted, not
+# deleted. Searching anywhere in the line deleted these.
+printf '%s\n' 'o.launch_on_start("sunsetr")' \
+  'local note = [[o.exec_on_start("relaunch boot")]]' \
+  'local doc = [[dofile("/home/u/.config/omarchy-relaunch/relaunch.lua")]]' \
+  >"$EH/autostart.lua"
+ehrun
+grep -q 'local note = ' "$EH/autostart.lua" \
+  || fail "a string containing a boot call must not be deleted"
+grep -q 'local doc = ' "$EH/autostart.lua" \
+  || fail "a string containing a dofile of the generated file must not be deleted"
+[[ "$(boots)" -eq 1 ]] \
+  || fail "a string must not count as a hook; expected one real hook, got $(boots)"
+# A marker comment the user wrote about the plugin is not our marker.
+printf '%s\n' '-- omarchy-relaunch notes about the plugin' \
+  'o.launch_on_start("sunsetr")' >"$EH/autostart.lua"
+ehrun
+grep -q 'notes about the plugin' "$EH/autostart.lua" \
+  || fail "a user comment beginning -- omarchy-relaunch must not be stripped"
+[[ "$(marks)" -eq 1 ]] || fail "exactly one real marker, got $(marks)"
+# Same for hyprland.lua: a string mentioning the generated file survives.
+printf '%s\n' 'require("hypr.autostart")' \
+  'local s = [[dofile("/x/omarchy-relaunch/relaunch.lua")]]' >"$EH/hyprland.lua"
+ehrun
+grep -q 'local s = ' "$EH/hyprland.lua" \
+  || fail "a string mentioning the generated rules file must not be deleted"
+[[ "$(grep -c 'io.open(_rl)' "$EH/hyprland.lua")" -eq 1 ]] \
+  || fail "exactly one managed dofile hook alongside the string"
+# A literal hand-written dofile of the generated file IS adopted, though:
+# it is the same hook spelled differently.
+printf '%s\n' 'require("hypr.autostart")' \
+  'dofile("/home/u/.config/omarchy-relaunch/relaunch.lua")' >"$EH/hyprland.lua"
+ehrun
+grep -q 'dofile("/home/u/.config/omarchy-relaunch/relaunch.lua")' "$EH/hyprland.lua" \
+  && fail "a literal user dofile of the generated file must be adopted, not left beside ours"
+[[ "$(grep -c 'omarchy-relaunch/relaunch.lua' "$EH/hyprland.lua")" -eq 1 ]] \
+  || fail "adoption must leave exactly one rules hook"
+
 # --- dangling link whose TARGET PARENT does not exist (PR #18 review) ---
 # The earlier fixture created the target directory first, so it missed this:
 # plain redirection follows a symlink but still fails when the target's
@@ -1937,8 +1990,8 @@ MP="$WORKDIR/missingparent"
 rm -rf "$MP"; mkdir -p "$MP"
 ln -s "$MP/dotfiles/hypr/autostart.lua" "$MP/autostart.lua"
 ln -s "$MP/dotfiles/hypr/hyprland.lua" "$MP/hyprland.lua"
-ln -s "$MP/dotfiles/rl/overrides.json" "$MP/cfg-overrides.json"
 mkdir -p "$MP/cfg"
+ln -s "$MP/dotfiles/rl/overrides.json" "$MP/cfg/overrides.json"
 ln -sf "$MP/dotfiles/rl/relaunch.lua" "$MP/cfg/relaunch.lua"
 ( export RELAUNCH_CONFIG_DIR="$MP/cfg" RELAUNCH_AUTOSTART="$MP/autostart.lua" \
     RELAUNCH_HYPRLAND_LUA="$MP/hyprland.lua" RELAUNCH_HYPR_CONF="$MP/hyprland.conf" \
@@ -1953,6 +2006,10 @@ grep -q 'relaunch boot' "$MP/dotfiles/hypr/autostart.lua" \
 [[ -f "$MP/dotfiles/hypr/hyprland.lua" ]] || fail "hyprland.lua target must be created too"
 [[ -L "$MP/cfg/relaunch.lua" && -f "$MP/dotfiles/rl/relaunch.lua" ]] \
   || fail "the generated-rules file must be created through its link"
+[[ -L "$MP/cfg/overrides.json" && -f "$MP/dotfiles/rl/overrides.json" ]] \
+  || fail "overrides.json must be created through its link into a missing directory"
+jq -e 'type == "object"' "$MP/dotfiles/rl/overrides.json" >/dev/null \
+  || fail "the overrides target must hold valid content"
 
 # --- the two writers that bypassed the resolver (PR #18 review) ---
 # remove_legacy_conf and drop-startup both did mktemp + mv onto the user path.
@@ -2066,8 +2123,17 @@ grep -q 'o.launch_on_start("keep-me")' "$RELAUNCH_AUTOSTART" || fail "unrelated 
 grep -q 'o.launch_on_start("also-keep")' "$RELAUNCH_AUTOSTART" || fail "adjacent also-keep deleted"
 grep -q 'relaunch boot' "$RELAUNCH_AUTOSTART" && fail "boot hook survived uninstall"
 grep -q 'omarchy-relaunch' "$RELAUNCH_AUTOSTART" && fail "marker survived uninstall"
-grep -q 'omarchy-relaunch' "$RELAUNCH_HYPRLAND_LUA" && fail "hyprland marker survived uninstall"
-grep -q 'dofile' "$RELAUNCH_HYPRLAND_LUA" && fail "hyprland dofile survived uninstall"
+grep -qxE '[[:space:]]*-- omarchy-relaunch' "$RELAUNCH_HYPRLAND_LUA" \
+  && fail "hyprland marker survived uninstall"
+# The variable form `local _rl = "..."; dofile(_rl)` is NOT a recognised
+# managed hook and must survive: an unrecognised user dofile is left alone,
+# and a benign double load beats deleting a line we cannot attribute.
+grep -q 'dofile(_rl)' "$RELAUNCH_HYPRLAND_LUA" \
+  || fail "an unrecognised user dofile must not be deleted"
+# Our own generated-rules hook must be gone; the user's variable-form line
+# above is the only dofile that may remain.
+grep -q 'io.open(_rl)' "$RELAUNCH_HYPRLAND_LUA" \
+  && fail "the managed dofile hook survived uninstall"
 grep -q -- '-- keep' "$RELAUNCH_HYPRLAND_LUA" || fail "unrelated hyprland comment deleted"
 grep -q -- '-- after' "$RELAUNCH_HYPRLAND_LUA" || fail "adjacent hyprland comment deleted"
 

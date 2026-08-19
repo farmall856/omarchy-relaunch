@@ -2540,7 +2540,17 @@ cmd_uninstall() {
 # A hook line is an o.exec_on_start/o.launch_on_start CALL whose quoted
 # command is one is_relaunch_exec would hide from the inventory. Nothing else
 # is ever a candidate for adoption or deletion.
-RL_MARKER_RE='^[[:space:]]*--[[:space:]]*omarchy-relaunch'
+# The two marker texts this script emits, matched EXACTLY. A prefix match
+# ate `-- omarchy-relaunch notes about the plugin`, which is somebody
+# documenting their own config, not a marker.
+RL_MARKER_BOOT='-- omarchy-relaunch (managed; hidden from the Relaunch list)'
+RL_MARKER_LUA='-- omarchy-relaunch'
+
+is_managed_marker() {
+  local line="${1#"${1%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  [[ "$line" == "$RL_MARKER_BOOT" || "$line" == "$RL_MARKER_LUA" ]]
+}
 
 # Is this command an invocation of `relaunch boot`?
 #
@@ -2567,12 +2577,20 @@ is_relaunch_boot_command() {
 }
 
 # Is $1 an autostart call that launches relaunch itself?
+# Anchored to a COMPLETE line, so the call is the whole statement. Searching
+# anywhere in the line counted `local note = [[o.exec_on_start("relaunch
+# boot")]]` -- a string -- as a hook and deleted it. AGENTS.md says a string
+# is never counted or deleted; this is what implements that.
+#
+# A line carrying anything else, before or after the call, is simply not a
+# recognised managed line and is left alone. That is also the right answer to
+# a line combining a user launch with a boot call: we neither adopt half of
+# it nor delete the other half.
 is_managed_boot_line() {
   local line="$1" exec=""
-  [[ "$line" =~ ^[[:space:]]*-- ]] && return 1
-  if [[ "$line" =~ o\.launch_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
+  if [[ "$line" =~ ^[[:space:]]*o\.launch_on_start\([[:space:]]*\"([^\"]+)\"[[:space:]]*\)[[:space:]]*$ ]]; then
     exec="${BASH_REMATCH[1]}"
-  elif [[ "$line" =~ o\.exec_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
+  elif [[ "$line" =~ ^[[:space:]]*o\.exec_on_start\([[:space:]]*\"([^\"]+)\"[[:space:]]*\)[[:space:]]*$ ]]; then
     exec="${BASH_REMATCH[1]}"
   else
     return 1
@@ -2581,10 +2599,20 @@ is_managed_boot_line() {
 }
 
 # Is $1 the generated-rules dofile line?
+# Two adopted spellings of the generated-rules hook, both anchored to a whole
+# line: the guarded line this script emits, and a bare literal
+# dofile("<path>/omarchy-relaunch/relaunch.lua"). The second is the same hook
+# written by hand.
+#
+# Deliberately NOT broadened to loadfile(...)() or dofile(p): an
+# unrecognised user dofile is left alone, and a benign double load of the
+# rules file is the correct trade under the do-not-delete rule.
 is_managed_lua_line() {
-  local line="$1"
-  [[ "$line" =~ ^[[:space:]]*-- ]] && return 1
-  [[ "$line" == *"omarchy-relaunch/relaunch.lua"* && "$line" == *dofile* ]]
+  local line="$1" trimmed
+  trimmed="${line#"${line%%[![:space:]]*}"}"
+  trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+  [[ "$trimmed" == "$(hyprland_hook_line)" ]] && return 0
+  [[ "$trimmed" =~ ^dofile\([[:space:]]*\"[^\"]*omarchy-relaunch/relaunch\.lua\"[[:space:]]*\)$ ]]
 }
 
 # Count a file's managed state: how many hook lines, how many markers, and
@@ -2596,7 +2624,7 @@ managed_counts() {
   local file="$1" kind="$2" line hooks=0 markers=0 adjacent=0 pending=0
   [[ -f "$file" ]] || { printf '0 0 0\n'; return 0; }
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ $RL_MARKER_RE ]]; then
+    if is_managed_marker "$line"; then
       markers=$((markers + 1))
       pending=1
       continue
@@ -2622,7 +2650,7 @@ strip_managed() {
 _strip_managed_filter() {
   local kind="$1" line
   while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ $RL_MARKER_RE ]] && continue
+    is_managed_marker "$line" && continue
     "is_managed_${kind}_line" "$line" && continue
     printf '%s\n' "$line"
   done
