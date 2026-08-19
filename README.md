@@ -17,7 +17,9 @@ windows (`hyprctl clients -j`) and records one `class → workspace` mapping per
 app. The boot hook and the workspace pins live in two files Relaunch owns:
 `~/.config/omarchy-relaunch/relaunch.lua` registers the hook, and
 `rules.lua` holds the generated `o.window` pins. Both are reached through one
-guarded line in `hyprland.lua`; nothing is written into your `autostart.lua`. Because that is
+guarded line in `hyprland.lua`. Installing, updating and removing Relaunch
+never write to your `autostart.lua` — the only thing that edits it is the
+**Delete startup config** button, when you press it. Because that is
 declarative config rather than live state, it survives a crash for free.
 
 - **Bar widget (`BarWidget.qml` / `Panel.qml`):** Save, list edits, and boot

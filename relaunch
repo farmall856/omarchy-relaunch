@@ -2580,13 +2580,21 @@ remove_bootstrap_block() {
 }
 
 _remove_bootstrap_filter() {
-  local hook="$1" line held="" have_held=false
-  while IFS= read -r line || [[ -n "$line" ]]; do
+  local hook="$1" input line held="" have_held=false out="" final_nl=true
+  # Read the whole file with a sentinel byte, because command substitution
+  # eats trailing newlines and the file's EOF state is part of what has to be
+  # restored. Emitting every kept line through printf '%s\n' gave a file whose
+  # last line had no newline one it never had.
+  input="$(cat; printf X)"
+  input="${input%X}"
+  [[ -n "$input" ]] || return 0
+  [[ "${input: -1}" == $'\n' ]] || final_nl=false
+  while IFS= read -r line; do
     if $have_held; then
       have_held=false
       # Marker immediately above our exact hook: both lines are ours.
       [[ "$line" == "$hook" ]] && continue
-      printf '%s\n' "$held"
+      out+="$held"$'\n'
     fi
     if [[ "$line" == '-- omarchy-relaunch' ]]; then
       held="$line"
@@ -2596,9 +2604,11 @@ _remove_bootstrap_filter() {
     # An exact copy of our hook without the marker is still ours, byte for
     # byte, and leaving it behind would leave Relaunch loading after uninstall.
     [[ "$line" == "$hook" ]] && continue
-    printf '%s\n' "$line"
-  done
-  $have_held && printf '%s\n' "$held"
+    out+="$line"$'\n'
+  done <<<"${input%$'\n'}"
+  $have_held && out+="$held"$'\n'
+  $final_nl || out="${out%$'\n'}"
+  printf '%s' "$out"
   return 0
 }
 
@@ -2622,11 +2632,20 @@ ensure_hooks() {
   ensure_loader
 
   if [[ -f "$lua" ]] && ! grep -Fq "$hook" "$lua"; then
-    {
-      printf '\n'
-      printf '%s\n' '-- omarchy-relaunch'
-      printf '%s\n' "$hook"
-    } >>"$lua"
+    # Append EXACTLY the bytes uninstall knows how to take back. There is no
+    # blank separator line: uninstall removed the marker and the hook but not
+    # the blank, so every install/uninstall cycle left one behind, and the
+    # file drifted further from the state Relaunch found it in.
+    #
+    # Our last line carries the file's own EOF state. A hyprland.lua whose
+    # last line had no trailing newline needs one added before we append, and
+    # writing our hook without one puts that state where the remover can read
+    # it back off the file and restore it.
+    if [[ -s "$lua" && -n "$(tail -c1 "$lua")" ]]; then
+      { printf '\n%s\n' '-- omarchy-relaunch'; printf '%s' "$hook"; } >>"$lua"
+    else
+      printf '%s\n%s\n' '-- omarchy-relaunch' "$hook" >>"$lua"
+    fi
   fi
 
   # Upgrade path for the withdrawn snapshot hook. An install that ran
@@ -2694,7 +2713,7 @@ main() {
     generate) cmd_generate ;;
     list) cmd_list ;;
     reload) cmd_reload ;;
-    boot) cmd_boot "$@" ;;
+    boot) cmd_boot ;;
     last-boot) cmd_last_boot "$@" ;;
     snapshot) cmd_snapshot ;;
     last-session) cmd_last_session "$@" ;;

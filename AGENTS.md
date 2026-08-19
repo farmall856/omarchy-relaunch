@@ -14,8 +14,10 @@ This folder is the source tree. The public repo is
 No daemon. Save inventories windows; `relaunch boot` launches the list. The
 boot hook and the workspace pins live in two files Relaunch owns outright:
 `relaunch.lua` is a stable loader that registers the hook, `rules.lua` holds
-the generated `o.window` pins. Nothing is written into the user's
-`autostart.lua`.
+the generated `o.window` pins. Installing, maintaining and uninstalling
+Relaunch never writes to the user's `autostart.lua`; the one thing that does
+is the explicit **Delete startup config** action in the panel, because the
+user chose that edit in our UI.
 
 | Piece | Role |
 |---|---|
@@ -46,7 +48,9 @@ any `source = …/relaunch.conf` line in `hyprland.conf`.
 line Relaunch writes outside its own config dir). It does not touch
 `hyprland.conf` or `autostart.lua` — not to install, not to clean up, not to
 adopt a hand-written `relaunch boot` line. `autostart.lua` is read for the
-startup inventory and never written.
+startup inventory, and the only code that writes it is `cmd_drop_startup`,
+behind the panel's explicit **Delete startup config** action. Automatic
+maintenance never does.
 
 ## Engine CLI
 
@@ -292,8 +296,9 @@ or nothing.
   parent directory is absent, which is why `ensure_file_with` exists and
   creates the resolved target's parent first. Temp files go **beside the resolved target**, never `mktemp`
   in `/tmp`, or the move is cross-filesystem and not atomic either.
-- **Relaunch owns two Lua files; it never writes into the user's
-  `autostart.lua`.** `relaunch.lua` is a stable loader that registers the
+- **Relaunch owns two Lua files, and no automatic path writes into the
+  user's `autostart.lua`** — only `drop-startup`, which the user invokes
+  deliberately from the panel. `relaunch.lua` is a stable loader that registers the
   boot hook; `rules.lua` holds the generated `o.window` declarations, loaded
   with `pcall`. The split is fault isolation: a malformed rules file loses
   the pins without losing boot. Boot registration comes **before** the
@@ -404,8 +409,8 @@ omarchy plugin add https://github.com/farmall856/omarchy-relaunch.git --enable
 
 `omarchy plugin add <repo-url> --enable` is the supported install. The
 widget invokes `./relaunch` from the plugin folder (not PATH). First
-`list`/`save`/`generate` runs `ensure_hooks` so autostart and
-`hyprland.lua` get wired without `install.sh`.
+`list`/`save`/`generate` runs `ensure_hooks`, so the loader, `rules.lua` and
+the one `hyprland.lua` bootstrap line get wired without `install.sh`.
 
 ## Repo / publish
 

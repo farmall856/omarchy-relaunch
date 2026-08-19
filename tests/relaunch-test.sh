@@ -1971,19 +1971,49 @@ obrun uninstall --yes >/dev/null 2>&1
 diff -q "$OB/autostart.before" "$OB/autostart.lua" >/dev/null \
   || fail "uninstall modified the user's autostart.lua"
 
-# Clean removal is the one guarantee: our bootstrap goes, everything around it
-# stays, and nothing Relaunch wrote is left behind.
+# Clean removal is the one guarantee, and the standard is BYTE-FOR-BYTE: the
+# file Relaunch hands back has to be the file it was given. Grepping that the
+# hook is gone and the user's lines remain passes on a file that has grown a
+# blank line on every cycle, which is how ten of them ended up in a user's
+# autostart.lua. cmp against a saved copy, or this proves nothing.
+cyclecheck() {
+  # $1 label, $2 the exact original bytes (already in $OB/hyprland.before)
+  cp "$OB/hyprland.before" "$OB/hyprland.lua"
+  obrun ensure-hooks >/dev/null 2>&1
+  grep -q 'relaunch.lua' "$OB/hyprland.lua" || fail "$1: ensure-hooks must write the bootstrap"
+  cmp -s "$OB/hyprland.before" "$OB/hyprland.lua" \
+    && fail "$1: ensure-hooks did not change hyprland.lua at all"
+  obrun uninstall --yes >/dev/null 2>&1
+  cmp -s "$OB/hyprland.before" "$OB/hyprland.lua" \
+    || fail "$1: uninstall did not restore hyprland.lua byte-for-byte: $(diff <(od -c "$OB/hyprland.before") <(od -c "$OB/hyprland.lua") | head -4 | tr '\n' ' ')"
+}
+
 obreset
-cat >"$OB/hyprland.lua" <<'EOF'
-require("hypr.autostart")
-EOF
+printf '%s\n' 'require("hypr.autostart")' '-- trailing comment' >"$OB/hyprland.before"
+cyclecheck "a normal hyprland.lua"
+
+# Repeat the cycle. A residue of one byte per cycle is invisible in a single
+# install/uninstall and obvious after five.
+obreset
+printf '%s\n' 'require("hypr.autostart")' >"$OB/hyprland.before"
+for _i in 1 2 3 4 5; do
+  obrun ensure-hooks >/dev/null 2>&1
+  obrun uninstall --yes >/dev/null 2>&1
+  cp "$OB/hyprland.lua" "$OB/hyprland.cycled"
+  cmp -s "$OB/hyprland.before" "$OB/hyprland.cycled" \
+    || fail "cycle $_i left residue in hyprland.lua: $(od -c "$OB/hyprland.cycled" | head -3 | tr '\n' ' ')"
+  cp "$OB/hyprland.cycled" "$OB/hyprland.lua"
+done
+
+# A file whose last line has NO trailing newline must not come back with one.
+obreset
+printf '%s' 'require("hypr.autostart")' >"$OB/hyprland.before"
+[[ -n "$(tail -c1 "$OB/hyprland.before")" ]] || fail "fixture should have no final newline"
+cyclecheck "an hyprland.lua with no final newline"
+
+obreset
 obrun ensure-hooks >/dev/null 2>&1
-grep -q 'relaunch.lua' "$OB/hyprland.lua" || fail "ensure-hooks must write the bootstrap"
 obrun uninstall --yes >/dev/null 2>&1
-grep -q 'relaunch.lua' "$OB/hyprland.lua" \
-  && fail "uninstall must remove our bootstrap from hyprland.lua"
-grep -qx 'require("hypr.autostart")' "$OB/hyprland.lua" \
-  || fail "uninstall ate an unrelated hyprland.lua line"
 [[ ! -d "$OB/cfg" ]] || fail "uninstall must remove the config dir"
 
 # A hyprland.lua carrying our exact hook WITHOUT the marker is still ours,
