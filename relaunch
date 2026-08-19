@@ -38,10 +38,6 @@ skip_path() { printf '%s\n' "$(config_dir)/skip-once"; }
 last_boot_log_path() { printf '%s\n' "$(config_dir)/last-boot.log"; }
 last_boot_json_path() { printf '%s\n' "$(config_dir)/last-boot.json"; }
 last_session_path() { printf '%s\n' "$(config_dir)/last-session.json"; }
-snapshot_unit_path() {
-  printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/omarchy-relaunch-snapshot.service"
-}
-
 autostart_path() {
   printf '%s\n' "${RELAUNCH_AUTOSTART:-$HOME/.config/hypr/autostart.lua}"
 }
@@ -2478,19 +2474,6 @@ cmd_last_session() {
   ' <<<"$report"
 }
 
-# The hook can no longer be created -- see "Session snapshot -- removed" in
-# AGENTS.md -- but it must still be destroyable. An older install may have an
-# enabled unit on disk whose ExecStop points at this script; uninstall and
-# ensure_hooks both call this to clear it. Best-effort: teardown must never
-# block on systemd.
-remove_snapshot_hook() {
-  local unit
-  unit="$(snapshot_unit_path)"
-  systemctl --user disable --now omarchy-relaunch-snapshot.service >/dev/null 2>&1 || true
-  rm -f "$unit"
-  systemctl --user daemon-reload >/dev/null 2>&1 || true
-}
-
 arg_value() {
   local flag="$1"
   shift
@@ -2685,12 +2668,6 @@ cmd_uninstall() {
     [[ "$a" == --yes ]] && yes=true
   done
   $yes || die "uninstall requires --yes"
-  # Disable the snapshot unit FIRST, while the script and config dir still
-  # exist: `disable --now` fires ExecStop, which runs `relaunch snapshot`.
-  # Tearing down the files first would leave an enabled unit whose ExecStop
-  # points at a deleted binary, and would let that ExecStop recreate the
-  # config dir that uninstall had just removed.
-  remove_snapshot_hook
   remove_bootstrap_block "$(hyprland_lua_path)"
   remove_legacy_conf
   rm -rf "$(config_dir)"
@@ -2810,15 +2787,6 @@ ensure_hooks() {
     else
       printf '%s\n%s\n' '-- omarchy-relaunch' "$hook" >>"$lua"
     fi
-  fi
-
-  # Upgrade path for the withdrawn snapshot hook. An install that ran
-  # `snapshot-hook --enable` before it was removed still has an enabled unit
-  # whose ExecStop fires at every logout, and that user will never run
-  # `uninstall`. The `[[ -f ]]` guard keeps two systemctl forks off the hot
-  # path in the normal case.
-  if [[ -f "$(snapshot_unit_path)" ]]; then
-    remove_snapshot_hook
   fi
 
   # Plugin-manager installs put a copy of the engine in the plugin folder but

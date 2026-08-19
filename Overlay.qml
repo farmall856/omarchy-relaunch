@@ -183,6 +183,7 @@ Item {
           height: root.headerHeight
 
           Text {
+            textFormat: Text.PlainText
             anchors.left: parent.left
             anchors.right: closeHint.left
             anchors.rightMargin: Style.space(12)
@@ -195,6 +196,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             id: closeHint
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter

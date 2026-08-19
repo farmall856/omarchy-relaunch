@@ -1497,34 +1497,12 @@ jq -e '[.entries[] | select(.class == "brave-browser") | .startupKeys] | .[0] | 
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
-# (7) uninstall must tear the snapshot unit down, and disable it BEFORE
-# deleting the script and config dir, because disable --now fires ExecStop.
-cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
-EOF
-UNIT_DIR="$WORKDIR/xdgconf/systemd/user"
-mkdir -p "$UNIT_DIR"
-SYSTEMCTL_LOG="$WORKDIR/systemctl.log"
-: >"$SYSTEMCTL_LOG"
-cat >"$WORKDIR/systemctl" <<EOF
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >>"$SYSTEMCTL_LOG"
-# disable --now fires ExecStop, which needs the script and config dir.
-if [[ "\$*" == *"disable --now"* ]]; then
-  [[ -d "$RELAUNCH_CONFIG_DIR" ]] || printf 'CONFIG_DIR_GONE\n' >>"$SYSTEMCTL_LOG"
-fi
-exit 0
-EOF
-chmod +x "$WORKDIR/systemctl"
-printf 'placeholder\n' >"$UNIT_DIR/omarchy-relaunch-snapshot.service"
-( export PATH="$WORKDIR:$PATH" XDG_CONFIG_HOME="$WORKDIR/xdgconf"
-  "$RELAUNCH" uninstall --yes >/dev/null 2>&1 )
-grep -q 'disable --now omarchy-relaunch-snapshot.service' "$SYSTEMCTL_LOG" \
-  || fail "uninstall must disable the snapshot unit"
-grep -q 'CONFIG_DIR_GONE' "$SYSTEMCTL_LOG" \
-  && fail "uninstall disabled the unit after deleting the config dir"
-[[ ! -e "$UNIT_DIR/omarchy-relaunch-snapshot.service" ]] \
-  || fail "uninstall must remove the snapshot unit file"
+# (7) The engine touches systemd at all is now the question, and the answer
+# is no. The snapshot unit's CREATION was removed before v1.0.0 ever shipped,
+# so no released version can have written one; the teardown that remained was
+# dead for every user and was the engine's only reason to run systemctl.
+grep -qE 'systemctl|systemd' "$RELAUNCH" \
+  && fail "the engine must not reference systemd at all: $(grep -nE 'systemctl|systemd' "$RELAUNCH" | head -3)"
 mkdir -p "$RELAUNCH_CONFIG_DIR"
 
 # (8) The hook can no longer be created: snapshot-hook is gone. It was
@@ -1559,30 +1537,6 @@ rm -f "$RELAUNCH_CONFIG_DIR/last-session.json"
 err="$("$RELAUNCH" last-session 2>&1 || true)"
 assert_not_contains "$err" "snapshot-hook"
 assert_contains "$err" "relaunch snapshot"
-
-# (8b) ensure_hooks clears a unit left by an older install -- that user will
-# never run uninstall -- but must not shell out when there is none, because
-# ensure_hooks is on the hot path for list and save.
-: >"$SYSTEMCTL_LOG"
-cat >"$WORKDIR/systemctl" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >>"$SYSTEMCTL_LOG_PATH"
-exit 0
-EOF
-chmod +x "$WORKDIR/systemctl"
-printf 'stale unit\n' >"$UNIT_DIR/omarchy-relaunch-snapshot.service"
-( export PATH="$WORKDIR:$PATH" XDG_CONFIG_HOME="$WORKDIR/xdgconf" SYSTEMCTL_LOG_PATH="$SYSTEMCTL_LOG"
-  "$RELAUNCH" list --json >/dev/null 2>&1 )
-[[ ! -e "$UNIT_DIR/omarchy-relaunch-snapshot.service" ]] \
-  || fail "ensure_hooks must delete a stray snapshot unit"
-grep -q 'disable --now omarchy-relaunch-snapshot.service' "$SYSTEMCTL_LOG" \
-  || fail "ensure_hooks must disable a stray snapshot unit, not just unlink it"
-# No unit: no systemctl at all. This is the hot path.
-: >"$SYSTEMCTL_LOG"
-( export PATH="$WORKDIR:$PATH" XDG_CONFIG_HOME="$WORKDIR/xdgconf" SYSTEMCTL_LOG_PATH="$SYSTEMCTL_LOG"
-  "$RELAUNCH" list --json >/dev/null 2>&1 )
-[[ ! -s "$SYSTEMCTL_LOG" ]] \
-  || fail "ensure_hooks must not fork systemctl when no unit exists: $(cat "$SYSTEMCTL_LOG")"
 
 # (9) last-session --diff must compare workspace and float, not just counts.
 export FAKE_MONITORS="$WORKDIR/monitors.json"

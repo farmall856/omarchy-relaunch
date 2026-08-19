@@ -401,6 +401,7 @@ Panel {
     border.width: 1
     opacity: root.busy ? 0.45 : 1
     Text {
+      textFormat: Text.PlainText
       id: chipLabel
       anchors.centerIn: parent
       text: chip.label
@@ -438,6 +439,7 @@ Panel {
     border.width: 1
     opacity: root.busy ? 0.45 : 1
     Text {
+      textFormat: Text.PlainText
       anchors.centerIn: parent
       text: iconChip.glyph
       color: iconChip.tint
@@ -471,6 +473,7 @@ Panel {
     // for one is bar.background with a Color fallback (see Ui/PanelSlider).
     color: root.bar ? root.bar.background : Color.background
     Text {
+      textFormat: Text.PlainText
       id: legendLabel
       anchors.centerIn: parent
       text: legendChip.title
@@ -525,6 +528,7 @@ Panel {
               spacing: Style.space(8)
 
               Text {
+                textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
                 // Same glyph as the bar button (BarWidget.qml), so the popup
                 // names the button that opened it. Keep the two in step.
@@ -537,6 +541,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 id: titleText
                 anchors.verticalCenter: parent.verticalCenter
                 text: "relaunch"
@@ -568,6 +573,7 @@ Panel {
             border.width: 1
             opacity: root.busy ? 0.5 : 1.0
             Text {
+              textFormat: Text.PlainText
               anchors.centerIn: parent
               text: root.busy ? "Working…" : "Save Current Workspaces"
               color: root.barForeground
@@ -615,6 +621,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               id: errBody
               x: Style.space(10)
               y: errBox.y + Style.space(9)
@@ -630,6 +637,7 @@ Panel {
           Rectangle { width: parent.width; height: 1; color: root.barForeground; opacity: 0.2 }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: root.relaunchRows.length > 0
               ? "Relaunch list (" + root.relaunchRows.length + ")"
@@ -690,6 +698,7 @@ Panel {
                       height: rowActions.height
 
                       Text {
+                        textFormat: Text.PlainText
                         anchors.left: parent.left
                         anchors.right: rowActions.left
                         anchors.rightMargin: Style.space(6)
@@ -718,7 +727,14 @@ Panel {
                         }
                         IconChip {
                           glyph: "\uf1f8"  // nf-fa-trash
-                          hint: "Remove " + relaunchRow.modelData.label + " from relaunch"
+                          // No app name here. The row shows it immediately to
+                          // the left, and `hint` is rendered by the shell's
+                          // PanelToolTip -- a Text with no textFormat, so
+                          // AutoText -- which we do not own and must not edit.
+                          // A window class or .desktop Name= is chosen by
+                          // other software; the way to keep it from becoming
+                          // markup there is not to send it.
+                          hint: "Remove"
                           onClicked: root.run(["drop", "--class", relaunchRow.modelData.class, "--json"])
                         }
                       }
@@ -727,6 +743,7 @@ Panel {
                     // The row shows a friendly label now, but the pin matches
                     // on class, so class has to stay reachable somewhere.
                     Text {
+                      textFormat: Text.PlainText
                       visible: relaunchRow.expanded
                       width: parent.width
                       text: "class " + relaunchRow.modelData.class + " — what the workspace pin matches"
@@ -738,6 +755,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       visible: relaunchRow.expanded && root.rowBroken(relaunchRow.modelData)
                       width: parent.width
                       text: "Launch command not found. Type the command that starts this app."
@@ -835,6 +853,7 @@ Panel {
                   height: notInActions.height
 
                   Text {
+                    textFormat: Text.PlainText
                     anchors.left: parent.left
                     anchors.right: notInActions.left
                     anchors.rightMargin: Style.space(6)
@@ -875,9 +894,13 @@ Panel {
                       // A running window is added where it already is. A
                       // startup app has no window to read a workspace from,
                       // so it starts on 1; launching it and saving moves it.
+                      // Workspace is an integer from our own JSON and cannot
+                      // carry markup; the app name is text chosen by other
+                      // software, so it stays out of a tooltip we do not
+                      // render. See the Remove chip above.
                       hint: notInRow.modelData.kind === "running"
-                        ? "Add " + notInRow.modelData.label + " to relaunch on workspace " + notInRow.modelData.workspace
-                        : "Add " + notInRow.modelData.label + " to relaunch on workspace 1"
+                        ? "Add to relaunch on workspace " + notInRow.modelData.workspace
+                        : "Add to relaunch on workspace 1"
                       onClicked: notInRow.modelData.kind === "running"
                         ? root.run([
                             "import", "--class", notInRow.modelData.class,
@@ -924,6 +947,7 @@ Panel {
               spacing: Style.space(6)
 
               Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 text: root.bootLabel()
                 color: root.barForeground
@@ -954,6 +978,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 visible: root.lastBoot !== null
                 text: root.lastBootLink()
@@ -972,6 +997,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             visible: root.statusText.length > 0 && !root.statusIsError
             text: root.statusText
