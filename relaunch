@@ -317,6 +317,21 @@ ensure_config_dir() {
   (umask 077; mkdir -p "$dir")
 }
 
+# Create the parent for one of our own writes. A command that writes before
+# ensure_hooks has run -- `snapshot` is the reachable one -- created the config
+# directory here with the ambient umask, so under umask 022 a fresh install got
+# a 0755 directory until the next ensure_hooks tightened it. Only OUR directory
+# is forced private: the bin directory and the parent of hyprland.lua belong to
+# the user and are not Relaunch's to restrict.
+mkdir_for_write() {
+  local dir="$1"
+  if [[ "$dir" == "$(config_dir)" ]]; then
+    ensure_config_dir
+  else
+    mkdir -p "$dir"
+  fi
+}
+
 # 0600 from creation, never created-then-tightened: a file that exists even
 # briefly at 0644 is a file that could have been read. This and atomic_write
 # write ONLY files Relaunch owns, all of them under the config directory --
@@ -324,7 +339,7 @@ ensure_config_dir() {
 ensure_file_with() {
   local path="$1" default="$2"
   resolve_write_target_into "$path"
-  mkdir -p "$(dirname "$_WTARGET")"
+  mkdir_for_write "$(dirname "$_WTARGET")"
   [[ -e "$_WTARGET" ]] && return 0
   (umask 077; printf '%s' "$default" >"$_WTARGET")
 }
@@ -334,7 +349,7 @@ atomic_write() {
   resolve_write_target_into "$dest"
   real="$_WTARGET"
   tmp="${real}.tmp"
-  mkdir -p "$(dirname "$real")"
+  mkdir_for_write "$(dirname "$real")"
   # The temp file is renamed into place, so ITS mode becomes the final mode.
   # Create it private and set the mode here rather than after the rename:
   # tightening afterwards would leave a readable window, and a rename does not

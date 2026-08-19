@@ -2154,6 +2154,16 @@ chmod 600 "$MODE/cfg/config.json"
 [[ "$(stat -c '%a' "$MODE/cfg/last-session.json")" == "600" ]] \
   || fail "the window-title snapshot must be CREATED 0600, got $(stat -c '%a' "$MODE/cfg/last-session.json")"
 
+# The DIRECTORY too, on a command that writes before ensure_hooks has ever
+# run. snapshot creates the config dir through the write path, which used a
+# bare mkdir and so took the ambient umask: under 022 a fresh install got a
+# 0755 directory until some later ensure_hooks tightened it. Deliberately not
+# ensure-hooks here -- that would tighten the directory and hide the defect.
+rm -rf "$MODE/cfg"
+( umask 022; modeenv snapshot >/dev/null 2>&1 )
+[[ "$(stat -c '%a' "$MODE/cfg")" == "700" ]] \
+  || fail "a write before ensure-hooks must still create the dir 0700, got $(stat -c '%a' "$MODE/cfg")"
+
 
 # --- owned boot module (github issue #19, closes #5) ---
 OB="$WORKDIR/ownedboot"
