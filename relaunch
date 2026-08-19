@@ -281,12 +281,62 @@ load_config_json() {
   jq -e "$jq_lib"' load_config' "$path" || die "parse config: $path"
 }
 
+# The path a write should actually land on. A rename replaces whatever sits
+# at the destination, so renaming onto a symlink destroys the link and
+# silently disconnects a dotfiles-managed file. Resolve the chain first and
+# rename onto the *target*, leaving the user-facing symlink untouched.
+#
+# The `[[ -L ]]` test is a builtin, so the ordinary regular-file case costs
+# nothing; readlink only runs for a path that really is a link.
+resolve_write_target_into() {
+  local path="$1" target
+  [[ -L "$path" ]] || { _WTARGET="$path"; return 0; }
+  target="$(readlink -f -- "$path" 2>/dev/null || true)"
+  [[ -n "$target" ]] || target="$(readlink -m -- "$path" 2>/dev/null || true)"
+  [[ -n "$target" ]] || die "cannot resolve symlink, refusing to replace it: $path"
+  _WTARGET="$target"
+}
+
+# Create PATH (through any symlink) with DEFAULT content if it does not
+# already exist, making the *resolved* target's parent first. Plain
+# redirection follows a symlink but still fails when the target's directory
+# is missing, which is exactly the dangling-into-an-absent-dotfiles-dir case.
+ensure_file_with() {
+  local path="$1" default="$2"
+  resolve_write_target_into "$path"
+  mkdir -p "$(dirname "$_WTARGET")"
+  [[ -e "$_WTARGET" ]] && return 0
+  printf '%s' "$default" >"$_WTARGET"
+}
+
 atomic_write() {
-  local dest="$1"
-  local tmp="${dest}.tmp"
-  mkdir -p "$(dirname "$dest")"
+  local dest="$1" real tmp
+  resolve_write_target_into "$dest"
+  real="$_WTARGET"
+  tmp="${real}.tmp"
+  mkdir -p "$(dirname "$real")"
   cat >"$tmp"
-  mv -f "$tmp" "$dest"
+  # A rename does not carry the destination's mode, so a 0444 file would come
+  # back 0644. Copy it across before replacing.
+  [[ -e "$real" ]] && chmod --reference="$real" "$tmp" 2>/dev/null
+  mv -f "$tmp" "$real"
+}
+
+# Rewrite a file in place through any symlink, feeding it to a filter.
+# Every rewriter goes through here so symlink preservation, same-directory
+# temp files and mode preservation are decided in one place.
+rewrite_through_link() {
+  local path="$1"
+  shift
+  local real tmp
+  [[ -e "$path" ]] || return 0
+  resolve_write_target_into "$path"
+  real="$_WTARGET"
+  [[ -f "$real" ]] || return 0
+  tmp="${real}.rl.tmp"
+  "$@" <"$real" >"$tmp" || { rm -f "$tmp"; die "could not rewrite $real"; }
+  chmod --reference="$real" "$tmp" 2>/dev/null
+  mv -f "$tmp" "$real"
 }
 
 config_skip_once() {
@@ -317,17 +367,23 @@ write_config_from_json() {
   jq "$jq_lib"' dump_config' | atomic_write "$(config_path)"
 }
 
+_strip_legacy_conf_filter() {
+  local snippet="$1"
+  grep -vF "source = $snippet" | grep -vx '# omarchy-relaunch' || true
+}
+
 remove_legacy_conf() {
   # Older installs wrote windowrulev2 to relaunch.conf and sourced it from
   # hyprland.conf. Pins now live only in relaunch.lua; drop the leftover
   # file and source line so both install paths stay on one mechanism.
   rm -f "$(snippet_path)" "$(snippet_path).tmp"
-  local hypr_conf="${RELAUNCH_HYPR_CONF:-$HOME/.config/hypr/hyprland.conf}" tmp
+  local hypr_conf="${RELAUNCH_HYPR_CONF:-$HOME/.config/hypr/hyprland.conf}"
   [[ -f "$hypr_conf" ]] || return 0
   if grep -qF "source = $(snippet_path)" "$hypr_conf" || grep -qx '# omarchy-relaunch' "$hypr_conf"; then
-    tmp="$(mktemp)"
-    grep -vF "source = $(snippet_path)" "$hypr_conf" | grep -vx '# omarchy-relaunch' >"$tmp" || true
-    mv -f "$tmp" "$hypr_conf"
+    # Through the resolver like every other writer: a symlinked hyprland.conf
+    # was replaced by a regular file here, and the /tmp move was
+    # cross-filesystem.
+    rewrite_through_link "$hypr_conf" _strip_legacy_conf_filter "$(snippet_path)"
   fi
 }
 
@@ -1315,12 +1371,9 @@ class_for_startup_exec() {
 }
 
 ensure_overrides_file() {
-  local p
-  p="$(overrides_path)"
   mkdir -p "$(config_dir)"
-  if [[ ! -f "$p" ]]; then
-    printf '{}\n' >"$p"
-  fi
+  ensure_file_with "$(overrides_path)" '{}
+'
 }
 
 load_overrides_json() {
@@ -2336,8 +2389,29 @@ cmd_drop() {
   if $json_out; then emit_state; else printf 'Removed %s from relaunch\n' "$class"; fi
 }
 
+# True when this line is the startup call named by kind+exec.
+_drop_startup_matches() {
+  local kind="$1" want="$2" line="$3"
+  [[ "$line" =~ ^[[:space:]]*-- ]] && return 1
+  if [[ "$kind" == launch_on_start && "$line" =~ o\.launch_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
+    [[ "${BASH_REMATCH[1]}" == "$want" ]] && return 0
+  fi
+  if [[ "$kind" == exec_on_start && "$line" =~ o\.exec_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
+    [[ "${BASH_REMATCH[1]}" == "$want" ]] && return 0
+  fi
+  return 1
+}
+
+_drop_startup_filter() {
+  local kind="$1" want="$2" line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    _drop_startup_matches "$kind" "$want" "$line" && continue
+    printf '%s\n' "$line"
+  done
+}
+
 cmd_drop_startup() {
-  local id kind exec file tmp kept=0
+  local id kind exec file line kept=0
   id="$(arg_value --id "$@" || true)"
   [[ -n "$id" ]] || die "drop-startup requires --id"
   kind="${id#*:}"
@@ -2345,25 +2419,17 @@ cmd_drop_startup() {
   exec="${id#*:}"
   exec="${exec#*:}"
   file="$(autostart_path)"
-  [[ -f "$file" ]] || die "no autostart file: $file"
-  tmp="$(mktemp)"
+  [[ -e "$file" ]] || die "no autostart file: $file"
+  # Confirm the line exists before rewriting, so a bad --id still errors
+  # rather than silently rewriting the file unchanged.
+  kept=0
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ ^[[:space:]]*-- ]]; then
-      printf '%s\n' "$line" >>"$tmp"
-      continue
-    fi
-    if [[ "$kind" == launch_on_start && "$line" =~ o\.launch_on_start\([[:space:]]*\"([^\"]+)\" && "${BASH_REMATCH[1]}" == "$exec" ]]; then
-      kept=1
-      continue
-    fi
-    if [[ "$kind" == exec_on_start && "$line" =~ o\.exec_on_start\([[:space:]]*\"([^\"]+)\" && "${BASH_REMATCH[1]}" == "$exec" ]]; then
-      kept=1
-      continue
-    fi
-    printf '%s\n' "$line" >>"$tmp"
+    _drop_startup_matches "$kind" "$exec" "$line" && { kept=1; break; }
   done <"$file"
   [[ "$kept" == 1 ]] || die "startup line not found: $id"
-  mv -f "$tmp" "$file"
+  # Through the resolver: this renamed a /tmp file straight onto a possibly
+  # symlinked autostart.lua.
+  rewrite_through_link "$file" _drop_startup_filter "$kind" "$exec"
   if $json_out; then emit_state; else printf 'Deleted startup config: %s\n' "$exec"; fi
 }
 
@@ -2414,24 +2480,6 @@ hyprland_hook_line() {
   printf '%s\n' 'local _rl = (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/omarchy-relaunch/relaunch.lua"; local _f = io.open(_rl); if _f then _f:close(); dofile(_rl) end'
 }
 
-remove_managed_block() {
-  local file="$1" tmp
-  [[ -f "$file" ]] || return 0
-  tmp="$(mktemp)"
-  # Drop only our marker comment and the immediately following line when
-  # that line is our hook (relaunch boot) or our dofile. Never eat the next
-  # user launch/source line just because it sits under the comment.
-  awk '
-    /^[[:space:]]*-- omarchy-relaunch/ { pending=1; next }
-    pending {
-      pending=0
-      if ($0 ~ /relaunch boot/ || $0 ~ /omarchy-relaunch\/relaunch\.lua/) next
-    }
-    { print }
-  ' "$file" >"$tmp"
-  mv -f "$tmp" "$file"
-}
-
 cmd_uninstall() {
   local yes=false a
   for a in "$@"; do
@@ -2464,6 +2512,38 @@ cmd_uninstall() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# One definition of what a managed hook looks like, shared by counting,
+# stripping and uninstall. Previously these disagreed: counting allowed any
+# whitespace after `--` while removal required exactly one space, and both
+# matched the bare words `relaunch boot` anywhere on a line -- which deleted
+# a user's comment and an unrelated `notify-send relaunch boot ran` command.
+#
+# A hook line is an o.exec_on_start/o.launch_on_start CALL whose quoted
+# command is one is_relaunch_exec would hide from the inventory. Nothing else
+# is ever a candidate for adoption or deletion.
+# Narrow and unchanged in behaviour: drop our exact marker comment and the
+# line immediately below it when that line is our own hook. It never
+# classifies user Lua. Routed through rewrite_through_link so a symlinked
+# autostart.lua or hyprland.lua keeps its link -- that is issue #2.
+remove_managed_block() {
+  rewrite_through_link "$1" _remove_managed_block_filter
+}
+
+_remove_managed_block_filter() {
+  # Drop only our marker comment and the immediately following line when
+  # that line is our hook (relaunch boot) or our dofile. Never eat the next
+  # user launch/source line just because it sits under the comment.
+  awk '
+    /^[[:space:]]*-- omarchy-relaunch/ { pending=1; next }
+    pending {
+      pending=0
+      if ($0 ~ /relaunch boot/ || $0 ~ /omarchy-relaunch\/relaunch\.lua/) next
+    }
+    { print }
+  '
+}
+
 ensure_hooks() {
   local auto lua bin hook
   auto="$(autostart_path)"
@@ -2474,7 +2554,11 @@ ensure_hooks() {
   remove_legacy_conf
   # Create the rules file before touching hyprland.lua. Hyprland reloads
   # as soon as that file changes; dofile of a missing path is a hard error.
-  [[ -f "$(lua_path)" ]] || printf 'return\n' >"$(lua_path)"
+  # Through the resolver: relaunch.lua is ours, and a user may symlink the
+  # config dir into a dotfiles repo. Plain redirection follows a link but
+  # still fails when the target's directory does not exist yet.
+  ensure_file_with "$(lua_path)" 'return
+'
   if [[ -f "$auto" ]] && ! grep -q 'omarchy-relaunch' "$auto"; then
     {
       printf '\n'
