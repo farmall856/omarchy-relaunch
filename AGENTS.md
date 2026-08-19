@@ -252,13 +252,24 @@ stable. `Panel.qml` parses that object.
   `mv` is not. Temp files go **beside the resolved target**, never `mktemp`
   in `/tmp`, or the move is cross-filesystem and not atomic either.
 - `ensure_hooks` creates as well as repairs, and is idempotent from any
-  starting state: exactly one boot hook, one marker, one generated-rule hook.
-  Detection matches the **exact** hook line, not an `omarchy-relaunch`
-  substring — a leftover marker comment is not proof the hook is valid — and
-  a hand-written unmarked `relaunch boot` line is removed rather than left to
-  launch every entry a second time. One `awk` pass per file reports all three
-  counts, so the already-correct case costs the same one fork it always did.
-  This runs on every `list` and `save`; do not put work back on it.
+  starting state: exactly one marker immediately followed by exactly one
+  hook, in `autostart.lua` and in `hyprland.lua`. Both files run the *same*
+  function (`ensure_one_managed_block`) — count, strip all, write one — so
+  "symmetric" is a fact about the code rather than a resemblance.
+  A valid block requires the exact hook line, a marker, **and adjacency**: a
+  marker over a commented-out hook executes nothing, and a marker separated
+  from its hook by a user line is not a block. Strip and append happen in one
+  rewrite, never append-after-strip, because appending needs write permission
+  on the file and a deliberately read-only `0444` config would refuse it.
+- **What counts as our hook, and nothing else may.** A managed line is an
+  `o.exec_on_start`/`o.launch_on_start` **call** whose program is `relaunch`
+  and whose first argument is `boot`. Not `is_relaunch_exec` — that hides
+  anything mentioning relaunch anywhere in the command, which is right for an
+  inventory, where hiding one row too many is cosmetic, and catastrophic as a
+  deletion rule: it matches `notify-send relaunch boot ran`. A comment, a
+  string, or a command that merely contains the words is user content and is
+  never adopted, counted or deleted. Deleting user content is worse than the
+  duplicate-launch bug this repairs.
 - Persist with temp-file + rename (`config.json.tmp`, `relaunch.lua.tmp`).
 - Everything runs as the user. No sudo, no IPC beyond `hyprctl` and the
   `relaunch` script on `PATH`.
@@ -280,6 +291,20 @@ stable. `Panel.qml` parses that object.
 - Existing startup lines are not deleted unless the user chooses "Delete
   startup config". "Leave alone" records the id in `ignored` and still
   shows the row when editing.
+- **Narrow ownership exception to the rule above: Relaunch's own boot hook.**
+  `ensure_hooks` replaces a hand-written `o.exec_on_start("relaunch boot")`
+  with the managed block, which is a deletion the user did not ask for. It is
+  justified only because that rule protects lines the *panel can show*, and
+  `is_relaunch_exec` deliberately hides relaunch hooks from that inventory —
+  so the user cannot manage this line through the UI, and leaving it would
+  launch every entry twice. The exception covers this one line and nothing
+  else.
+  Be clear about what changes: the replacement is not equivalent. The user's
+  line runs whatever `relaunch` PATH resolves to; ours runs an absolute
+  `$SELF`. That is deliberate — plugin-manager installs put no script on PATH,
+  and a stale `~/.local/bin/relaunch` from an older install would otherwise
+  win. **Uninstall does not restore the user's original line**; it removes
+  the managed block and leaves the file without a boot hook.
 
 ## QML conventions
 

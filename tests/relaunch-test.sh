@@ -1776,8 +1776,15 @@ ehrun() {
     RELAUNCH_HYPRLAND_LUA="$EH/hyprland.lua" RELAUNCH_HYPR_CONF="$EH/hyprland.conf" \
     RELAUNCH_PLUGIN_DIR="$EH/plugin" "$RELAUNCH" ensure-hooks >/dev/null 2>&1
 }
-boots() { grep -c 'relaunch[[:space:]]*boot' "$EH/autostart.lua"; }
-marks() { grep -c -- '-- omarchy-relaunch' "$EH/autostart.lua"; }
+# Count real managed hook CALLS, not lines that merely contain the words:
+# a comment or an unrelated command mentioning "relaunch boot" is user
+# content and must never be counted, adopted or deleted.
+# The PROGRAM must be relaunch, not merely a command mentioning it:
+# `echo relaunch boot` is user content, not a hook.
+# Properly closed call only: an unterminated `o.exec_on_start("relaunch boot`
+# is broken user text, not a hook that executes.
+boots() { grep -cE '^[[:space:]]*o\.(exec|launch)_on_start\("([^"]*/)?relaunch boot"\)' "$EH/autostart.lua"; }
+marks() { grep -cE '^[[:space:]]*--[[:space:]]*omarchy-relaunch' "$EH/autostart.lua"; }
 
 # Fresh config, both files absent: they must be created and wired, not
 # silently skipped.
@@ -1812,11 +1819,15 @@ ehrun
 [[ "$(marks)" -eq 1 ]] || fail "repair must leave exactly one marker, got $(marks)"
 grep -q 'sunsetr' "$EH/autostart.lua" || fail "repair ate an unrelated autostart line"
 
-# A malformed hook line under the marker is repaired too.
+# A marker over a malformed line is repaired: the block is restored. The
+# malformed line is NOT a valid call, so it is user text and must survive --
+# deleting it would be the same defect as deleting a comment.
 printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
   'o.exec_on_start("relaunch boot --nonsense' >"$EH/autostart.lua"
 ehrun
-[[ "$(boots)" -eq 1 ]] || fail "a malformed managed hook must be repaired, got $(boots)"
+[[ "$(boots)" -eq 1 ]] || fail "a marker over a malformed line must yield one valid hook, got $(boots)"
+grep -q 'nonsense' "$EH/autostart.lua" \
+  || fail "a malformed line is user content and must not be deleted"
 
 # A hand-written unmarked hook must not coexist with ours: that launches
 # every entry twice.
@@ -1834,6 +1845,161 @@ printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
 ehrun
 [[ "$(boots)" -eq 1 && "$(marks)" -eq 1 ]] \
   || fail "duplicate managed blocks must collapse to one, got $(boots)/$(marks)"
+
+# --- repair must never delete user content (PR #18 review) ---
+# The previous strip matched /relaunch[[:space:]]+boot/ on ANY line, so a
+# comment and an unrelated command were destroyed. Only a real
+# o.exec_on_start / o.launch_on_start call whose PROGRAM is relaunch and
+# whose first argument is boot may ever be adopted.
+cat >"$EH/autostart.lua" <<'EOF'
+-- reminder: relaunch boot is hidden from the list
+o.launch_on_start("brave")
+o.exec_on_start("notify-send relaunch boot ran")
+o.exec_on_start("echo relaunch boot")
+o.launch_on_start("signal")
+o.exec_on_start("/elsewhere/relaunch boot")
+EOF
+ehrun
+grep -q 'reminder: relaunch boot is hidden' "$EH/autostart.lua" \
+  || fail "repair deleted a comment mentioning relaunch boot"
+grep -q 'notify-send relaunch boot ran' "$EH/autostart.lua" \
+  || fail "repair deleted an unrelated command mentioning relaunch boot"
+grep -q 'echo relaunch boot' "$EH/autostart.lua" \
+  || fail "repair deleted a command whose arguments mention relaunch boot"
+grep -q 'brave' "$EH/autostart.lua" || fail "repair deleted an unrelated launch line"
+grep -q 'signal' "$EH/autostart.lua" || fail "repair deleted an unrelated launch line"
+grep -q '/elsewhere/relaunch boot' "$EH/autostart.lua" \
+  && fail "the real duplicate hook should have been adopted"
+[[ "$(boots)" -eq 1 ]] || fail "exactly one managed hook after adoption, got $(boots)"
+
+# Full-line exactness: a hook whose SELF path moved is repaired, not accepted.
+printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
+  'o.exec_on_start("/old/path/relaunch boot")' >"$EH/autostart.lua"
+ehrun
+grep -q '/old/path/relaunch boot' "$EH/autostart.lua" \
+  && fail "a hook pointing at a moved script must be replaced, not kept"
+[[ "$(boots)" -eq 1 ]] || fail "moved-hook repair must leave one hook, got $(boots)"
+
+# A marker over a COMMENTED canonical line is not a valid block: nothing
+# executes, so it must be repaired rather than counted as present.
+printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
+  "-- o.exec_on_start(\"$RELAUNCH boot\")" >"$EH/autostart.lua"
+ehrun
+[[ "$(boots)" -eq 1 ]] || fail "a commented-out hook must not count as present, got $(boots)"
+
+# Marker/hook adjacency: a user line between them is not a valid block.
+printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
+  'o.launch_on_start("sunsetr")' "o.exec_on_start(\"$RELAUNCH boot\")" >"$EH/autostart.lua"
+ehrun
+[[ "$(boots)" -eq 1 && "$(marks)" -eq 1 ]] \
+  || fail "a marker separated from its hook must be repaired, got $(boots)/$(marks)"
+grep -q 'sunsetr' "$EH/autostart.lua" || fail "adjacency repair ate a user line"
+# …and the marker must now sit directly above the hook.
+awk '/^[[:space:]]*--[[:space:]]*omarchy-relaunch/ { getline nxt; if (nxt !~ /relaunch boot/) exit 1 }' \
+  "$EH/autostart.lua" || fail "after repair the marker must be immediately followed by the hook"
+
+# The hyprland branch must collapse duplicates the same way autostart does.
+ehrun
+cp "$EH/hyprland.lua" "$EH/h.bak"
+cat "$EH/h.bak" "$EH/h.bak" >"$EH/hyprland.lua"
+[[ "$(grep -c 'omarchy-relaunch/relaunch.lua' "$EH/hyprland.lua")" -eq 2 ]] \
+  || fail "fixture should start with two dofile hooks"
+ehrun
+[[ "$(grep -c 'omarchy-relaunch/relaunch.lua' "$EH/hyprland.lua")" -eq 1 ]] \
+  || fail "duplicate dofile hooks must collapse to one, got $(grep -c 'omarchy-relaunch/relaunch.lua' "$EH/hyprland.lua")"
+[[ "$(grep -cE '^[[:space:]]*--[[:space:]]*omarchy-relaunch' "$EH/hyprland.lua")" -eq 1 ]] \
+  || fail "duplicate dofile blocks must leave exactly one marker"
+# An unmarked dofile hook gains its marker, like autostart insists on.
+printf '%s\n' 'require("hypr.autostart")' "$(sed -n 's/.*\(local _rl.*\)/\1/p' "$EH/hyprland.lua" | head -1)" \
+  >"$EH/hyprland.lua"
+ehrun
+[[ "$(grep -c 'omarchy-relaunch/relaunch.lua' "$EH/hyprland.lua")" -eq 1 ]] \
+  || fail "an unmarked dofile hook must not be duplicated"
+
+# uninstall must remove a hook separated from its marker, and an unmarked
+# one. remove_managed_block only looked at the line directly below.
+printf '%s\n' 'o.launch_on_start("sunsetr")' \
+  '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
+  'o.launch_on_start("brave")' "o.exec_on_start(\"$RELAUNCH boot\")" >"$EH/autostart.lua"
+env RELAUNCH_CONFIG_DIR="$EH/cfg" RELAUNCH_AUTOSTART="$EH/autostart.lua" \
+  RELAUNCH_HYPRLAND_LUA="$EH/hyprland.lua" RELAUNCH_HYPR_CONF="$EH/hyprland.conf" \
+  RELAUNCH_PLUGIN_DIR="$EH/plugin" "$RELAUNCH" uninstall --yes >/dev/null 2>&1
+[[ "$(boots)" -eq 0 ]] || fail "uninstall must remove a hook separated from its marker, got $(boots)"
+grep -q 'sunsetr' "$EH/autostart.lua" || fail "uninstall ate an unrelated line"
+grep -q 'brave' "$EH/autostart.lua" || fail "uninstall ate an unrelated line"
+
+# --- dangling link whose TARGET PARENT does not exist (PR #18 review) ---
+# The earlier fixture created the target directory first, so it missed this:
+# plain redirection follows a symlink but still fails when the target's
+# directory is absent, which is the ordinary "dotfiles repo not cloned yet"
+# shape.
+MP="$WORKDIR/missingparent"
+rm -rf "$MP"; mkdir -p "$MP"
+ln -s "$MP/dotfiles/hypr/autostart.lua" "$MP/autostart.lua"
+ln -s "$MP/dotfiles/hypr/hyprland.lua" "$MP/hyprland.lua"
+ln -s "$MP/dotfiles/rl/overrides.json" "$MP/cfg-overrides.json"
+mkdir -p "$MP/cfg"
+ln -sf "$MP/dotfiles/rl/relaunch.lua" "$MP/cfg/relaunch.lua"
+( export RELAUNCH_CONFIG_DIR="$MP/cfg" RELAUNCH_AUTOSTART="$MP/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$MP/hyprland.lua" RELAUNCH_HYPR_CONF="$MP/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$MP/plugin"
+  "$RELAUNCH" ensure-hooks >/dev/null 2>&1 ) \
+  || fail "ensure-hooks must survive a dangling link into a missing directory"
+[[ -L "$MP/autostart.lua" ]] || fail "the link must survive a missing target parent"
+[[ -f "$MP/dotfiles/hypr/autostart.lua" ]] \
+  || fail "the target parent must be created and the target written"
+grep -q 'relaunch boot' "$MP/dotfiles/hypr/autostart.lua" \
+  || fail "the hook must reach a target whose parent had to be created"
+[[ -f "$MP/dotfiles/hypr/hyprland.lua" ]] || fail "hyprland.lua target must be created too"
+[[ -L "$MP/cfg/relaunch.lua" && -f "$MP/dotfiles/rl/relaunch.lua" ]] \
+  || fail "the generated-rules file must be created through its link"
+
+# --- the two writers that bypassed the resolver (PR #18 review) ---
+# remove_legacy_conf and drop-startup both did mktemp + mv onto the user path.
+BP="$WORKDIR/bypass"
+rm -rf "$BP"; mkdir -p "$BP/dotfiles" "$BP/cfg"
+printf '%s\n' '# keep me' "source = $BP/cfg/relaunch.conf" '# omarchy-relaunch' '# also keep' \
+  >"$BP/dotfiles/hyprland.conf"
+ln -sf "$BP/dotfiles/hyprland.conf" "$BP/hyprland.conf"
+printf '%s\n' '-- Extra autostart processes.' 'o.launch_on_start("brave")' 'o.launch_on_start("signal")' \
+  >"$BP/dotfiles/autostart.lua"
+ln -sf "$BP/dotfiles/autostart.lua" "$BP/autostart.lua"
+printf 'windowrulev2 leftover\n' >"$BP/cfg/relaunch.conf"
+bprun() {
+  env RELAUNCH_CONFIG_DIR="$BP/cfg" RELAUNCH_AUTOSTART="$BP/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$BP/hyprland.lua" RELAUNCH_HYPR_CONF="$BP/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$BP/plugin" "$RELAUNCH" "$@"
+}
+bprun ensure-hooks >/dev/null 2>&1
+[[ -L "$BP/hyprland.conf" ]] \
+  || fail "remove_legacy_conf replaced a symlinked hyprland.conf with a regular file"
+grep -q 'omarchy-relaunch' "$BP/dotfiles/hyprland.conf" \
+  && fail "the legacy marker must be removed from the target"
+grep -q 'relaunch.conf' "$BP/dotfiles/hyprland.conf" \
+  && fail "the legacy source line must be removed from the target"
+grep -q '# keep me' "$BP/dotfiles/hyprland.conf" || fail "legacy cleanup ate an unrelated line"
+grep -q '# also keep' "$BP/dotfiles/hyprland.conf" || fail "legacy cleanup ate an unrelated line"
+
+bprun drop-startup --id 'lua:launch_on_start:brave' >/dev/null 2>&1 \
+  || fail "drop-startup failed against a symlinked autostart.lua"
+[[ -L "$BP/autostart.lua" ]] \
+  || fail "drop-startup replaced a symlinked autostart.lua with a regular file"
+grep -q 'brave' "$BP/dotfiles/autostart.lua" && fail "drop-startup must remove the named line"
+grep -q 'signal' "$BP/dotfiles/autostart.lua" || fail "drop-startup ate an unrelated line"
+bprun drop-startup --id 'lua:launch_on_start:nosuchthing' >/dev/null 2>&1 \
+  && fail "drop-startup must still fail on an unknown id"
+
+# --- file mode survives a rewrite ---
+MODE="$WORKDIR/modes"
+rm -rf "$MODE"; mkdir -p "$MODE/cfg"
+printf '%s\n' '-- Extra autostart processes.' >"$MODE/autostart.lua"
+chmod 0444 "$MODE/autostart.lua"
+( export RELAUNCH_CONFIG_DIR="$MODE/cfg" RELAUNCH_AUTOSTART="$MODE/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$MODE/hyprland.lua" RELAUNCH_HYPR_CONF="$MODE/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$MODE/plugin"
+  "$RELAUNCH" ensure-hooks >/dev/null 2>&1 )
+[[ "$(stat -c '%a' "$MODE/autostart.lua")" == "444" ]] \
+  || fail "a rewrite must preserve file mode, got $(stat -c '%a' "$MODE/autostart.lua")"
 
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"

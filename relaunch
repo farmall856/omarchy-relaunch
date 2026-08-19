@@ -288,6 +288,27 @@ load_config_json() {
 #
 # The `[[ -L ]]` test is a builtin, so the ordinary regular-file case costs
 # nothing; readlink only runs for a path that really is a link.
+resolve_write_target_into() {
+  local path="$1" target
+  [[ -L "$path" ]] || { _WTARGET="$path"; return 0; }
+  target="$(readlink -f -- "$path" 2>/dev/null || true)"
+  [[ -n "$target" ]] || target="$(readlink -m -- "$path" 2>/dev/null || true)"
+  [[ -n "$target" ]] || die "cannot resolve symlink, refusing to replace it: $path"
+  _WTARGET="$target"
+}
+
+# Create PATH (through any symlink) with DEFAULT content if it does not
+# already exist, making the *resolved* target's parent first. Plain
+# redirection follows a symlink but still fails when the target's directory
+# is missing, which is exactly the dangling-into-an-absent-dotfiles-dir case.
+ensure_file_with() {
+  local path="$1" default="$2"
+  resolve_write_target_into "$path"
+  mkdir -p "$(dirname "$_WTARGET")"
+  [[ -e "$_WTARGET" ]] && return 0
+  printf '%s' "$default" >"$_WTARGET"
+}
+
 resolve_write_target() {
   local path="$1" target
   [[ -L "$path" ]] || { printf '%s\n' "$path"; return 0; }
@@ -304,10 +325,31 @@ resolve_write_target() {
 
 atomic_write() {
   local dest="$1" real tmp
-  real="$(resolve_write_target "$dest")"
+  resolve_write_target_into "$dest"
+  real="$_WTARGET"
   tmp="${real}.tmp"
   mkdir -p "$(dirname "$real")"
   cat >"$tmp"
+  # A rename does not carry the destination's mode, so a 0444 file would come
+  # back 0644. Copy it across before replacing.
+  [[ -e "$real" ]] && chmod --reference="$real" "$tmp" 2>/dev/null
+  mv -f "$tmp" "$real"
+}
+
+# Rewrite a file in place through any symlink, feeding it to a filter.
+# Every rewriter goes through here so symlink preservation, same-directory
+# temp files and mode preservation are decided in one place.
+rewrite_through_link() {
+  local path="$1"
+  shift
+  local real tmp
+  [[ -e "$path" ]] || return 0
+  resolve_write_target_into "$path"
+  real="$_WTARGET"
+  [[ -f "$real" ]] || return 0
+  tmp="${real}.rl.tmp"
+  "$@" <"$real" >"$tmp" || { rm -f "$tmp"; die "could not rewrite $real"; }
+  chmod --reference="$real" "$tmp" 2>/dev/null
   mv -f "$tmp" "$real"
 }
 
@@ -339,17 +381,23 @@ write_config_from_json() {
   jq "$jq_lib"' dump_config' | atomic_write "$(config_path)"
 }
 
+_strip_legacy_conf_filter() {
+  local snippet="$1"
+  grep -vF "source = $snippet" | grep -vx '# omarchy-relaunch' || true
+}
+
 remove_legacy_conf() {
   # Older installs wrote windowrulev2 to relaunch.conf and sourced it from
   # hyprland.conf. Pins now live only in relaunch.lua; drop the leftover
   # file and source line so both install paths stay on one mechanism.
   rm -f "$(snippet_path)" "$(snippet_path).tmp"
-  local hypr_conf="${RELAUNCH_HYPR_CONF:-$HOME/.config/hypr/hyprland.conf}" tmp
+  local hypr_conf="${RELAUNCH_HYPR_CONF:-$HOME/.config/hypr/hyprland.conf}"
   [[ -f "$hypr_conf" ]] || return 0
   if grep -qF "source = $(snippet_path)" "$hypr_conf" || grep -qx '# omarchy-relaunch' "$hypr_conf"; then
-    tmp="$(mktemp)"
-    grep -vF "source = $(snippet_path)" "$hypr_conf" | grep -vx '# omarchy-relaunch' >"$tmp" || true
-    mv -f "$tmp" "$hypr_conf"
+    # Through the resolver like every other writer: a symlinked hyprland.conf
+    # was replaced by a regular file here, and the /tmp move was
+    # cross-filesystem.
+    rewrite_through_link "$hypr_conf" _strip_legacy_conf_filter "$(snippet_path)"
   fi
 }
 
@@ -1337,12 +1385,9 @@ class_for_startup_exec() {
 }
 
 ensure_overrides_file() {
-  local p
-  p="$(overrides_path)"
   mkdir -p "$(config_dir)"
-  if [[ ! -f "$p" ]]; then
-    printf '{}\n' >"$p"
-  fi
+  ensure_file_with "$(overrides_path)" '{}
+'
 }
 
 load_overrides_json() {
@@ -2358,8 +2403,29 @@ cmd_drop() {
   if $json_out; then emit_state; else printf 'Removed %s from relaunch\n' "$class"; fi
 }
 
+# True when this line is the startup call named by kind+exec.
+_drop_startup_matches() {
+  local kind="$1" want="$2" line="$3"
+  [[ "$line" =~ ^[[:space:]]*-- ]] && return 1
+  if [[ "$kind" == launch_on_start && "$line" =~ o\.launch_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
+    [[ "${BASH_REMATCH[1]}" == "$want" ]] && return 0
+  fi
+  if [[ "$kind" == exec_on_start && "$line" =~ o\.exec_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
+    [[ "${BASH_REMATCH[1]}" == "$want" ]] && return 0
+  fi
+  return 1
+}
+
+_drop_startup_filter() {
+  local kind="$1" want="$2" line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    _drop_startup_matches "$kind" "$want" "$line" && continue
+    printf '%s\n' "$line"
+  done
+}
+
 cmd_drop_startup() {
-  local id kind exec file tmp kept=0
+  local id kind exec file line kept=0
   id="$(arg_value --id "$@" || true)"
   [[ -n "$id" ]] || die "drop-startup requires --id"
   kind="${id#*:}"
@@ -2367,25 +2433,17 @@ cmd_drop_startup() {
   exec="${id#*:}"
   exec="${exec#*:}"
   file="$(autostart_path)"
-  [[ -f "$file" ]] || die "no autostart file: $file"
-  tmp="$(mktemp)"
+  [[ -e "$file" ]] || die "no autostart file: $file"
+  # Confirm the line exists before rewriting, so a bad --id still errors
+  # rather than silently rewriting the file unchanged.
+  kept=0
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ ^[[:space:]]*-- ]]; then
-      printf '%s\n' "$line" >>"$tmp"
-      continue
-    fi
-    if [[ "$kind" == launch_on_start && "$line" =~ o\.launch_on_start\([[:space:]]*\"([^\"]+)\" && "${BASH_REMATCH[1]}" == "$exec" ]]; then
-      kept=1
-      continue
-    fi
-    if [[ "$kind" == exec_on_start && "$line" =~ o\.exec_on_start\([[:space:]]*\"([^\"]+)\" && "${BASH_REMATCH[1]}" == "$exec" ]]; then
-      kept=1
-      continue
-    fi
-    printf '%s\n' "$line" >>"$tmp"
+    _drop_startup_matches "$kind" "$exec" "$line" && { kept=1; break; }
   done <"$file"
   [[ "$kept" == 1 ]] || die "startup line not found: $id"
-  mv -f "$tmp" "$file"
+  # Through the resolver: this renamed a /tmp file straight onto a possibly
+  # symlinked autostart.lua.
+  rewrite_through_link "$file" _drop_startup_filter "$kind" "$exec"
   if $json_out; then emit_state; else printf 'Deleted startup config: %s\n' "$exec"; fi
 }
 
@@ -2436,28 +2494,6 @@ hyprland_hook_line() {
   printf '%s\n' 'local _rl = (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/omarchy-relaunch/relaunch.lua"; local _f = io.open(_rl); if _f then _f:close(); dofile(_rl) end'
 }
 
-remove_managed_block() {
-  local file="$1" real tmp
-  [[ -e "$file" ]] || return 0
-  real="$(resolve_write_target "$file")"
-  [[ -f "$real" ]] || return 0
-  # Beside the resolved target, not mktemp's /tmp: a cross-filesystem mv is
-  # a copy plus unlink, so it is neither atomic nor symlink-preserving.
-  tmp="${real}.rl.tmp"
-  # Drop only our marker comment and the immediately following line when
-  # that line is our hook (relaunch boot) or our dofile. Never eat the next
-  # user launch/source line just because it sits under the comment.
-  awk '
-    /^[[:space:]]*-- omarchy-relaunch/ { pending=1; next }
-    pending {
-      pending=0
-      if ($0 ~ /relaunch boot/ || $0 ~ /omarchy-relaunch\/relaunch\.lua/) next
-    }
-    { print }
-  ' "$real" >"$tmp" || { rm -f "$tmp"; die "could not rewrite $real"; }
-  mv -f "$tmp" "$real"
-}
-
 cmd_uninstall() {
   local yes=false a
   for a in "$@"; do
@@ -2470,8 +2506,12 @@ cmd_uninstall() {
   # points at a deleted binary, and would let that ExecStop recreate the
   # config dir that uninstall had just removed.
   remove_snapshot_hook
-  remove_managed_block "$(autostart_path)"
-  remove_managed_block "$(hyprland_lua_path)"
+  # strip_managed, not remove_managed_block: the latter only looked at the
+  # line directly under a marker, so a hook separated from its marker -- or a
+  # hand-written unmarked one -- survived uninstall and kept firing at a
+  # script that had just been deleted.
+  strip_managed "$(autostart_path)" boot
+  strip_managed "$(hyprland_lua_path)" lua
   remove_legacy_conf
   rm -rf "$(config_dir)"
   local bin="${PREFIX:-$HOME/.local}/bin/relaunch"
@@ -2490,42 +2530,136 @@ cmd_uninstall() {
   fi
 }
 
-# One awk pass reporting everything the repair decision needs: how many
-# copies of the exact hook line, how many lines invoke `relaunch boot` at all
-# (managed or hand-written), and how many managed markers. One fork per file,
-# the same as the single grep this replaced -- ensure_hooks runs on every
-# list and save, and #13/#16 took that path from 18.3s to 0.5s.
-hook_counts() {
-  local hook="$1" file="$2"
-  awk -v hook="$hook" '
-    index($0, hook) { exact++ }
-    /relaunch[[:space:]]+boot/ { anyboot++ }
-    /^[[:space:]]*--[[:space:]]*omarchy-relaunch/ { marker++ }
-    END { printf "%d %d %d\n", exact + 0, anyboot + 0, marker + 0 }
-  ' "$file" 2>/dev/null || printf '0 0 0\n'
+# ---------------------------------------------------------------------------
+# One definition of what a managed hook looks like, shared by counting,
+# stripping and uninstall. Previously these disagreed: counting allowed any
+# whitespace after `--` while removal required exactly one space, and both
+# matched the bare words `relaunch boot` anywhere on a line -- which deleted
+# a user's comment and an unrelated `notify-send relaunch boot ran` command.
+#
+# A hook line is an o.exec_on_start/o.launch_on_start CALL whose quoted
+# command is one is_relaunch_exec would hide from the inventory. Nothing else
+# is ever a candidate for adoption or deletion.
+RL_MARKER_RE='^[[:space:]]*--[[:space:]]*omarchy-relaunch'
+
+# Is this command an invocation of `relaunch boot`?
+#
+# Deliberately NOT is_relaunch_exec. That predicate hides anything mentioning
+# relaunch anywhere in the command, which is right for an inventory -- hiding
+# one row too many is cosmetic -- but catastrophic as a deletion rule: it
+# matches `notify-send relaunch boot ran`, which is a user's own command.
+# Deletion requires the PROGRAM being run to be relaunch, and its first
+# argument to be boot.
+is_relaunch_boot_command() {
+  local exec="$1" prog i=0 n
+  local -a words=()
+  split_exec_words "$exec" words
+  n=${#words[@]}
+  ((n)) || return 1
+  while ((i < n)) && is_wrapper_cmd "${words[i]}"; do
+    ((i++)) || true
+  done
+  ((i < n)) || return 1
+  prog="${words[i]##*/}"
+  [[ "$prog" == relaunch ]] || return 1
+  [[ "${words[i + 1]:-}" == boot ]] || return 1
+  return 0
 }
 
-# Strip every line that invokes `relaunch boot`, plus our marker comments.
-# remove_managed_block only removes a marker and the hook directly under it,
-# which leaves a hand-written unmarked hook in place -- and that one launches
-# every entry a second time. Repair needs both gone before re-appending, so
-# the result is exactly one.
-remove_all_boot_hooks() {
-  local file="$1" real tmp
-  [[ -e "$file" ]] || return 0
-  real="$(resolve_write_target "$file")"
-  [[ -f "$real" ]] || return 0
-  tmp="${real}.rl.tmp"
-  awk '
-    /^[[:space:]]*--[[:space:]]*omarchy-relaunch/ { next }
-    /relaunch[[:space:]]+boot/ { next }
-    { print }
-  ' "$real" >"$tmp" || { rm -f "$tmp"; die "could not rewrite $real"; }
-  mv -f "$tmp" "$real"
+# Is $1 an autostart call that launches relaunch itself?
+is_managed_boot_line() {
+  local line="$1" exec=""
+  [[ "$line" =~ ^[[:space:]]*-- ]] && return 1
+  if [[ "$line" =~ o\.launch_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
+    exec="${BASH_REMATCH[1]}"
+  elif [[ "$line" =~ o\.exec_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
+    exec="${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+  is_relaunch_boot_command "$exec"
+}
+
+# Is $1 the generated-rules dofile line?
+is_managed_lua_line() {
+  local line="$1"
+  [[ "$line" =~ ^[[:space:]]*-- ]] && return 1
+  [[ "$line" == *"omarchy-relaunch/relaunch.lua"* && "$line" == *dofile* ]]
+}
+
+# Count a file's managed state: how many hook lines, how many markers, and
+# how many markers are immediately followed by their hook. A marker with a
+# commented-out canonical line, or a marker separated from its hook by a user
+# line, is not a valid block -- adjacency is checked, not assumed.
+# Prints "<hooks> <markers> <adjacent>".
+managed_counts() {
+  local file="$1" kind="$2" line hooks=0 markers=0 adjacent=0 pending=0
+  [[ -f "$file" ]] || { printf '0 0 0\n'; return 0; }
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ $RL_MARKER_RE ]]; then
+      markers=$((markers + 1))
+      pending=1
+      continue
+    fi
+    if "is_managed_${kind}_line" "$line"; then
+      hooks=$((hooks + 1))
+      ((pending)) && adjacent=$((adjacent + 1))
+    fi
+    pending=0
+  done <"$file"
+  printf '%s %s %s\n' "$hooks" "$markers" "$adjacent"
+}
+
+# Strip every managed marker and every managed hook line, leaving all other
+# content untouched. Used before re-appending exactly one block, and by
+# uninstall -- which previously removed only the line directly under a
+# marker, so a separated hook survived and kept firing at a deleted script.
+strip_managed() {
+  local file="$1" kind="$2"
+  rewrite_through_link "$file" _strip_managed_filter "$kind"
+}
+
+_strip_managed_filter() {
+  local kind="$1" line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ $RL_MARKER_RE ]] && continue
+    "is_managed_${kind}_line" "$line" && continue
+    printf '%s\n' "$line"
+  done
+}
+
+# Bring one managed block into a file: exactly one marker, immediately
+# followed by exactly one hook. Both files use this, so they are genuinely
+# the same algorithm rather than two that look alike.
+ensure_one_managed_block() {
+  local file="$1" kind="$2" marker_text="$3" hook_line="$4"
+  local hooks markers adjacent exact
+  read -r hooks markers adjacent <<<"$(managed_counts "$file" "$kind")"
+  # Our exact line must be present too, not merely some managed hook: a hook
+  # pointing at a moved SELF is repaired, not accepted.
+  exact=0
+  grep -Fqx "$hook_line" "$file" 2>/dev/null && exact=1
+  if [[ "$hooks" == 1 && "$markers" == 1 && "$adjacent" == 1 && "$exact" == 1 ]]; then
+    return 0
+  fi
+  # Strip and append in ONE rewrite, not strip-then-append. Appending would
+  # need write permission on the file itself, which a deliberately read-only
+  # 0444 autostart.lua does not give -- and mode is preserved now, so the
+  # replacement is read-only too. Rewriting also removes the window where the
+  # file briefly has no hook at all.
+  rewrite_through_link "$file" _write_managed_filter "$kind" "$marker_text" "$hook_line"
+}
+
+_write_managed_filter() {
+  local kind="$1" marker_text="$2" hook_line="$3"
+  _strip_managed_filter "$kind"
+  printf '\n'
+  printf '%s\n' "$marker_text"
+  printf '%s\n' "$hook_line"
 }
 
 ensure_hooks() {
-  local auto lua bin hook boot_hook counts exact anyboot marker
+  local auto lua bin hook boot_hook
   auto="$(autostart_path)"
   lua="$(hyprland_lua_path)"
   hook="$(hyprland_hook_line)"
@@ -2535,36 +2669,21 @@ ensure_hooks() {
   remove_legacy_conf
   # Create the rules file before touching hyprland.lua. Hyprland reloads
   # as soon as that file changes; dofile of a missing path is a hard error.
-  [[ -f "$(lua_path)" ]] || printf 'return\n' >"$(lua_path)"
+  ensure_file_with "$(lua_path)" 'return
+'
 
   # A missing file is not a reason to skip wiring: a fresh config would
-  # silently get no hook at all. Redirection writes *through* a symlink, so
-  # creating and appending are both link-safe; only a rename is not.
-  [[ -e "$auto" ]] || printf '%s\n' '-- Extra autostart processes.' >"$auto"
-  [[ -e "$lua" ]] || printf '%s\n' '-- Hyprland configuration.' >"$lua"
+  # silently get no hook at all. ensure_file_with resolves the link and makes
+  # the *target's* parent, so a dangling link into a directory that does not
+  # exist yet works instead of dying on the redirection.
+  ensure_file_with "$auto" '-- Extra autostart processes.
+'
+  ensure_file_with "$lua" '-- Hyprland configuration.
+'
 
-  # Correct means exactly one of our hook, no other `relaunch boot` line, and
-  # exactly one marker. Anything else -- a marker whose hook was deleted, a
-  # malformed line under the marker, a stray hand-written hook, or duplicates
-  # from a moved SELF -- is repaired the same way: strip them all, append one.
-  read -r exact anyboot marker <<<"$(hook_counts "$boot_hook" "$auto")"
-  if [[ "$exact" != 1 || "$anyboot" != 1 || "$marker" != 1 ]]; then
-    remove_all_boot_hooks "$auto"
-    {
-      printf '\n'
-      printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)'
-      printf '%s\n' "$boot_hook"
-    } >>"$auto"
-  fi
-
-  if ! grep -Fq "$hook" "$lua"; then
-    remove_managed_block "$lua"
-    {
-      printf '\n'
-      printf '%s\n' '-- omarchy-relaunch'
-      printf '%s\n' "$hook"
-    } >>"$lua"
-  fi
+  ensure_one_managed_block "$auto" boot \
+    '-- omarchy-relaunch (managed; hidden from the Relaunch list)' "$boot_hook"
+  ensure_one_managed_block "$lua" lua '-- omarchy-relaunch' "$hook"
 
   # Upgrade path for the withdrawn snapshot hook. An install that ran
   # `snapshot-hook --enable` before it was removed still has an enabled unit
