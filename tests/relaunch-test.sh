@@ -57,6 +57,10 @@ export RELAUNCH_HYPRLAND_LUA="$WORKDIR/hyprland.lua"
 export RELAUNCH_PLUGIN_DIR="$WORKDIR/plugin"
 export RELAUNCH_HYPR_CONF="$WORKDIR/hyprland.conf"
 export PREFIX="$WORKDIR"
+# The engine derives its canonical location from PREFIX: both the loader's
+# boot command and the self-install target come from it. PREFIX is already
+# sandboxed above, so no test can name -- or write to -- the real ~/.local/bin.
+CANONICAL_ENGINE="$PREFIX/bin/relaunch"
 export HYPRCTL="$HYPRCTL_STUB"
 mkdir -p "$RELAUNCH_CONFIG_DIR"
 : >"$RELAUNCH_AUTOSTART"
@@ -81,8 +85,8 @@ EOF
 # The boot hook lives in the owned loader now, not in the user's autostart.
 grep -q 'omarchy-relaunch' "$RELAUNCH_AUTOSTART" \
   && fail "ensure_hooks must not write anything into autostart.lua"
-grep -Fq "${RELAUNCH} boot" "$RELAUNCH_CONFIG_DIR/relaunch.lua" \
-  || fail "the loader must register the boot hook with the script path, not PATH"
+grep -Fq "${CANONICAL_ENGINE} boot" "$RELAUNCH_CONFIG_DIR/relaunch.lua" \
+  || fail "the loader must register an absolute engine path, not PATH: $(grep exec_on_start "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
 grep -q 'io.open(_rl)' "$RELAUNCH_HYPRLAND_LUA" || fail "hyprland hook must skip a missing relaunch.lua"
 [[ -f "$RELAUNCH_CONFIG_DIR/relaunch.lua" ]] || fail "ensure_hooks must create the loader"
 [[ -f "$RELAUNCH_CONFIG_DIR/rules.lua" ]] || fail "ensure_hooks must create rules.lua for the loader to read"
@@ -2165,10 +2169,80 @@ rm -rf "$MODE/cfg"
   || fail "a write before ensure-hooks must still create the dir 0700, got $(stat -c '%a' "$MODE/cfg")"
 
 
+# --- one canonical engine path (github issue #26) ---
+# $SELF is whichever copy is running. Writing it into the loader meant the bar
+# widget re-pointed boot at whatever last ran ensure_hooks, including a source
+# checkout the user can delete -- after which boot silently does nothing. And
+# the self-install fired for every copy, so ./relaunch in a checkout replaced
+# the user's installed engine with the working tree.
+#
+# The self-install is exercised here rather than skipped. It was previously
+# gated on "RELAUNCH_CONFIG_DIR is unset", which is a test-sandbox check, so
+# the path never ran under test and both defects survived. A SYMLINK at the
+# canonical location points at the copy under test: the real code path runs,
+# and cmp sees identical content so nothing is clobbered.
+CANON="$WORKDIR/canonical"
+rm -rf "$CANON"; mkdir -p "$CANON/cfg" "$CANON/plugin" "$CANON/prefix/bin" "$CANON/checkout"
+ln -s "$RELAUNCH" "$CANON/prefix/bin/relaunch"
+cp "$RELAUNCH" "$CANON/plugin/relaunch"
+cp "$RELAUNCH" "$CANON/checkout/relaunch"
+canonrun() {
+  env PREFIX="$CANON/prefix" RELAUNCH_CONFIG_DIR="$CANON/cfg" \
+    RELAUNCH_AUTOSTART="$CANON/autostart.lua" RELAUNCH_HYPRLAND_LUA="$CANON/hyprland.lua" \
+    RELAUNCH_HYPR_CONF="$CANON/hyprland.conf" RELAUNCH_PLUGIN_DIR="$CANON/plugin" \
+    HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS" \
+    RELAUNCH_VERIFY_SLEEP=0 RELAUNCH_VERIFY_DEADLINE=0 RELAUNCH_VERIFY_INTERVAL=0 \
+    "$@"
+}
+
+# Whichever copy generates it, the loader names the same engine.
+canonloader=""
+for copy in "$RELAUNCH" "$CANON/plugin/relaunch" "$CANON/checkout/relaunch"; do
+  rm -f "$CANON/cfg/relaunch.lua"
+  canonrun "$copy" ensure-hooks >/dev/null 2>&1
+  line="$(grep -F 'o.exec_on_start' "$CANON/cfg/relaunch.lua")"
+  [[ "$line" == *"$CANON/prefix/bin/relaunch boot"* ]] \
+    || fail "the loader must name the canonical engine, not $copy: $line"
+  if [[ -z "$canonloader" ]]; then canonloader="$line"; else
+    [[ "$line" == "$canonloader" ]] \
+      || fail "the loader differs by which copy ran it: [$canonloader] vs [$line]"
+  fi
+done
+
+# A source checkout is not an install and must not overwrite the engine.
+rm -f "$CANON/prefix/bin/relaunch"
+printf '#!/usr/bin/env bash\n# the user installed engine\n' >"$CANON/prefix/bin/relaunch"
+chmod 0755 "$CANON/prefix/bin/relaunch"
+cp "$CANON/prefix/bin/relaunch" "$CANON/installed.before"
+canonrun "$CANON/checkout/relaunch" ensure-hooks >/dev/null 2>&1
+cmp -s "$CANON/installed.before" "$CANON/prefix/bin/relaunch" \
+  || fail "a source checkout must not overwrite the installed engine"
+canonrun "$RELAUNCH" ensure-hooks >/dev/null 2>&1
+cmp -s "$CANON/installed.before" "$CANON/prefix/bin/relaunch" \
+  || fail "running the engine from its own tree must not overwrite the installed one"
+
+# The plugin copy IS the install, and does put itself on PATH.
+canonrun "$CANON/plugin/relaunch" ensure-hooks >/dev/null 2>&1
+cmp -s "$CANON/plugin/relaunch" "$CANON/prefix/bin/relaunch" \
+  || fail "the plugin copy must install itself onto PATH"
+[[ "$(stat -c '%a' "$CANON/prefix/bin/relaunch")" == "755" ]] \
+  || fail "the installed engine must stay executable, got $(stat -c '%a' "$CANON/prefix/bin/relaunch")"
+
+# Deleting the checkout that generated the loader leaves boot working.
+rm -f "$CANON/cfg/relaunch.lua"
+canonrun "$CANON/checkout/relaunch" ensure-hooks >/dev/null 2>&1
+rm -rf "$CANON/checkout"
+booted="$(grep -oE '"[^"]+/relaunch boot"' "$CANON/cfg/relaunch.lua" | tr -d '"')"
+booted="${booted% boot}"
+[[ -x "$booted" ]] \
+  || fail "boot must still point at an executable engine after the checkout is gone: $booted"
+rm -rf "$CANON"
+
 # --- owned boot module (github issue #19, closes #5) ---
 OB="$WORKDIR/ownedboot"
 obrun() {
-  env RELAUNCH_CONFIG_DIR="$OB/cfg" RELAUNCH_AUTOSTART="$OB/autostart.lua" \
+  env PREFIX="$OB/prefix" \
+    RELAUNCH_CONFIG_DIR="$OB/cfg" RELAUNCH_AUTOSTART="$OB/autostart.lua" \
     RELAUNCH_HYPRLAND_LUA="$OB/hyprland.lua" RELAUNCH_HYPR_CONF="$OB/hyprland.conf" \
     RELAUNCH_PLUGIN_DIR="$OB/plugin" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS" \
     RELAUNCH_VERIFY_SLEEP=0 RELAUNCH_VERIFY_DEADLINE=0 RELAUNCH_VERIFY_INTERVAL=0 \
@@ -2186,8 +2260,8 @@ obreset() {
 obreset
 obrun ensure-hooks >/dev/null 2>&1
 [[ -f "$OB/cfg/relaunch.lua" ]] || fail "first install must create the loader"
-grep -Fq "$RELAUNCH boot" "$OB/cfg/relaunch.lua" \
-  || fail "the loader must register boot on first install, before any save"
+grep -Fq "$OB/prefix/bin/relaunch boot" "$OB/cfg/relaunch.lua" \
+  || fail "the loader must register the canonical engine, got: $(grep exec_on_start "$OB/cfg/relaunch.lua")"
 grep -qx 'return' "$OB/cfg/relaunch.lua" \
   && fail "the loader must not be the bare return placeholder"
 [[ -f "$OB/cfg/rules.lua" ]] || fail "rules.lua must exist for the loader to read"
@@ -2244,7 +2318,7 @@ cat >"$OB/cfg/config.json" <<'EOF'
 EOF
 obrun generate >/dev/null 2>&1
 grep -q 'o.window' "$OB/cfg/rules.lua" || fail "generate must write pins into rules.lua"
-grep -Fq "$RELAUNCH boot" "$OB/cfg/relaunch.lua" \
+grep -Fq "$OB/prefix/bin/relaunch boot" "$OB/cfg/relaunch.lua" \
   || fail "generate must leave the loader's boot registration intact"
 
 # ensure-hooks never touches autostart.lua -- not to install, not to clean up,
