@@ -228,6 +228,28 @@ hosting a command is a way out, because it gets its own class — `foot -e herdr
 is captured as class `herdr`, separate from plain `foot`, and can hold its own
 workspace.
 
+### Apps that restore themselves
+
+Some applications reopen their own windows at startup, independently of
+Relaunch. Browsers are the common case: after an unclean shutdown — which a
+reboot usually is — Brave restores its previous session, and that includes any
+web app or PWA window it had open. Relaunch launches the same web app from its
+saved entry, and you end up with two.
+
+Relaunch cannot see this coming. At the moment `relaunch boot` runs, the
+browser has not restored anything yet, so there is no window to detect and no
+way to tell "this app will bring itself back" from "this app needs launching".
+Waiting and then closing the extra window is not an option either: Relaunch
+must never close a window it did not open.
+
+The fix is to stop launching that app through Relaunch — remove the entry and
+let the application restore itself, which it was going to do anyway. Everything
+else on the list is unaffected.
+
+Web apps are the sharpest version of this, because the browser remembers them
+individually. A PWA that a browser restores on its own is better left off the
+list entirely.
+
 ### Multiple monitors
 
 Relaunch restores apps to workspace **numbers**, not to screens. Which monitor
