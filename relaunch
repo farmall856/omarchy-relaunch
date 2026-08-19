@@ -1429,13 +1429,22 @@ ensure_overrides_file() {
   mkdir -p "$(config_dir)"
   ensure_file_with "$(overrides_path)" '{}
 '
+  # Validate HERE, not only in the loader. A `die` inside a $( ) writes its
+  # message into the captured output and never reaches the user, so the check
+  # has to happen in the caller's own shell -- and before anything is written,
+  # or a refusal still leaves a half-applied edit behind.
+  jq -e 'type == "object"' "$(overrides_path)" >/dev/null 2>&1 \
+    || die "parse overrides: $(overrides_path)"
 }
 
 load_overrides_json() {
-  local p
+  # ensure_overrides_file has already refused a file that will not parse, in
+  # the caller's own shell where the message can reach the user. There is
+  # deliberately no {} fallback here: substituting an empty table for a file we
+  # could not read is exactly what let set_override_exec write that empty table
+  # back and discard every override the user had.
   ensure_overrides_file
-  p="$(overrides_path)"
-  jq -e 'if type == "object" then . else {} end' "$p" 2>/dev/null || printf '{}\n'
+  jq -e '.' "$(overrides_path)"
 }
 
 override_exec_for_class() {
@@ -1466,9 +1475,16 @@ unset_override_exec() {
   printf '%s\n' "$json" | atomic_write "$(overrides_path)"
 }
 
+# Boot runs the exec through `bash -c`, so validation has to split it the way
+# bash will. Cutting at the first space reported `"/opt/My App/app" --flag`
+# and `/opt/My\ App/app --flag` as missing, which put a false warning on the
+# panel row and made boot skip a launch that works. unquote_argv_arr is the
+# parser this script already uses for .desktop Exec lines; there is no second
+# one to keep in step.
 exec_is_ok() {
   local exec="$1" token
-  token="${exec%% *}"
+  unquote_argv_arr "$exec"
+  token="${_UARGV[0]:-}"
   [[ -n "$token" ]] || return 1
   command -v "$token" >/dev/null 2>&1 && return 0
   [[ -x "$token" ]]
@@ -2084,7 +2100,7 @@ cmd_reload() {
 cmd_boot() {
   # Registered by the owned loader module, not by a hook in the user config.
   # Never listed as a startup app.
-  local started cfg stagger line class ws exec token status pid err launches first_launch
+  local started cfg stagger line class ws exec token argv0 status pid err launches first_launch
   started="$(date -Iseconds)"
   mkdir -p "$(config_dir)"
   if [[ -f "$(disabled_path)" ]]; then
@@ -2115,13 +2131,16 @@ cmd_boot() {
         fi
       fi
     fi
-    token="${exec%% *}"
-    token="${token##*/}"
+    # Same parser as exec_is_ok, and for the same reason: this decides whether
+    # to launch, and bash -c would have run a quoted path just fine.
+    unquote_argv_arr "$exec"
+    argv0="${_UARGV[0]:-}"
+    token="${argv0##*/}"
     pid=""
     err=""
-    if [[ "$token" != *=* ]] && ! command -v "${exec%% *}" >/dev/null 2>&1 && [[ ! -x "${exec%% *}" ]]; then
+    if [[ "$token" != *=* ]] && ! command -v "$argv0" >/dev/null 2>&1 && [[ ! -x "$argv0" ]]; then
       status="not_found"
-      err="command not found: ${exec%% *}"
+      err="command not found: $argv0"
     else
       bash -c "$exec" &
       pid=$!
@@ -2375,6 +2394,9 @@ cmd_import() {
   class="$(arg_value --class "$@" || true)"
   [[ "$ws" =~ ^[1-9][0-9]*$ ]] || die "import requires --workspace N (N>=1)"
   [[ -n "$class" || -n "$exec" ]] || die "import requires --class or --exec"
+  # Import can write an override, so refuse an unparseable one up front rather
+  # than after config.json has been rewritten.
+  ensure_overrides_file
   if [[ -n "$class" && -z "$exec" ]]; then
     pid="$(pid_for_running_class "$class" || true)"
     line="$(resolve_launch "$class" "${pid:-}")"
@@ -2414,6 +2436,9 @@ cmd_set_exec() {
   exec="$(arg_value --exec "$@" || true)"
   [[ -n "$class" ]] || die "set-exec requires --class"
   [[ -n "$exec" ]] || die "set-exec requires --exec"
+  # Before load_config_json, so a bad overrides.json refuses the whole command
+  # instead of aborting after config.json has already been rewritten.
+  ensure_overrides_file
   cfg="$(load_config_json)"
   if ! jq -e --arg class "$class" '.entries[] | select(.class == $class)' >/dev/null <<<"$cfg"; then
     die "no relaunch entry for class: $class"
@@ -2437,6 +2462,7 @@ cmd_drop() {
   local class cfg
   class="$(arg_value --class "$@" || true)"
   [[ -n "$class" ]] || die "drop requires --class"
+  ensure_overrides_file
   cfg="$(load_config_json)"
   cfg="$(jq --arg class "$class" '.entries |= map(select(.class != $class))' <<<"$cfg")"
   jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"

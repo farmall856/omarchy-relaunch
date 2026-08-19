@@ -308,6 +308,91 @@ jq -e '.["libreoffice-calc"] == "localc --norestore"' "$RELAUNCH_CONFIG_DIR/over
 jq -e '.["libreoffice-calc"]' "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null \
   && fail "drop must remove the class from overrides.json"
 
+# --- overrides.json is never rewritten from a file we could not parse (#10) ---
+# The fallback turned a malformed file into {}, and the very next set-exec
+# wrote that empty object back: one bad byte discarded every override the user
+# had. config.json already fails loudly here; so must this.
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"keepme","workspace":1,"exec":"true","execSource":"guess","enabled":true}
+]}
+EOF
+printf '%s\n' '{"other-app":"keep-this-override"}' >"$RELAUNCH_CONFIG_DIR/overrides.json"
+"$RELAUNCH" set-exec --class keepme --exec /bin/true >/dev/null
+jq -e '.["other-app"] == "keep-this-override" and .keepme == "/bin/true"' \
+  "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null \
+  || fail "set-exec must merge into the existing overrides, not replace them"
+
+printf '%s\n' '{"other-app":"keep-this",' >"$RELAUNCH_CONFIG_DIR/overrides.json"
+cp "$RELAUNCH_CONFIG_DIR/overrides.json" "$WORKDIR/overrides.malformed"
+cp "$RELAUNCH_CONFIG_DIR/config.json" "$WORKDIR/config.before-badoverrides"
+out="$("$RELAUNCH" set-exec --class keepme --exec /bin/false 2>&1)" \
+  && fail "set-exec must fail against a malformed overrides.json"
+[[ "$out" == *"parse overrides"* ]] \
+  || fail "the failure must name the parse error, got: $out"
+cmp -s "$WORKDIR/overrides.malformed" "$RELAUNCH_CONFIG_DIR/overrides.json" \
+  || fail "a refused set-exec must leave overrides.json byte-identical"
+# …and it must refuse BEFORE writing config.json, or the edit is half applied.
+cmp -s "$WORKDIR/config.before-badoverrides" "$RELAUNCH_CONFIG_DIR/config.json" \
+  || fail "a refused set-exec must not have already rewritten config.json"
+# The error has to survive into the JSON contract the panel reads.
+jsonerr="$("$RELAUNCH" set-exec --class keepme --exec /bin/false --json 2>/dev/null || true)"
+jq -e '.ok == false and (.error | test("parse overrides"))' >/dev/null <<<"$jsonerr" \
+  || fail "--json must report the parse failure as a structured error, got: $jsonerr"
+# drop and list refuse for the same reason.
+"$RELAUNCH" drop --class keepme >/dev/null 2>&1 \
+  && fail "drop must fail against a malformed overrides.json"
+cmp -s "$WORKDIR/overrides.malformed" "$RELAUNCH_CONFIG_DIR/overrides.json" \
+  || fail "a refused drop must leave overrides.json byte-identical"
+# A non-object parses as JSON but is not an overrides table.
+printf '%s\n' '[1,2,3]' >"$RELAUNCH_CONFIG_DIR/overrides.json"
+cp "$RELAUNCH_CONFIG_DIR/overrides.json" "$WORKDIR/overrides.array"
+"$RELAUNCH" set-exec --class keepme --exec /bin/false >/dev/null 2>&1 \
+  && fail "set-exec must refuse a non-object overrides.json"
+cmp -s "$WORKDIR/overrides.array" "$RELAUNCH_CONFIG_DIR/overrides.json" \
+  || fail "a refused set-exec must leave a non-object overrides.json alone"
+printf '{}\n' >"$RELAUNCH_CONFIG_DIR/overrides.json"
+
+# --- executable validation parses quoting the way bash -c will (#3) ---
+# Boot runs the exec through `bash -c`, so cutting at the first space called a
+# quoted path missing: the panel warned about a command that launches fine and
+# boot skipped it.
+mkdir -p "$WORKDIR/My App"
+printf '#!/bin/sh\nexit 0\n' >"$WORKDIR/My App/app"
+chmod +x "$WORKDIR/My App/app"
+# Built with jq, not a heredoc: the escaped form needs a literal backslash in
+# the JSON string and heredoc quoting would eat it.
+jq -n --arg dir "$WORKDIR" '{
+  staggerSeconds: 0, ignored: [],
+  entries: [
+    {class: "quoted",  workspace: 1, exec: ("\"" + $dir + "/My App/app\" --flag"),
+     execSource: "desktop-file", enabled: true},
+    {class: "escaped", workspace: 2, exec: ($dir + "/My\\ App/app --flag"),
+     execSource: "desktop-file", enabled: true},
+    {class: "plain",   workspace: 3, exec: "/bin/true --flag",
+     execSource: "desktop-file", enabled: true},
+    {class: "missing", workspace: 4, exec: "/nope/not-here --flag",
+     execSource: "desktop-file", enabled: true}
+  ]
+}' >"$RELAUNCH_CONFIG_DIR/config.json"
+"$RELAUNCH" list --json | jq -e '
+  ([.entries[] | select(.class == "quoted")  | .execOk] == [true])
+  and ([.entries[] | select(.class == "escaped") | .execOk] == [true])
+  and ([.entries[] | select(.class == "plain")   | .execOk] == [true])
+  and ([.entries[] | select(.class == "missing") | .execOk] == [false])
+' >/dev/null || fail "execOk must parse shell quoting: $("$RELAUNCH" list --json | jq -c '[.entries[] | {class, execOk}]')"
+# Only the genuinely missing one is warned about.
+"$RELAUNCH" list --json | jq -e '[.warnings[] | .class] == ["missing"]' >/dev/null \
+  || fail "a quoted path must not raise a false warning"
+# boot makes the same decision, so a quoted path is launched, not skipped.
+"$RELAUNCH" boot >/dev/null 2>&1
+jq -e '
+  ([.launches[] | select(.class == "quoted")  | .status] == ["started"])
+  and ([.launches[] | select(.class == "escaped") | .status] == ["started"])
+  and ([.launches[] | select(.class == "missing") | .status] == ["not_found"])
+' "$RELAUNCH_CONFIG_DIR/last-boot.json" >/dev/null \
+  || fail "boot must launch a quoted path and still skip a missing one: $(jq -c '[.launches[] | {class, status}]' "$RELAUNCH_CONFIG_DIR/last-boot.json")"
+
 # Guess with a missing command is flagged immediately
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-empty"
 export RELAUNCH_CMDLINE_DIR="$WORKDIR/nocmd"

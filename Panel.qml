@@ -24,6 +24,13 @@ Panel {
   property string pendingStatus: ""
   property bool busy: false
   property bool confirmRemove: false
+  // One Process serves every action, so requests that arrive while it is
+  // running have to wait their turn rather than vanish. See run().
+  property var requestQueue: []
+  // Set when applyResult parsed a real error out of the engine's JSON, so
+  // onExited knows there is already a better message than "Command failed".
+  property bool engineReportedError: false
+  property string stderrText: ""
   property string execEditClass: ""
   property var warnings: []
 
@@ -91,10 +98,32 @@ Panel {
     run(["list", "--json"])
   }
 
+  // Setting `running = true` on a Process that is ALREADY running does
+  // nothing: the command property changes but no process starts. Every
+  // request that arrived while one was in flight was therefore dropped --
+  // silently, and after pendingStatus had already been replaced, so the panel
+  // could show the previous operation's success message for an action that
+  // never ran. Reopening the panel calls refresh(), and the launch-command
+  // field submits on Enter, so this was reachable by ordinary clicking.
+  //
+  // Queue instead of refusing: a request either runs now or runs next, and
+  // nothing is discarded. FIFO with no coalescing, because deciding which
+  // requests are equivalent is how actions get dropped again.
   function run(args, okText) {
     root.confirmRemove = false
-    root.pendingStatus = okText || ""
-    root.statusText = ""
+    if (actionProc.running) {
+      root.requestQueue = root.requestQueue.concat([{ args: args, okText: okText || "" }])
+      root.busy = true
+      return
+    }
+    root.startRequest(args, okText || "", false)
+  }
+
+  function startRequest(args, okText, keepStatus) {
+    root.pendingStatus = okText
+    if (!keepStatus) root.statusText = ""
+    root.engineReportedError = false
+    root.stderrText = ""
     root.busy = true
     actionProc.command = [root.enginePath].concat(args)
     actionProc.running = true
@@ -113,6 +142,7 @@ Panel {
       const r = JSON.parse(text)
       if (r.ok === false) {
         root.statusText = "Error: " + (r.error || "unknown")
+        root.engineReportedError = true
         return
       }
       if (r.uninstalled === true) {
@@ -165,14 +195,38 @@ Panel {
     id: actionProc
     command: [root.enginePath, "list", "--json"]
     stdout: StdioCollector {
-      onStreamFinished: { root.applyResult(this.text); root.busy = false }
+      onStreamFinished: root.applyResult(this.text)
+    }
+    // Failures that produce no JSON at all -- a die before --json is parsed,
+    // a missing engine -- say why on stderr. Without this the panel had
+    // nothing to show but "Command failed".
+    stderr: StdioCollector {
+      onStreamFinished: root.stderrText = String(this.text).trim()
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0)
-        root.statusText = "Command failed"
-      else if (root.statusText === "" && root.pendingStatus !== "")
+      if (exitCode !== 0) {
+        // The engine's own message names the actual problem ("parse
+        // overrides: …", "no relaunch entry for class: …"). Overwriting it
+        // with "Command failed" threw away the only actionable part. Only
+        // fall back when there is genuinely nothing better.
+        if (!root.engineReportedError) {
+          if (root.stderrText !== "")
+            root.statusText = "Error: " + root.stderrText
+          else if (root.statusText === "" || root.statusText === "Bad engine output")
+            root.statusText = "Command failed"
+        }
+      } else if (root.statusText === "" && root.pendingStatus !== "") {
         root.statusText = root.pendingStatus
+      }
       root.pendingStatus = ""
+      if (root.requestQueue.length > 0) {
+        var next = root.requestQueue[0]
+        root.requestQueue = root.requestQueue.slice(1)
+        // Keep the finished operation's message: a queued refresh should not
+        // wipe the result the user is reading.
+        root.startRequest(next.args, next.okText, true)
+        return
+      }
       root.busy = false
     }
   }
