@@ -1262,20 +1262,18 @@ display_label_for() {
   local leaf name file
 
   if [[ -n "$exec" ]]; then
+    # `gio launch <file>.desktop` names the application inside the file, and
+    # that is true whoever wrote the command. This used to be gated on
+    # execSource == desktop-file, so editing the launch command by hand --
+    # which changes the SOURCE and not the command -- turned Signal into
+    # "gio", the leaf of its own launcher.
+    mapfile -t -d '' argv < <(unquote_argv "$exec")
+    if ((${#argv[@]} >= 3)) && [[ "${argv[0]##*/}" == gio && "${argv[1]}" == launch ]]; then
+      file="${argv[2]}"
+      name="$(desktop_name_from_file "$file" 2>/dev/null || true)"
+      [[ -n "$name" ]] && { printf '%s\n' "$name"; return 0; }
+    fi
     case "$source" in
-      desktop-file)
-        mapfile -t -d '' argv < <(unquote_argv "$exec")
-        # gio launch <file>
-        if ((${#argv[@]} >= 3)) && [[ "${argv[0]##*/}" == gio && "${argv[1]}" == launch ]]; then
-          file="${argv[2]}"
-        else
-          file=""
-        fi
-        if [[ -n "$file" ]]; then
-          name="$(desktop_name_from_file "$file" 2>/dev/null || true)"
-          [[ -n "$name" ]] && { printf '%s\n' "$name"; return 0; }
-        fi
-        ;;
       terminal)
         leaf="$(leaf_command_for_exec "$exec" 2>/dev/null || true)"
         if [[ -n "$leaf" ]]; then

@@ -428,6 +428,29 @@ jq -e '
 ' "$RELAUNCH_CONFIG_DIR/last-boot.json" >/dev/null \
   || fail "boot must launch a quoted path and still skip a missing one: $(jq -c '[.launches[] | {class, status}]' "$RELAUNCH_CONFIG_DIR/last-boot.json")"
 
+# --- a launcher command keeps the application name, whoever wrote it ---
+# `gio launch <file>.desktop` names the app inside the file. Resolving it was
+# gated on execSource == desktop-file, so the moment a user edited the launch
+# command by hand -- which changes the SOURCE, not the command -- the label
+# fell through to the leaf and Signal displayed as "gio".
+mkdir -p "$WORKDIR/xdg-label/applications"
+cat >"$WORKDIR/xdg-label/applications/labelled.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Properly Named App
+Exec=labelled-app
+EOF
+export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-label"
+cat >"$RELAUNCH_CONFIG_DIR/config.json" <<EOF
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"labelme","workspace":1,"exec":"gio launch $WORKDIR/xdg-label/applications/labelled.desktop","execSource":"desktop-file","label":"Properly Named App","enabled":true}
+]}
+EOF
+"$RELAUNCH" set-exec --class labelme   --exec "gio launch $WORKDIR/xdg-label/applications/labelled.desktop" >/dev/null
+jq -e '[.entries[] | select(.class == "labelme") | .label] == ["Properly Named App"]'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "set-exec on a gio launch command must keep the .desktop name, got $(jq -c '[.entries[] | {label, execSource}]' "$RELAUNCH_CONFIG_DIR/config.json")"
+jq -e '[.entries[] | select(.class == "labelme") | .execSource] == ["overrides-table"]'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "set-exec must still record the source as overrides-table"
+unset RELAUNCH_DATA_DIRS
+
 # --- the command token is the program, not the prefix (#3) ---
 # One helper decides what will actually run, and BOTH the panel row and the
 # boot preflight call it. They disagreed before: the row warned about

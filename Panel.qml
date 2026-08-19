@@ -40,6 +40,9 @@ Panel {
   property int lastExitCode: -1
   property bool sawOutput: false
   property bool sawStderr: false
+  // The command could not be executed at all -- engine missing, or not
+  // executable. Process emits no error signal to QML, so this is inferred.
+  property bool startFailed: false
   // settle() can run more than once for one request -- a stream that arrives
   // late still gets to improve the message -- but the queue must only advance
   // once, and busy must only be released once.
@@ -153,6 +156,7 @@ Panel {
     root.lastExitCode = -1
     root.sawOutput = false
     root.sawStderr = false
+    root.startFailed = false
     root.settled = false
     root.startingNext = false
     root.busy = true
@@ -188,6 +192,21 @@ Panel {
     root.busy = false
   }
 
+  // Last resort, from runningChanged. A command that cannot be executed never
+  // emits `exited` at all, so waiting for signals that will never come left
+  // the panel on "Working…" with every chip dead until the shell restarted.
+  function recoverIfUnsettled() {
+    if (root.settled || actionProc.running) return
+    if (root.lastExitCode === -1) {
+      // No exit code ever arrived: the process never started.
+      root.startFailed = true
+      root.lastExitCode = 127
+    }
+    root.sawOutput = true
+    root.sawStderr = true
+    root.settle()
+  }
+
   // Idempotent on purpose: a stream that arrives after a forced settle can
   // call this again and upgrade the message.
   function decideStatus() {
@@ -195,6 +214,11 @@ Panel {
       // applyResult already put the engine's own message up ("parse
       // overrides: …", "no relaunch entry for class: …"). That names the
       // actual problem; never replace it with a generic one.
+      root.statusIsError = true
+    } else if (root.startFailed && root.stderrText === "") {
+      // Name the thing that could not be run: "Command failed" for a command
+      // that never ran is the least useful sentence available.
+      root.statusText = "Could not run the engine: " + root.enginePath
       root.statusIsError = true
     } else if (root.lastExitCode !== 0) {
       root.statusText = root.stderrText !== "" ? root.stderrText : "Command failed"
@@ -310,18 +334,18 @@ Panel {
     onExited: function(exitCode) {
       root.lastExitCode = exitCode
       root.settle()
-      // If a stream never reports -- a process that dies without its
-      // collectors finishing -- the panel would stay busy with every chip
-      // dead until it is restarted. One event-loop turn after the exit,
-      // settle with what arrived. Not a timeout, and not a retry: settle() is
-      // re-runnable, so a stream that does arrive afterwards still gets to
-      // improve the message.
-      Qt.callLater(function() {
-        if (root.settled || root.lastExitCode === -1) return
-        root.sawOutput = true
-        root.sawStderr = true
-        root.settle()
-      })
+    }
+    // Covers BOTH failure shapes, because `running` drops to false for both:
+    // a process that exited without its collectors finishing, and a command
+    // that could not be executed and therefore never emitted `exited` at all.
+    // Process exposes no error signal to QML, so this property change is the
+    // only observation available. One event-loop turn later, so an ordinary
+    // exit settles through its own signals first -- and settle() stays
+    // re-runnable, so a stream arriving afterwards can still improve the
+    // message. Not a timeout and not a retry.
+    onRunningChanged: {
+      if (actionProc.running) return
+      Qt.callLater(root.recoverIfUnsettled)
     }
   }
 
