@@ -1765,20 +1765,27 @@ ln -sf "$SYM/dangle/config-not-there.json" "$SYM/cfg2/config.json"
 jq -e '.entries' "$SYM/dangle/config-not-there.json" >/dev/null \
   || fail "save must write through a dangling link into the named target"
 
-# A symlink chain resolves all the way to the final file.
+# A symlink chain resolves all the way to the final file. The write must
+# actually MUTATE the final target, or the assertion only proves a
+# pre-created file still exists -- which passes with the resolver removed.
 rm -rf "$SYM/cfg3"; mkdir -p "$SYM/cfg3" "$SYM/chaintarget"
 printf '{}\n' >"$SYM/chaintarget/real-overrides.json"
+cat >"$SYM/cfg3/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"chainapp","workspace":1,"exec":"old","execSource":"guess","enabled":true}
+]}
+EOF
 ln -sf "$SYM/chaintarget/real-overrides.json" "$SYM/mid-overrides.json"
 ln -sf "$SYM/mid-overrides.json" "$SYM/cfg3/overrides.json"
 ( export RELAUNCH_CONFIG_DIR="$SYM/cfg3" RELAUNCH_AUTOSTART="$SYM/autostart.lua" \
     RELAUNCH_HYPRLAND_LUA="$SYM/hyprland.lua" RELAUNCH_HYPR_CONF="$SYM/hyprland.conf" \
     RELAUNCH_PLUGIN_DIR="$SYM/plugin3" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS"
-  "$RELAUNCH" set-exec --class chainapp --exec chaincmd >/dev/null 2>&1 || true
-  "$RELAUNCH" save >/dev/null 2>&1 )
+  "$RELAUNCH" set-exec --class chainapp --exec chaincmd >/dev/null 2>&1 ) \
+  || fail "set-exec failed through a symlink chain"
 [[ -L "$SYM/cfg3/overrides.json" && -L "$SYM/mid-overrides.json" ]] \
   || fail "a symlink chain must stay a chain of symlinks"
-[[ -f "$SYM/chaintarget/real-overrides.json" ]] \
-  || fail "a symlink chain must resolve to the final target"
+jq -e '.chainapp == "chaincmd"' "$SYM/chaintarget/real-overrides.json" >/dev/null \
+  || fail "the write must reach the FINAL target of the chain"
 
 # --- a link whose TARGET PARENT does not exist (PR #18 review) ---
 # Plain redirection follows a symlink but still fails when the target's
@@ -1833,6 +1840,12 @@ grep -q 'brave' "$BP/dotfiles/autostart.lua" && fail "drop-startup must remove t
 grep -q 'signal' "$BP/dotfiles/autostart.lua" || fail "drop-startup ate an unrelated line"
 bprun drop-startup --id 'lua:launch_on_start:nosuchthing' >/dev/null 2>&1 \
   && fail "drop-startup must still fail on an unknown id"
+# Mode must survive a FILTER rewrite too, not just atomic_write.
+chmod 0640 "$BP/dotfiles/autostart.lua"
+bprun drop-startup --id 'lua:launch_on_start:signal' >/dev/null 2>&1 \
+  || fail "drop-startup failed on the mode fixture"
+[[ "$(stat -c '%a' "$BP/dotfiles/autostart.lua")" == "640" ]] \
+  || fail "rewrite_through_link must preserve mode, got $(stat -c '%a' "$BP/dotfiles/autostart.lua")"
 
 # --- file mode survives a rewrite ---
 # A rename does not carry the destination's mode, so a 0444 file came back
