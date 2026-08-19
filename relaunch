@@ -1429,16 +1429,26 @@ ensure_overrides_file() {
   mkdir -p "$(config_dir)"
   ensure_file_with "$(overrides_path)" '{}
 '
-  # Validate HERE, not only in the loader. A `die` inside a $( ) writes its
-  # message into the captured output and never reaches the user, so the check
-  # has to happen in the caller's own shell -- and before anything is written,
-  # or a refusal still leaves a half-applied edit behind.
+}
+
+# Validate where the table is actually read or written, which is where
+# load_config_json validates config.json, and for the same reason.
+#
+# Deliberately NOT inside ensure_overrides_file: ensure_hooks calls that, and
+# refusing to install or repair over a file the install path never touches
+# would be stricter than config.json, which ensure_hooks does not read at all.
+# It has to run in the CALLER's shell, though -- a `die` inside a $( ) writes
+# its message into the captured output and never reaches the user -- and
+# before the command's first write, or a refusal still leaves a half-applied
+# edit behind.
+require_overrides_parseable() {
+  ensure_overrides_file
   jq -e 'type == "object"' "$(overrides_path)" >/dev/null 2>&1 \
     || die "parse overrides: $(overrides_path)"
 }
 
 load_overrides_json() {
-  # ensure_overrides_file has already refused a file that will not parse, in
+  # require_overrides_parseable has already refused a file that will not parse, in
   # the caller's own shell where the message can reach the user. There is
   # deliberately no {} fallback here: substituting an empty table for a file we
   # could not read is exactly what let set_override_exec write that empty table
@@ -1778,7 +1788,7 @@ decorate_items() {
 
 emit_state() {
   local cfg startup rows extra clients entries warnings
-  ensure_overrides_file
+  require_overrides_parseable
   cfg="$(load_config_json)"
   startup="$(scan_startup)"
   clients="$(clients_display)"
@@ -2396,7 +2406,7 @@ cmd_import() {
   [[ -n "$class" || -n "$exec" ]] || die "import requires --class or --exec"
   # Import can write an override, so refuse an unparseable one up front rather
   # than after config.json has been rewritten.
-  ensure_overrides_file
+  require_overrides_parseable
   if [[ -n "$class" && -z "$exec" ]]; then
     pid="$(pid_for_running_class "$class" || true)"
     line="$(resolve_launch "$class" "${pid:-}")"
@@ -2438,7 +2448,7 @@ cmd_set_exec() {
   [[ -n "$exec" ]] || die "set-exec requires --exec"
   # Before load_config_json, so a bad overrides.json refuses the whole command
   # instead of aborting after config.json has already been rewritten.
-  ensure_overrides_file
+  require_overrides_parseable
   cfg="$(load_config_json)"
   if ! jq -e --arg class "$class" '.entries[] | select(.class == $class)' >/dev/null <<<"$cfg"; then
     die "no relaunch entry for class: $class"
@@ -2462,7 +2472,7 @@ cmd_drop() {
   local class cfg
   class="$(arg_value --class "$@" || true)"
   [[ -n "$class" ]] || die "drop requires --class"
-  ensure_overrides_file
+  require_overrides_parseable
   cfg="$(load_config_json)"
   cfg="$(jq --arg class "$class" '.entries |= map(select(.class != $class))' <<<"$cfg")"
   jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"

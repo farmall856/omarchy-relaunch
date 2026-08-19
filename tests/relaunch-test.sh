@@ -351,6 +351,16 @@ cp "$RELAUNCH_CONFIG_DIR/overrides.json" "$WORKDIR/overrides.array"
   && fail "set-exec must refuse a non-object overrides.json"
 cmp -s "$WORKDIR/overrides.array" "$RELAUNCH_CONFIG_DIR/overrides.json" \
   || fail "a refused set-exec must leave a non-object overrides.json alone"
+# Repair must still work over a broken overrides file. ensure-hooks does not
+# read the table, and refusing to install or fix an installation because of a
+# file the install path never touches would be stricter than config.json,
+# which ensure_hooks does not read either.
+printf '%s\n' '{"other-app":"keep-this",' >"$RELAUNCH_CONFIG_DIR/overrides.json"
+cp "$RELAUNCH_CONFIG_DIR/overrides.json" "$WORKDIR/overrides.stillbad"
+"$RELAUNCH" ensure-hooks >/dev/null 2>&1 \
+  || fail "ensure-hooks must still work over a malformed overrides.json"
+cmp -s "$WORKDIR/overrides.stillbad" "$RELAUNCH_CONFIG_DIR/overrides.json" \
+  || fail "ensure-hooks must not touch a malformed overrides.json"
 printf '{}\n' >"$RELAUNCH_CONFIG_DIR/overrides.json"
 
 # --- executable validation parses quoting the way bash -c will (#3) ---
