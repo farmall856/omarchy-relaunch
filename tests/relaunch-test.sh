@@ -45,6 +45,15 @@ cat >"$WORKDIR/monitors.json" <<'EOF'
 ]
 EOF
 
+# Sandbox the boot once-guard. Without a compositor signature there is no
+# session key, so the guard is inactive and every existing boot test runs as
+# before; the guard has its own block below which sets both explicitly. The
+# runtime dir is redirected too so the suite can never touch the real one.
+unset HYPRLAND_INSTANCE_SIGNATURE
+export XDG_RUNTIME_DIR="$WORKDIR/run"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
 export RELAUNCH_VERIFY_SLEEP=0
 # No bounded re-sampling in the suite: fixtures never grow a window, so every
 # boot would otherwise wait out the full deadline. The re-sampling behaviour
@@ -78,12 +87,16 @@ cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 EOF
 
 "$RELAUNCH" generate >/dev/null
-grep -q 'omarchy-relaunch' "$RELAUNCH_AUTOSTART" || fail "ensure_hooks did not mark autostart"
-grep -Fq "${RELAUNCH} boot" "$RELAUNCH_AUTOSTART" || fail "boot hook must use the script path, not PATH"
+# The boot hook lives in the owned loader now, not in the user's autostart.
+grep -q 'omarchy-relaunch' "$RELAUNCH_AUTOSTART" \
+  && fail "ensure_hooks must not write anything into autostart.lua"
+grep -Fq "${RELAUNCH} boot" "$RELAUNCH_CONFIG_DIR/relaunch.lua" \
+  || fail "the loader must register the boot hook with the script path, not PATH"
 grep -q 'io.open(_rl)' "$RELAUNCH_HYPRLAND_LUA" || fail "hyprland hook must skip a missing relaunch.lua"
-[[ -f "$RELAUNCH_CONFIG_DIR/relaunch.lua" ]] || fail "ensure_hooks must create relaunch.lua before the hyprland hook"
+[[ -f "$RELAUNCH_CONFIG_DIR/relaunch.lua" ]] || fail "ensure_hooks must create the loader"
+[[ -f "$RELAUNCH_CONFIG_DIR/rules.lua" ]] || fail "ensure_hooks must create rules.lua for the loader to read"
 [[ -e "$RELAUNCH_CONFIG_DIR/relaunch.conf" ]] && fail "must not write the leftover windowrulev2 relaunch.conf"
-lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+lua="$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")"
 
 assert_contains "$lua" 'o.window({ class = "^(herdr)$" }, { workspace = "1 silent" })'
 assert_contains "$lua" 'o.window({ class = "^(brave-browser)$" }, { workspace = "2 silent" })'
@@ -103,7 +116,7 @@ cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[{"class":"SomeApp","workspace":3,"exec":"","enabled":true}]}
 EOF
 "$RELAUNCH" generate >/dev/null
-assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window({ class = "^(SomeApp)$" }'
+assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'o.window({ class = "^(SomeApp)$" }'
 
 # class → exec comes from .desktop files, not a built-in table
 XDG_APPS="$WORKDIR/xdg/applications"
@@ -365,8 +378,8 @@ EOF
 out="$("$RELAUNCH" save --json)"
 echo "$out" | jq -e '.ok == true and .added == 1 and .updated == 2' >/dev/null \
   || fail "save json counts: $out"
-echo "$out" | jq -e --arg p "$RELAUNCH_CONFIG_DIR/relaunch.lua" '.snippetPath == $p' >/dev/null \
-  || fail "snippetPath should be relaunch.lua"
+echo "$out" | jq -e --arg p "$RELAUNCH_CONFIG_DIR/rules.lua" '.snippetPath == $p' >/dev/null \
+  || fail "snippetPath should be rules.lua"
 
 cfg="$(cat "$RELAUNCH_CONFIG_DIR/config.json")"
 echo "$cfg" | jq -e '
@@ -442,16 +455,16 @@ grep -q 'o.launch_on_start("brave")' "$RELAUNCH_AUTOSTART" && fail "startup brav
 "$RELAUNCH" boot-skip
 [[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] || fail "skip-once file"
 jq -e '.skipOnce == true' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "skipOnce not persisted in config"
-assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window'
+assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'o.window'
 "$RELAUNCH" save >/dev/null
 jq -e '.skipOnce == true' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "save dropped skipOnce"
 [[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] || fail "save removed skip-once file"
-assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window'
+assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'o.window'
 rm -f "$RELAUNCH_CONFIG_DIR/skip-once"
 "$RELAUNCH" boot
 [[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] && fail "skip-once not consumed"
 jq -e '.skipOnce == true' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null && fail "skipOnce left armed after boot"
-assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window'
+assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'o.window'
 "$RELAUNCH" last-boot --json | jq -e '.outcome == "skipped" and (.text | length) > 0' >/dev/null \
   || fail "skip last-boot log"
 
@@ -628,7 +641,7 @@ EOF
 jq -e '
   ([.entries[] | select(.class == "tiley") | has("float")] == [true])
 ' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "float:false must survive the config round trip, not be dropped as falsy"
-lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+lua="$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")"
 assert_contains "$lua" 'o.window({ class = "^(floaty)$" }, { workspace = "3 silent", float = true })'
 assert_contains "$lua" 'o.window({ class = "^(tiley)$" }, { workspace = "4 silent", tile = true })'
 # tile = true alone loses to Omarchy's floating-window tag: verified on
@@ -656,7 +669,7 @@ echo "$out" | jq -e '
   and ([.entries[] | select(.class == "tiley") | .float] == [true])
 ' >/dev/null || fail "recapture must refresh float from the live window: $out"
 echo "$out" | jq -e '.updated == 2' >/dev/null   || fail "a float-only change is one update per entry: $out"
-lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+lua="$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")"
 assert_contains "$lua" 'o.window({ class = "^(floaty)$" }, { workspace = "3 silent", tile = true })'
 assert_contains "$lua" 'o.window({ class = "^(tiley)$" }, { workspace = "4 silent", float = true })'
 
@@ -674,7 +687,7 @@ cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 ]}
 EOF
 "$RELAUNCH" generate >/dev/null
-lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+lua="$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")"
 assert_contains "$lua" 'o.window({ class = "^(legacy)$" }, { workspace = "2 silent" })'
 assert_not_contains "$lua" 'legacy)$" }, { workspace = "2 silent", tile'
 # …and import, which has no window to read, leaves it unknown too.
@@ -753,7 +766,7 @@ EOF
 "$RELAUNCH" save >/dev/null
 jq -e '[.entries[] | select(.class == "TUI.float") | .label] == ["Disk Usage"]' \
   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "label must be persisted to config.json"
-lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+lua="$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")"
 assert_contains "$lua" 'class = "^(TUI\\.float)$"'
 assert_not_contains "$lua" 'Disk Usage'
 
@@ -1507,8 +1520,8 @@ echo "$legacy" | jq -e '
 ' >/dev/null || fail "a pre-startupKeys config must normalize the field to []: $legacy"
 echo "$legacy" | jq -e '.ok == true' >/dev/null || fail "a legacy config must list cleanly"
 "$RELAUNCH" generate >/dev/null || fail "a legacy config must generate cleanly"
-assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'class = "^(brave-browser)$"'
-assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'startupKeys'
+assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'class = "^(brave-browser)$"'
+assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'startupKeys'
 echo '[]' >"$FAKE_CLIENTS"
 "$RELAUNCH" boot >/dev/null 2>&1
 jq -e '.outcome == "launched"' "$RELAUNCH_CONFIG_DIR/last-boot.json" >/dev/null \
@@ -1721,15 +1734,21 @@ symenv() {
 mkdir -p "$SYM/cfg"
 symenv ensure-hooks >/dev/null 2>&1 || fail "ensure-hooks failed against symlinked config"
 symcheck "after install"
-# The content must have changed on the TARGET, reached through the link.
-grep -q 'relaunch boot' "$SYM/dotfiles/autostart.lua" \
-  || fail "the hook must be written through the link into the dotfiles target"
-grep -q 'sunsetr' "$SYM/dotfiles/autostart.lua" || fail "install ate an unrelated autostart line"
+# The bootstrap must have reached the TARGET through the link. The boot hook
+# itself no longer lives in autostart.lua at all -- it is in the owned loader.
 grep -q 'relaunch.lua' "$SYM/dotfiles/hyprland.lua" \
   || fail "the dofile hook must reach the dotfiles target"
-# Repair path: remove_managed_block is the helper that used to break this.
-printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' >>"$SYM/autostart.lua"
+grep -q 'sunsetr' "$SYM/dotfiles/autostart.lua" || fail "install ate an unrelated autostart line"
+grep -q 'relaunch boot' "$SYM/dotfiles/autostart.lua" \
+  && fail "the boot hook must not be written into the user's autostart.lua"
+# Migration path through a symlink: a legacy marker+hook is removed from the
+# target, not by replacing the link.
+printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
+  'o.exec_on_start("/legacy/path/relaunch boot")' >>"$SYM/autostart.lua"
 symenv ensure-hooks >/dev/null 2>&1
+grep -q 'relaunch boot' "$SYM/dotfiles/autostart.lua" \
+  && fail "migration must remove the legacy hook from the symlink target"
+grep -q 'sunsetr' "$SYM/dotfiles/autostart.lua" || fail "migration ate an unrelated line"
 symcheck "after repair"
 # config.json goes through the same writer.
 ln -sf "$SYM/dotfiles/config.json" "$SYM/cfg/config.json"
@@ -1861,6 +1880,184 @@ chmod 0640 "$MODE/cfg/config.json"
 [[ "$(stat -c '%a' "$MODE/cfg/config.json")" == "640" ]] \
   || fail "a rewrite must preserve file mode, got $(stat -c '%a' "$MODE/cfg/config.json")"
 
+# --- owned boot module + once-guard (github issue #19, closes #5) ---
+OB="$WORKDIR/ownedboot"
+obrun() {
+  env RELAUNCH_CONFIG_DIR="$OB/cfg" RELAUNCH_AUTOSTART="$OB/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$OB/hyprland.lua" RELAUNCH_HYPR_CONF="$OB/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$OB/plugin" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS" \
+    RELAUNCH_VERIFY_SLEEP=0 RELAUNCH_VERIFY_DEADLINE=0 RELAUNCH_VERIFY_INTERVAL=0 \
+    "$RELAUNCH" "$@"
+}
+obreset() {
+  rm -rf "$OB"; mkdir -p "$OB/cfg"
+  printf '%s\n' '-- Extra autostart processes.' 'o.launch_on_start("sunsetr")' >"$OB/autostart.lua"
+  printf '%s\n' 'require("hypr.autostart")' >"$OB/hyprland.lua"
+  echo '[]' >"$FAKE_CLIENTS"
+}
+
+# First install, before any save: the loader must already register boot.
+# A bare `return` placeholder would leave the bootstrap live with no hook.
+obreset
+obrun ensure-hooks >/dev/null 2>&1
+[[ -f "$OB/cfg/relaunch.lua" ]] || fail "first install must create the loader"
+grep -Fq "$RELAUNCH boot --quiet" "$OB/cfg/relaunch.lua" \
+  || fail "the loader must register boot on first install, before any save"
+grep -qx 'return' "$OB/cfg/relaunch.lua" \
+  && fail "the loader must not be the bare return placeholder"
+[[ -f "$OB/cfg/rules.lua" ]] || fail "rules.lua must exist for the loader to read"
+grep -q 'relaunch boot' "$OB/autostart.lua" \
+  && fail "nothing may be written into the user's autostart.lua"
+
+# Boot registration must come BEFORE the disable/skip gate, or a skipped
+# session never registers the handler that clears skip-once.
+regline="$(grep -n 'exec_on_start' "$OB/cfg/relaunch.lua" | head -1 | cut -d: -f1)"
+gateline="$(grep -n 'disabled' "$OB/cfg/relaunch.lua" | head -1 | cut -d: -f1)"
+[[ -n "$regline" && -n "$gateline" && "$regline" -lt "$gateline" ]] \
+  || fail "boot registration must precede the disable/skip gate (reg=$regline gate=$gateline)"
+
+# Fault isolation: the pins live in rules.lua, loaded with pcall, so a
+# malformed rules file must not take boot registration with it.
+grep -q 'pcall' "$OB/cfg/relaunch.lua" || fail "rules must be loaded with pcall"
+grep -q 'o.window' "$OB/cfg/relaunch.lua" \
+  && fail "generated pins must live in rules.lua, not the loader"
+cat >"$OB/cfg/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"herdr","workspace":1,"exec":"true","execSource":"guess","enabled":true}
+]}
+EOF
+obrun generate >/dev/null 2>&1
+grep -q 'o.window' "$OB/cfg/rules.lua" || fail "generate must write pins into rules.lua"
+grep -Fq "$RELAUNCH boot --quiet" "$OB/cfg/relaunch.lua" \
+  || fail "generate must leave the loader's boot registration intact"
+
+# Upgrade without list/save: a legacy autostart hook is migrated only once
+# ensure_hooks runs, and the loader is installed BEFORE it is removed.
+obreset
+printf '%s\n' '-- Extra autostart processes.' 'o.launch_on_start("sunsetr")' \
+  '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
+  'o.exec_on_start("/legacy/install/path/relaunch boot")' >"$OB/autostart.lua"
+obrun ensure-hooks >/dev/null 2>&1
+grep -q 'relaunch boot' "$OB/autostart.lua" \
+  && fail "the legacy autostart hook must be migrated away"
+grep -q 'sunsetr' "$OB/autostart.lua" || fail "migration ate an unrelated line"
+grep -Fq "$RELAUNCH boot --quiet" "$OB/cfg/relaunch.lua" \
+  || fail "the loader must carry the hook after migration"
+# Matching is by marker plus the historical template, so an install whose
+# path differs from this one still migrates.
+obreset
+printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
+  'o.exec_on_start("/some/other/machine/relaunch boot")' >"$OB/autostart.lua"
+obrun ensure-hooks >/dev/null 2>&1
+grep -q 'relaunch boot' "$OB/autostart.lua" \
+  && fail "migration must match the marker, not the current SELF path"
+# An UNMARKED hand-written hook is left alone: the once-guard covers it.
+obreset
+printf '%s\n' 'o.exec_on_start("relaunch boot")' >"$OB/autostart.lua"
+obrun ensure-hooks >/dev/null 2>&1
+grep -q 'o.exec_on_start("relaunch boot")' "$OB/autostart.lua" \
+  || fail "an unmarked hand-written hook must be left alone, not adopted"
+
+# Direct uninstall before migration must still remove the legacy hook.
+obreset
+printf '%s\n' 'o.launch_on_start("sunsetr")' \
+  '-- omarchy-relaunch (managed; hidden from the Relaunch list)' \
+  'o.exec_on_start("/legacy/path/relaunch boot")' >"$OB/autostart.lua"
+obrun uninstall --yes >/dev/null 2>&1
+grep -q 'relaunch boot' "$OB/autostart.lua" \
+  && fail "direct uninstall must remove the legacy hook, not leave it executable"
+grep -q 'sunsetr' "$OB/autostart.lua" || fail "uninstall ate an unrelated line"
+
+# --- once-guard ---
+obguard() {
+  env RELAUNCH_CONFIG_DIR="$OB/cfg" RELAUNCH_AUTOSTART="$OB/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$OB/hyprland.lua" RELAUNCH_HYPR_CONF="$OB/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$OB/plugin" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS" \
+    RELAUNCH_VERIFY_SLEEP=0 RELAUNCH_VERIFY_DEADLINE=0 RELAUNCH_VERIFY_INTERVAL=0 \
+    XDG_RUNTIME_DIR="$OB/run" HYPRLAND_INSTANCE_SIGNATURE="$1" \
+    "$RELAUNCH" "${@:2}"
+}
+obreset
+mkdir -p "$OB/run"; chmod 700 "$OB/run"
+cat >"$OB/cfg/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"guarded","workspace":1,"exec":"true","execSource":"guess","enabled":true}
+]}
+EOF
+obguard sig-A boot >/dev/null 2>&1
+jq -e '.outcome == "launched"' "$OB/cfg/last-boot.json" >/dev/null \
+  || fail "the first boot of a session must run"
+# Second invocation in the same session is suppressed, exits 0, and must NOT
+# overwrite the real last-boot record.
+cp "$OB/cfg/last-boot.json" "$OB/first-boot.json"
+out="$(obguard sig-A boot 2>&1)" \
+  || fail "a suppressed boot must exit 0"
+[[ -n "$out" ]] || fail "a suppressed boot must print a concise message"
+diff -q "$OB/first-boot.json" "$OB/cfg/last-boot.json" >/dev/null \
+  || fail "suppression must preserve the real last-boot record"
+# --quiet says nothing, which is what the generated hook passes.
+out="$(obguard sig-A boot --quiet 2>&1)"
+[[ -z "$out" ]] || fail "--quiet suppression must print nothing, got: $out"
+# --force overrides.
+obguard sig-A boot --force >/dev/null 2>&1
+jq -e '.outcome == "launched"' "$OB/cfg/last-boot.json" >/dev/null \
+  || fail "--force must run despite the guard"
+# A different compositor session is a different key.
+obguard sig-B boot >/dev/null 2>&1
+jq -e '.outcome == "launched"' "$OB/cfg/last-boot.json" >/dev/null \
+  || fail "a new compositor session must boot again"
+
+# A crashed first boot must not lock out every retry: the completion marker
+# is written only on success, so a lock file with no marker still allows one.
+rm -f "$OB/run/omarchy-relaunch/boot-sig-C.done"
+: >"$OB/run/omarchy-relaunch/boot-sig-C.lock" 2>/dev/null || true
+rm -f "$OB/cfg/last-boot.json"
+obguard sig-C boot >/dev/null 2>&1
+jq -e '.outcome == "launched"' "$OB/cfg/last-boot.json" >/dev/null \
+  || fail "a stale lock with no completion marker must not suppress a retry"
+
+# No runtime dir means no guard -- run rather than refuse.
+rm -f "$OB/cfg/last-boot.json"
+env RELAUNCH_CONFIG_DIR="$OB/cfg" RELAUNCH_AUTOSTART="$OB/autostart.lua" \
+  RELAUNCH_HYPRLAND_LUA="$OB/hyprland.lua" RELAUNCH_HYPR_CONF="$OB/hyprland.conf" \
+  RELAUNCH_PLUGIN_DIR="$OB/plugin" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS" \
+  RELAUNCH_VERIFY_SLEEP=0 RELAUNCH_VERIFY_DEADLINE=0 RELAUNCH_VERIFY_INTERVAL=0 \
+  HYPRLAND_INSTANCE_SIGNATURE=sig-D XDG_RUNTIME_DIR= \
+  "$RELAUNCH" boot >/dev/null 2>&1
+jq -e '.outcome == "launched"' "$OB/cfg/last-boot.json" >/dev/null \
+  || fail "a missing runtime dir must not stop boot"
+[[ ! -d "$OB/run/omarchy-relaunch" ]] || rm -rf "$OB/run/omarchy-relaunch"
+# A symlinked runtime dir is refused as a guard location (no /tmp fallback).
+rm -rf "$OB/realrun" "$OB/linkrun"; mkdir -p "$OB/realrun"; ln -s "$OB/realrun" "$OB/linkrun"
+rm -f "$OB/cfg/last-boot.json"
+obguard sig-E boot >/dev/null 2>&1 || true
+env RELAUNCH_CONFIG_DIR="$OB/cfg" XDG_RUNTIME_DIR="$OB/linkrun" HYPRLAND_INSTANCE_SIGNATURE=sig-F \
+  RELAUNCH_AUTOSTART="$OB/autostart.lua" RELAUNCH_HYPRLAND_LUA="$OB/hyprland.lua" \
+  RELAUNCH_HYPR_CONF="$OB/hyprland.conf" RELAUNCH_PLUGIN_DIR="$OB/plugin" \
+  HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS" RELAUNCH_VERIFY_SLEEP=0 \
+  RELAUNCH_VERIFY_DEADLINE=0 RELAUNCH_VERIFY_INTERVAL=0 "$RELAUNCH" boot >/dev/null 2>&1
+[[ ! -e "$OB/realrun/omarchy-relaunch" ]] \
+  || fail "a symlinked XDG_RUNTIME_DIR must not be used as a guard location"
+
+# Disabled and skip-once still reach their terminal outcomes under the guard.
+obreset; mkdir -p "$OB/run"; chmod 700 "$OB/run"
+cat >"$OB/cfg/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"guarded","workspace":1,"exec":"true","execSource":"guess","enabled":true}
+]}
+EOF
+obguard sig-G boot-disable >/dev/null 2>&1
+obguard sig-G boot >/dev/null 2>&1
+jq -e '.outcome == "disabled"' "$OB/cfg/last-boot.json" >/dev/null \
+  || fail "a disabled boot must still record its outcome under the guard"
+obguard sig-G boot-enable >/dev/null 2>&1
+obguard sig-H boot-skip >/dev/null 2>&1
+obguard sig-H boot >/dev/null 2>&1
+jq -e '.outcome == "skipped"' "$OB/cfg/last-boot.json" >/dev/null \
+  || fail "a skipped boot must still record its outcome under the guard"
+jq -e '.skipOnce == true' "$OB/cfg/config.json" >/dev/null \
+  && fail "skip-once must be consumed, not left armed"
+
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"
 printf '' >"$WORKDIR/globdir/not-the-class"
@@ -1904,7 +2101,7 @@ cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[{"class":"foo\\bar","workspace":1,"exec":"foo","enabled":true}]}
 EOF
 "$RELAUNCH" generate >/dev/null
-assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window({ class = "^(foo\\\\bar)$"'
+assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'o.window({ class = "^(foo\\\\bar)$"'
 
 # --- env-prefixed exec is not treated as the class ---
 cat >"$RELAUNCH_AUTOSTART" <<'EOF'

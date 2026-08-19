@@ -253,6 +253,36 @@ stable. `Panel.qml` parses that object.
   parent directory is absent, which is why `ensure_file_with` exists and
   creates the resolved target's parent first. Temp files go **beside the resolved target**, never `mktemp`
   in `/tmp`, or the move is cross-filesystem and not atomic either.
+- **Relaunch owns two Lua files; it never writes into the user's
+  `autostart.lua`.** `relaunch.lua` is a stable loader that registers the
+  boot hook; `rules.lua` holds the generated `o.window` declarations, loaded
+  with `pcall`. The split is fault isolation: a malformed rules file loses
+  the pins without losing boot. Boot registration comes **before** the
+  disable/skip gate — gate it and a skipped session never registers the
+  handler that consumes skip-once, so skip becomes permanent. `$SELF` is
+  escaped for a Lua string literal before embedding. `snippetPath` in the
+  `--json` contract names `rules.lua`, the generated file.
+- `ensure_hooks` order is load-bearing: install the loader and `rules.lua`,
+  ensure the `hyprland.lua` bootstrap, and only **then** migrate the legacy
+  `autostart.lua` block. `list` calls it without regenerating anything, so
+  the reverse order can delete the only working boot hook.
+- Migration is the narrow `remove_managed_block`: our marker plus the line
+  directly below when that line is our own hook. It matches the marker, not
+  the current `$SELF`, because the path differs across installs. An unmarked
+  hand-written hook is **left alone** — the runtime once-guard handles the
+  duplication, so there is nothing to gain by deleting a line we did not
+  write. This is what replaces PR #18's hook classification.
+- The once-guard is `flock` plus a completion marker written only **after**
+  boot reaches a terminal outcome. Not a pre-created file: a crashed first
+  boot would then lock out every retry for the session. `XDG_RUNTIME_DIR`
+  must exist, be user-owned, writable and not a symlink; there is no `/tmp`
+  fallback, and without a usable runtime dir or a compositor signature the
+  guard is simply inactive — losing deduplication beats refusing to restore.
+  Suppression exits 0, leaves the real last-boot record alone and prints a
+  concise message; the generated hook passes `--quiet`. `--force` overrides.
+- Do not add `_G.__relaunch_loaded`. If globals survive `hyprctl reload` it
+  would suppress reloading updated rules, and the runtime guard already
+  covers duplicate boots.
 - Persist with temp-file + rename (`config.json.tmp`, `relaunch.lua.tmp`).
 - Everything runs as the user. No sudo, no IPC beyond `hyprctl` and the
   `relaunch` script on `PATH`.
