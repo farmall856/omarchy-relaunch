@@ -244,12 +244,14 @@ stable. `Panel.qml` parses that object.
   A rename replaces whatever sits at the destination, so writing over a
   symlinked `hyprland.lua`, `autostart.lua` or `config.json` destroys the
   link and silently disconnects a dotfiles-managed file. `[[ -f ]]` follows
-  the link, so nothing catches it. `resolve_write_target` resolves the chain
-  and the write lands on the target; the `[[ -L ]]` test is a builtin, so the
-  ordinary case costs nothing. A dangling link writes through to its named
-  target; an unresolvable one is a hard error, never a silent replacement.
-  Shell redirection (`>`, `>>`) already follows symlinks and is safe — only
-  `mv` is not. Temp files go **beside the resolved target**, never `mktemp`
+  the link, so nothing catches it. `resolve_write_target_into` resolves the
+  chain and the write lands on the target; the `[[ -L ]]` test is a builtin,
+  so the ordinary case costs nothing. A dangling link writes through to its
+  named target; an unresolvable one is a hard error, never a silent
+  replacement. Shell redirection (`>`, `>>`) preserves an existing symlink,
+  so only `mv` destroys one — but redirection still *fails* when the target's
+  parent directory is absent, which is why `ensure_file_with` exists and
+  creates the resolved target's parent first. Temp files go **beside the resolved target**, never `mktemp`
   in `/tmp`, or the move is cross-filesystem and not atomic either.
 - Persist with temp-file + rename (`config.json.tmp`, `relaunch.lua.tmp`).
 - Everything runs as the user. No sudo, no IPC beyond `hyprctl` and the

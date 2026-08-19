@@ -2512,16 +2512,6 @@ cmd_uninstall() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# One definition of what a managed hook looks like, shared by counting,
-# stripping and uninstall. Previously these disagreed: counting allowed any
-# whitespace after `--` while removal required exactly one space, and both
-# matched the bare words `relaunch boot` anywhere on a line -- which deleted
-# a user's comment and an unrelated `notify-send relaunch boot ran` command.
-#
-# A hook line is an o.exec_on_start/o.launch_on_start CALL whose quoted
-# command is one is_relaunch_exec would hide from the inventory. Nothing else
-# is ever a candidate for adoption or deletion.
 # Narrow and unchanged in behaviour: drop our exact marker comment and the
 # line immediately below it when that line is our own hook. It never
 # classifies user Lua. Routed through rewrite_through_link so a symlinked
