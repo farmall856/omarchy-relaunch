@@ -1694,6 +1694,160 @@ jq -e '[.entries[] | select(.class == "crlf-app") | .label] == ["CRLF App"]' <<<
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
+# --- symlinked config files survive every write (github issue #2) ---
+# A rename replaces whatever sits at the destination, so renaming onto a
+# symlink destroys the link and disconnects a dotfiles-managed file. mktemp
+# also defaults to /tmp, making the move cross-filesystem and therefore not
+# atomic either. Both are the same line.
+SYM="$WORKDIR/symlinks"
+mkdir -p "$SYM/dotfiles"
+printf '%s\n' '-- Extra autostart processes.' 'o.launch_on_start("sunsetr")' >"$SYM/dotfiles/autostart.lua"
+printf '%s\n' '-- Hyprland configuration.' 'require("hypr.autostart")' >"$SYM/dotfiles/hyprland.lua"
+ln -sf "$SYM/dotfiles/autostart.lua" "$SYM/autostart.lua"
+ln -sf "$SYM/dotfiles/hyprland.lua" "$SYM/hyprland.lua"
+symcheck() {
+  [[ -L "$SYM/autostart.lua" ]] || fail "$1: autostart.lua stopped being a symlink"
+  [[ -L "$SYM/hyprland.lua" ]] || fail "$1: hyprland.lua stopped being a symlink"
+  [[ "$(readlink "$SYM/autostart.lua")" == "$SYM/dotfiles/autostart.lua" ]] \
+    || fail "$1: autostart.lua points somewhere new"
+}
+symenv() {
+  env RELAUNCH_CONFIG_DIR="$SYM/cfg" RELAUNCH_AUTOSTART="$SYM/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$SYM/hyprland.lua" RELAUNCH_HYPR_CONF="$SYM/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$SYM/plugin" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS" \
+    RELAUNCH_VERIFY_SLEEP=0 RELAUNCH_VERIFY_DEADLINE=0 RELAUNCH_VERIFY_INTERVAL=0 \
+    "$RELAUNCH" "$@"
+}
+mkdir -p "$SYM/cfg"
+symenv ensure-hooks >/dev/null 2>&1 || fail "ensure-hooks failed against symlinked config"
+symcheck "after install"
+# The content must have changed on the TARGET, reached through the link.
+grep -q 'relaunch boot' "$SYM/dotfiles/autostart.lua" \
+  || fail "the hook must be written through the link into the dotfiles target"
+grep -q 'sunsetr' "$SYM/dotfiles/autostart.lua" || fail "install ate an unrelated autostart line"
+grep -q 'relaunch.lua' "$SYM/dotfiles/hyprland.lua" \
+  || fail "the dofile hook must reach the dotfiles target"
+# Repair path: remove_managed_block is the helper that used to break this.
+printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' >>"$SYM/autostart.lua"
+symenv ensure-hooks >/dev/null 2>&1
+symcheck "after repair"
+# config.json goes through the same writer.
+ln -sf "$SYM/dotfiles/config.json" "$SYM/cfg/config.json"
+printf '{"staggerSeconds":0,"ignored":[],"entries":[]}\n' >"$SYM/dotfiles/config.json"
+symenv save >/dev/null 2>&1 || fail "save failed against a symlinked config.json"
+[[ -L "$SYM/cfg/config.json" ]] || fail "save replaced the symlinked config.json with a regular file"
+jq -e '.entries' "$SYM/dotfiles/config.json" >/dev/null \
+  || fail "save must write through the link into the dotfiles target"
+# …and uninstall, which is the third caller of remove_managed_block.
+symenv uninstall --yes >/dev/null 2>&1
+symcheck "after uninstall"
+grep -q 'relaunch boot' "$SYM/dotfiles/autostart.lua" \
+  && fail "uninstall must remove the hook from the target"
+grep -q 'sunsetr' "$SYM/dotfiles/autostart.lua" \
+  || fail "uninstall ate an unrelated autostart line"
+
+# A dangling symlink writes through to the named target rather than being
+# replaced by a regular file. Exercised on the files this change owns:
+# overrides.json (ensure_file_with) and config.json (atomic_write).
+rm -rf "$SYM/dangle"; mkdir -p "$SYM/dangle" "$SYM/cfg2"
+ln -sf "$SYM/dangle/overrides-not-there.json" "$SYM/cfg2/overrides.json"
+ln -sf "$SYM/dangle/config-not-there.json" "$SYM/cfg2/config.json"
+( export RELAUNCH_CONFIG_DIR="$SYM/cfg2" RELAUNCH_AUTOSTART="$SYM/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$SYM/hyprland.lua" RELAUNCH_HYPR_CONF="$SYM/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$SYM/plugin2" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS"
+  "$RELAUNCH" save >/dev/null 2>&1 ) || fail "save failed through dangling links"
+[[ -L "$SYM/cfg2/overrides.json" ]] \
+  || fail "a dangling overrides.json link must not be replaced by a regular file"
+[[ -f "$SYM/dangle/overrides-not-there.json" ]] \
+  || fail "a dangling link must be written through to its named target"
+[[ -L "$SYM/cfg2/config.json" ]] \
+  || fail "a dangling config.json link must not be replaced by a regular file"
+jq -e '.entries' "$SYM/dangle/config-not-there.json" >/dev/null \
+  || fail "save must write through a dangling link into the named target"
+
+# A symlink chain resolves all the way to the final file.
+rm -rf "$SYM/cfg3"; mkdir -p "$SYM/cfg3" "$SYM/chaintarget"
+printf '{}\n' >"$SYM/chaintarget/real-overrides.json"
+ln -sf "$SYM/chaintarget/real-overrides.json" "$SYM/mid-overrides.json"
+ln -sf "$SYM/mid-overrides.json" "$SYM/cfg3/overrides.json"
+( export RELAUNCH_CONFIG_DIR="$SYM/cfg3" RELAUNCH_AUTOSTART="$SYM/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$SYM/hyprland.lua" RELAUNCH_HYPR_CONF="$SYM/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$SYM/plugin3" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS"
+  "$RELAUNCH" set-exec --class chainapp --exec chaincmd >/dev/null 2>&1 || true
+  "$RELAUNCH" save >/dev/null 2>&1 )
+[[ -L "$SYM/cfg3/overrides.json" && -L "$SYM/mid-overrides.json" ]] \
+  || fail "a symlink chain must stay a chain of symlinks"
+[[ -f "$SYM/chaintarget/real-overrides.json" ]] \
+  || fail "a symlink chain must resolve to the final target"
+
+# --- a link whose TARGET PARENT does not exist (PR #18 review) ---
+# Plain redirection follows a symlink but still fails when the target's
+# directory is absent -- the ordinary "dotfiles repo not cloned yet" shape.
+MP="$WORKDIR/missingparent"
+rm -rf "$MP"; mkdir -p "$MP/cfg"
+ln -s "$MP/dotfiles/rl/relaunch.lua" "$MP/cfg/relaunch.lua"
+ln -s "$MP/dotfiles/rl/overrides.json" "$MP/cfg/overrides.json"
+( export RELAUNCH_CONFIG_DIR="$MP/cfg" RELAUNCH_AUTOSTART="$MP/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$MP/hyprland.lua" RELAUNCH_HYPR_CONF="$MP/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$MP/plugin"
+  "$RELAUNCH" ensure-hooks >/dev/null 2>&1 ) \
+  || fail "ensure-hooks must survive a link into a missing directory"
+[[ -L "$MP/cfg/relaunch.lua" && -f "$MP/dotfiles/rl/relaunch.lua" ]] \
+  || fail "the generated-rules file must be created through its link"
+[[ -L "$MP/cfg/overrides.json" && -f "$MP/dotfiles/rl/overrides.json" ]] \
+  || fail "overrides.json must be created through its link into a missing directory"
+jq -e 'type == "object"' "$MP/dotfiles/rl/overrides.json" >/dev/null \
+  || fail "the overrides target must hold valid content"
+
+# --- the two writers that bypassed the resolver (PR #18 review) ---
+# remove_legacy_conf and drop-startup both did mktemp + mv onto the user path.
+BP="$WORKDIR/bypass"
+rm -rf "$BP"; mkdir -p "$BP/dotfiles" "$BP/cfg"
+printf '%s\n' '# keep me' "source = $BP/cfg/relaunch.conf" '# omarchy-relaunch' '# also keep' \
+  >"$BP/dotfiles/hyprland.conf"
+ln -sf "$BP/dotfiles/hyprland.conf" "$BP/hyprland.conf"
+printf '%s\n' '-- Extra autostart processes.' 'o.launch_on_start("brave")' 'o.launch_on_start("signal")' \
+  >"$BP/dotfiles/autostart.lua"
+ln -sf "$BP/dotfiles/autostart.lua" "$BP/autostart.lua"
+printf 'windowrulev2 leftover\n' >"$BP/cfg/relaunch.conf"
+bprun() {
+  env RELAUNCH_CONFIG_DIR="$BP/cfg" RELAUNCH_AUTOSTART="$BP/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$BP/hyprland.lua" RELAUNCH_HYPR_CONF="$BP/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$BP/plugin" "$RELAUNCH" "$@"
+}
+bprun ensure-hooks >/dev/null 2>&1
+[[ -L "$BP/hyprland.conf" ]] \
+  || fail "remove_legacy_conf replaced a symlinked hyprland.conf with a regular file"
+grep -q 'omarchy-relaunch' "$BP/dotfiles/hyprland.conf" \
+  && fail "the legacy marker must be removed from the target"
+grep -q 'relaunch.conf' "$BP/dotfiles/hyprland.conf" \
+  && fail "the legacy source line must be removed from the target"
+grep -q '# keep me' "$BP/dotfiles/hyprland.conf" || fail "legacy cleanup ate an unrelated line"
+grep -q '# also keep' "$BP/dotfiles/hyprland.conf" || fail "legacy cleanup ate an unrelated line"
+
+bprun drop-startup --id 'lua:launch_on_start:brave' >/dev/null 2>&1 \
+  || fail "drop-startup failed against a symlinked autostart.lua"
+[[ -L "$BP/autostart.lua" ]] \
+  || fail "drop-startup replaced a symlinked autostart.lua with a regular file"
+grep -q 'brave' "$BP/dotfiles/autostart.lua" && fail "drop-startup must remove the named line"
+grep -q 'signal' "$BP/dotfiles/autostart.lua" || fail "drop-startup ate an unrelated line"
+bprun drop-startup --id 'lua:launch_on_start:nosuchthing' >/dev/null 2>&1 \
+  && fail "drop-startup must still fail on an unknown id"
+
+# --- file mode survives a rewrite ---
+# A rename does not carry the destination's mode, so a 0444 file came back
+# 0644. Exercised through atomic_write, which every config write uses.
+MODE="$WORKDIR/modes"
+rm -rf "$MODE"; mkdir -p "$MODE/cfg"
+printf '{"staggerSeconds":0,"ignored":[],"entries":[]}\n' >"$MODE/cfg/config.json"
+chmod 0640 "$MODE/cfg/config.json"
+( export RELAUNCH_CONFIG_DIR="$MODE/cfg" RELAUNCH_AUTOSTART="$MODE/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$MODE/hyprland.lua" RELAUNCH_HYPR_CONF="$MODE/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$MODE/plugin" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS"
+  "$RELAUNCH" save >/dev/null 2>&1 )
+[[ "$(stat -c '%a' "$MODE/cfg/config.json")" == "640" ]] \
+  || fail "a rewrite must preserve file mode, got $(stat -c '%a' "$MODE/cfg/config.json")"
+
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"
 printf '' >"$WORKDIR/globdir/not-the-class"
