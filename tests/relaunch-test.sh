@@ -1462,6 +1462,13 @@ unset RELAUNCH_DATA_DIRS
 # o.launch_on_start("brave") inventories as class brave while the saved entry
 # is brave-browser; the entry carries startup keys resolved at save time.
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
+# Sandbox the argv lookup too. The fixture below names pid 1600, and with
+# this unset the engine reads the HOST's /proc/1600 -- on a machine where
+# that pid exists and is a terminal, capture identifies the real window
+# instead of the fixture, and this test fails for reasons unrelated to it.
+# An empty dir makes the lookup miss deterministically.
+export RELAUNCH_CMDLINE_DIR="$WORKDIR/nocmd"
+mkdir -p "$RELAUNCH_CMDLINE_DIR"
 cat >"$RELAUNCH_AUTOSTART" <<'EOF'
 o.launch_on_start("brave")
 EOF
@@ -1484,6 +1491,7 @@ jq -e '[.entries[] | select(.class == "brave-browser") | .startupKeys] | .[0] | 
   [.rows[] | select(.kind == "startup" and .exec == "brave")] | length == 0
 ' >/dev/null || fail "a correlated startup line must not be listed separately"
 unset RELAUNCH_DATA_DIRS
+unset RELAUNCH_CMDLINE_DIR
 
 # (7) uninstall must tear the snapshot unit down, and disable it BEFORE
 # deleting the script and config dir, because disable --now fires ExecStop.
@@ -2059,19 +2067,103 @@ bprun drop-startup --id 'lua:launch_on_start:signal' >/dev/null 2>&1 \
 [[ "$(stat -c '%a' "$BP/dotfiles/autostart.lua")" == "640" ]] \
   || fail "rewrite_through_link must preserve mode, got $(stat -c '%a' "$BP/dotfiles/autostart.lua")"
 
-# --- file mode survives a rewrite ---
-# A rename does not carry the destination's mode, so a 0444 file came back
-# 0644. Exercised through atomic_write, which every config write uses.
+# --- Relaunch's own files are private (github issue #24) ---
+# The config directory describes what the user runs, and last-session.json
+# records what their windows were called. Mode preservation is for the USER's
+# files; ours are ENFORCED at 0600, or an install predating this keeps 0644
+# forever -- nothing else ever revisits the bits.
 MODE="$WORKDIR/modes"
-rm -rf "$MODE"; mkdir -p "$MODE/cfg"
-printf '{"staggerSeconds":0,"ignored":[],"entries":[]}\n' >"$MODE/cfg/config.json"
-chmod 0640 "$MODE/cfg/config.json"
-( export RELAUNCH_CONFIG_DIR="$MODE/cfg" RELAUNCH_AUTOSTART="$MODE/autostart.lua" \
+modeenv() {
+  env RELAUNCH_CONFIG_DIR="$MODE/cfg" RELAUNCH_AUTOSTART="$MODE/autostart.lua" \
     RELAUNCH_HYPRLAND_LUA="$MODE/hyprland.lua" RELAUNCH_HYPR_CONF="$MODE/hyprland.conf" \
-    RELAUNCH_PLUGIN_DIR="$MODE/plugin" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS"
-  "$RELAUNCH" save >/dev/null 2>&1 )
-[[ "$(stat -c '%a' "$MODE/cfg/config.json")" == "640" ]] \
-  || fail "a rewrite must preserve file mode, got $(stat -c '%a' "$MODE/cfg/config.json")"
+    RELAUNCH_PLUGIN_DIR="$MODE/plugin" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS" \
+    RELAUNCH_VERIFY_SLEEP=0 RELAUNCH_VERIFY_DEADLINE=0 RELAUNCH_VERIFY_INTERVAL=0 \
+    "$RELAUNCH" "$@"
+}
+modemodes() { stat -c '%a %n' "$MODE/cfg"/* 2>/dev/null | sed "s#$MODE/cfg/##"; }
+rm -rf "$MODE"; mkdir -p "$MODE"
+printf '%s\n' 'require("hypr.autostart")' >"$MODE/hyprland.lua"
+printf '%s\n' 'o.launch_on_start("sunsetr")' >"$MODE/autostart.lua"
+chmod 0644 "$MODE/hyprland.lua"; chmod 0664 "$MODE/autostart.lua"
+cp "$MODE/hyprland.lua" "$MODE/hyprland.before"
+cp "$MODE/autostart.lua" "$MODE/autostart.before"
+
+# A fresh install is private from the start -- never created wide and then
+# tightened, because a file that exists even briefly at 0644 could be read.
+# umask 000 proves the restriction is ours and not inherited.
+( umask 000; modeenv ensure-hooks >/dev/null 2>&1 )
+( umask 000; modeenv save >/dev/null 2>&1 )
+( umask 000; modeenv snapshot >/dev/null 2>&1 )
+( umask 000; modeenv boot >/dev/null 2>&1 )
+[[ "$(stat -c '%a' "$MODE/cfg")" == "700" ]] \
+  || fail "the config dir must be 0700, got $(stat -c '%a' "$MODE/cfg")"
+bad="$(modemodes | awk '$1 != "600"')"
+[[ -z "$bad" ]] || fail "every Relaunch file must be 0600, got: $bad"
+# The files that actually carry the sensitive material must exist in that set.
+for f in config.json last-session.json last-boot.json last-boot.log; do
+  [[ -e "$MODE/cfg/$f" ]] || fail "expected $f to exist for the mode check"
+done
+
+# The user's files keep their own modes, whatever they are.
+[[ "$(stat -c '%a' "$MODE/hyprland.lua")" == "644" ]] \
+  || fail "hyprland.lua mode changed, got $(stat -c '%a' "$MODE/hyprland.lua")"
+[[ "$(stat -c '%a' "$MODE/autostart.lua")" == "664" ]] \
+  || fail "autostart.lua mode changed, got $(stat -c '%a' "$MODE/autostart.lua")"
+
+# An install predating this carries 0644. One ensure_hooks tightens it.
+chmod 0755 "$MODE/cfg"; chmod 0644 "$MODE/cfg"/*
+modeenv ensure-hooks >/dev/null 2>&1
+[[ "$(stat -c '%a' "$MODE/cfg")" == "700" ]] \
+  || fail "ensure-hooks must tighten an existing 0755 config dir, got $(stat -c '%a' "$MODE/cfg")"
+bad="$(modemodes | awk '$1 != "600"')"
+[[ -z "$bad" ]] || fail "ensure-hooks must tighten existing 0644 files, got: $bad"
+# …and it still leaves the user's files alone while doing it.
+[[ "$(stat -c '%a' "$MODE/hyprland.lua")" == "644" ]] \
+  || fail "tightening must not touch hyprland.lua's mode"
+[[ "$(stat -c '%a' "$MODE/autostart.lua")" == "664" ]] \
+  || fail "tightening must not touch autostart.lua's mode"
+
+# The byte-for-byte uninstall guarantee still holds around all of this.
+modeenv uninstall --yes >/dev/null 2>&1
+cmp -s "$MODE/hyprland.before" "$MODE/hyprland.lua" \
+  || fail "uninstall must still restore hyprland.lua byte-for-byte"
+cmp -s "$MODE/autostart.before" "$MODE/autostart.lua" \
+  || fail "uninstall must still leave autostart.lua byte-identical"
+
+# Created private, PROVEN before anything tightens. tighten_config_dir would
+# mask a create-then-tighten mistake: the end state is 0600 either way, and
+# the window where the file was readable is exactly what must not exist.
+# boot, drop and snapshot all skip ensure_hooks, so nothing repairs the mode
+# behind them -- what these see is what creation produced.
+rm -rf "$MODE"; mkdir -p "$MODE"
+( umask 000
+  # drop creates the config dir and overrides.json on its way to failing.
+  modeenv drop --class nothing-here >/dev/null 2>&1 || true )
+[[ "$(stat -c '%a' "$MODE/cfg")" == "700" ]] \
+  || fail "the config dir must be CREATED 0700, got $(stat -c '%a' "$MODE/cfg")"
+[[ "$(stat -c '%a' "$MODE/cfg/overrides.json")" == "600" ]] \
+  || fail "ensure_file_with must CREATE 0600, got $(stat -c '%a' "$MODE/cfg/overrides.json")"
+printf '{"staggerSeconds":0,"ignored":[],"entries":[]}\n' >"$MODE/cfg/config.json"
+chmod 600 "$MODE/cfg/config.json"
+( umask 000; modeenv boot >/dev/null 2>&1 )
+[[ "$(stat -c '%a' "$MODE/cfg/last-boot.json")" == "600" ]] \
+  || fail "atomic_write must CREATE 0600, got $(stat -c '%a' "$MODE/cfg/last-boot.json")"
+[[ "$(stat -c '%a' "$MODE/cfg/last-boot.log")" == "600" ]] \
+  || fail "atomic_write must CREATE 0600 for the log, got $(stat -c '%a' "$MODE/cfg/last-boot.log")"
+( umask 000; modeenv snapshot >/dev/null 2>&1 )
+[[ "$(stat -c '%a' "$MODE/cfg/last-session.json")" == "600" ]] \
+  || fail "the window-title snapshot must be CREATED 0600, got $(stat -c '%a' "$MODE/cfg/last-session.json")"
+
+# The DIRECTORY too, on a command that writes before ensure_hooks has ever
+# run. snapshot creates the config dir through the write path, which used a
+# bare mkdir and so took the ambient umask: under 022 a fresh install got a
+# 0755 directory until some later ensure_hooks tightened it. Deliberately not
+# ensure-hooks here -- that would tighten the directory and hide the defect.
+rm -rf "$MODE/cfg"
+( umask 022; modeenv snapshot >/dev/null 2>&1 )
+[[ "$(stat -c '%a' "$MODE/cfg")" == "700" ]] \
+  || fail "a write before ensure-hooks must still create the dir 0700, got $(stat -c '%a' "$MODE/cfg")"
+
 
 # --- owned boot module (github issue #19, closes #5) ---
 OB="$WORKDIR/ownedboot"

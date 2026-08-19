@@ -307,12 +307,41 @@ resolve_write_target_into() {
 # already exist, making the *resolved* target's parent first. Plain
 # redirection follows a symlink but still fails when the target's directory
 # is missing, which is exactly the dangling-into-an-absent-dotfiles-dir case.
+# Relaunch's own directory, created private. Its contents describe what the
+# user runs and, in last-session.json, what their windows were called; that
+# should not depend on /home/<user> happening to be drwx------.
+ensure_config_dir() {
+  local dir
+  dir="$(config_dir)"
+  [[ -d "$dir" ]] && return 0
+  (umask 077; mkdir -p "$dir")
+}
+
+# Create the parent for one of our own writes. A command that writes before
+# ensure_hooks has run -- `snapshot` is the reachable one -- created the config
+# directory here with the ambient umask, so under umask 022 a fresh install got
+# a 0755 directory until the next ensure_hooks tightened it. Only OUR directory
+# is forced private: the bin directory and the parent of hyprland.lua belong to
+# the user and are not Relaunch's to restrict.
+mkdir_for_write() {
+  local dir="$1"
+  if [[ "$dir" == "$(config_dir)" ]]; then
+    ensure_config_dir
+  else
+    mkdir -p "$dir"
+  fi
+}
+
+# 0600 from creation, never created-then-tightened: a file that exists even
+# briefly at 0644 is a file that could have been read. This and atomic_write
+# write ONLY files Relaunch owns, all of them under the config directory --
+# user files go through rewrite_through_link, which preserves their mode.
 ensure_file_with() {
   local path="$1" default="$2"
   resolve_write_target_into "$path"
-  mkdir -p "$(dirname "$_WTARGET")"
+  mkdir_for_write "$(dirname "$_WTARGET")"
   [[ -e "$_WTARGET" ]] && return 0
-  printf '%s' "$default" >"$_WTARGET"
+  (umask 077; printf '%s' "$default" >"$_WTARGET")
 }
 
 atomic_write() {
@@ -320,11 +349,19 @@ atomic_write() {
   resolve_write_target_into "$dest"
   real="$_WTARGET"
   tmp="${real}.tmp"
-  mkdir -p "$(dirname "$real")"
+  mkdir_for_write "$(dirname "$real")"
+  # The temp file is renamed into place, so ITS mode becomes the final mode.
+  # Create it private and set the mode here rather than after the rename:
+  # tightening afterwards would leave a readable window, and a rename does not
+  # carry the destination's mode anyway.
+  #
+  # Enforced, not preserved. Mode preservation is for the user's files, which
+  # this function never writes -- every caller is a Relaunch-owned file in the
+  # config directory. Preserving here would mean a pre-0600 install kept its
+  # 0644 forever, since nothing else ever changes the bits.
+  (umask 077; : >"$tmp")
   cat >"$tmp"
-  # A rename does not carry the destination's mode, so a 0444 file would come
-  # back 0644. Copy it across before replacing.
-  [[ -e "$real" ]] && chmod --reference="$real" "$tmp" 2>/dev/null
+  chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$real"
 }
 
@@ -358,7 +395,7 @@ boot_gated() {
 
 set_skip_once() {
   local on="$1" cfg
-  mkdir -p "$(config_dir)"
+  ensure_config_dir
   if [[ "$on" == true ]]; then
     : >"$(skip_path)"
   else
@@ -1429,7 +1466,7 @@ class_for_startup_exec() {
 }
 
 ensure_overrides_file() {
-  mkdir -p "$(config_dir)"
+  ensure_config_dir
   ensure_file_with "$(overrides_path)" '{}
 '
 }
@@ -1908,7 +1945,7 @@ last_boot_state_json() {
 write_last_boot() {
   local started="$1" outcome="$2" reason="$3" launches="${4:-[]}" stagger="${5:-0}"
   local json
-  mkdir -p "$(config_dir)"
+  ensure_config_dir
   json="$(jq -n \
     --arg startedAt "$started" \
     --arg outcome "$outcome" \
@@ -2177,7 +2214,7 @@ cmd_boot() {
   # Never listed as a startup app.
   local started cfg stagger line class ws exec status pid err launches first_launch
   started="$(date -Iseconds)"
-  mkdir -p "$(config_dir)"
+  ensure_config_dir
   if [[ -f "$(disabled_path)" ]]; then
     write_last_boot "$started" disabled "disabled flag present" "[]" 0
     exit 0
@@ -2615,7 +2652,7 @@ cmd_boot_skip() {
 }
 
 cmd_boot_disable() {
-  mkdir -p "$(config_dir)"
+  ensure_config_dir
   : >"$(disabled_path)"
   set_skip_once false
   load_config_json | write_generated
@@ -2711,11 +2748,32 @@ _remove_bootstrap_filter() {
   return 0
 }
 
+# Installs predating 0600 keep it: atomic_write replaces the file through a
+# temp of its own, so nothing revisits an existing file's bits. One stat over
+# the directory and its contents, and a chmod only for what is actually wrong
+# -- ensure_hooks is on the list/save path and two PRs went into keeping that
+# fast, so the correct case costs a single fork and no writes.
+tighten_config_dir() {
+  local dir mode path
+  dir="$(config_dir)"
+  [[ -d "$dir" ]] || return 0
+  while read -r mode path; do
+    [[ -n "$mode" ]] || continue
+    if [[ "$path" == "$dir" ]]; then
+      [[ "$mode" == 700 ]] || chmod 700 "$dir" 2>/dev/null || true
+    else
+      [[ "$mode" == 600 ]] || chmod 600 "$path" 2>/dev/null || true
+    fi
+  done < <(stat -c '%a %n' "$dir" "$dir"/* 2>/dev/null || true)
+}
+
 ensure_hooks() {
   local lua bin hook
   lua="$(hyprland_lua_path)"
   hook="$(hyprland_hook_line)"
-  mkdir -p "$(dirname "$lua")" "$(config_dir)"
+  mkdir -p "$(dirname "$lua")"
+  ensure_config_dir
+  tighten_config_dir
   ensure_overrides_file
   remove_legacy_conf
 
