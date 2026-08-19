@@ -78,12 +78,16 @@ cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 EOF
 
 "$RELAUNCH" generate >/dev/null
-grep -q 'omarchy-relaunch' "$RELAUNCH_AUTOSTART" || fail "ensure_hooks did not mark autostart"
-grep -Fq "${RELAUNCH} boot" "$RELAUNCH_AUTOSTART" || fail "boot hook must use the script path, not PATH"
+# The boot hook lives in the owned loader now, not in the user's autostart.
+grep -q 'omarchy-relaunch' "$RELAUNCH_AUTOSTART" \
+  && fail "ensure_hooks must not write anything into autostart.lua"
+grep -Fq "${RELAUNCH} boot" "$RELAUNCH_CONFIG_DIR/relaunch.lua" \
+  || fail "the loader must register the boot hook with the script path, not PATH"
 grep -q 'io.open(_rl)' "$RELAUNCH_HYPRLAND_LUA" || fail "hyprland hook must skip a missing relaunch.lua"
-[[ -f "$RELAUNCH_CONFIG_DIR/relaunch.lua" ]] || fail "ensure_hooks must create relaunch.lua before the hyprland hook"
+[[ -f "$RELAUNCH_CONFIG_DIR/relaunch.lua" ]] || fail "ensure_hooks must create the loader"
+[[ -f "$RELAUNCH_CONFIG_DIR/rules.lua" ]] || fail "ensure_hooks must create rules.lua for the loader to read"
 [[ -e "$RELAUNCH_CONFIG_DIR/relaunch.conf" ]] && fail "must not write the leftover windowrulev2 relaunch.conf"
-lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+lua="$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")"
 
 assert_contains "$lua" 'o.window({ class = "^(herdr)$" }, { workspace = "1 silent" })'
 assert_contains "$lua" 'o.window({ class = "^(brave-browser)$" }, { workspace = "2 silent" })'
@@ -103,7 +107,7 @@ cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[{"class":"SomeApp","workspace":3,"exec":"","enabled":true}]}
 EOF
 "$RELAUNCH" generate >/dev/null
-assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window({ class = "^(SomeApp)$" }'
+assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'o.window({ class = "^(SomeApp)$" }'
 
 # class → exec comes from .desktop files, not a built-in table
 XDG_APPS="$WORKDIR/xdg/applications"
@@ -365,8 +369,8 @@ EOF
 out="$("$RELAUNCH" save --json)"
 echo "$out" | jq -e '.ok == true and .added == 1 and .updated == 2' >/dev/null \
   || fail "save json counts: $out"
-echo "$out" | jq -e --arg p "$RELAUNCH_CONFIG_DIR/relaunch.lua" '.snippetPath == $p' >/dev/null \
-  || fail "snippetPath should be relaunch.lua"
+echo "$out" | jq -e --arg p "$RELAUNCH_CONFIG_DIR/rules.lua" '.snippetPath == $p' >/dev/null \
+  || fail "snippetPath should be rules.lua"
 
 cfg="$(cat "$RELAUNCH_CONFIG_DIR/config.json")"
 echo "$cfg" | jq -e '
@@ -442,16 +446,16 @@ grep -q 'o.launch_on_start("brave")' "$RELAUNCH_AUTOSTART" && fail "startup brav
 "$RELAUNCH" boot-skip
 [[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] || fail "skip-once file"
 jq -e '.skipOnce == true' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "skipOnce not persisted in config"
-assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window'
+assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'o.window'
 "$RELAUNCH" save >/dev/null
 jq -e '.skipOnce == true' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "save dropped skipOnce"
 [[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] || fail "save removed skip-once file"
-assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window'
+assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'o.window'
 rm -f "$RELAUNCH_CONFIG_DIR/skip-once"
 "$RELAUNCH" boot
 [[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] && fail "skip-once not consumed"
 jq -e '.skipOnce == true' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null && fail "skipOnce left armed after boot"
-assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window'
+assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'o.window'
 "$RELAUNCH" last-boot --json | jq -e '.outcome == "skipped" and (.text | length) > 0' >/dev/null \
   || fail "skip last-boot log"
 
@@ -628,7 +632,7 @@ EOF
 jq -e '
   ([.entries[] | select(.class == "tiley") | has("float")] == [true])
 ' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "float:false must survive the config round trip, not be dropped as falsy"
-lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+lua="$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")"
 assert_contains "$lua" 'o.window({ class = "^(floaty)$" }, { workspace = "3 silent", float = true })'
 assert_contains "$lua" 'o.window({ class = "^(tiley)$" }, { workspace = "4 silent", tile = true })'
 # tile = true alone loses to Omarchy's floating-window tag: verified on
@@ -656,7 +660,7 @@ echo "$out" | jq -e '
   and ([.entries[] | select(.class == "tiley") | .float] == [true])
 ' >/dev/null || fail "recapture must refresh float from the live window: $out"
 echo "$out" | jq -e '.updated == 2' >/dev/null   || fail "a float-only change is one update per entry: $out"
-lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+lua="$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")"
 assert_contains "$lua" 'o.window({ class = "^(floaty)$" }, { workspace = "3 silent", tile = true })'
 assert_contains "$lua" 'o.window({ class = "^(tiley)$" }, { workspace = "4 silent", float = true })'
 
@@ -674,7 +678,7 @@ cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 ]}
 EOF
 "$RELAUNCH" generate >/dev/null
-lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+lua="$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")"
 assert_contains "$lua" 'o.window({ class = "^(legacy)$" }, { workspace = "2 silent" })'
 assert_not_contains "$lua" 'legacy)$" }, { workspace = "2 silent", tile'
 # …and import, which has no window to read, leaves it unknown too.
@@ -753,7 +757,7 @@ EOF
 "$RELAUNCH" save >/dev/null
 jq -e '[.entries[] | select(.class == "TUI.float") | .label] == ["Disk Usage"]' \
   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "label must be persisted to config.json"
-lua="$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")"
+lua="$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")"
 assert_contains "$lua" 'class = "^(TUI\\.float)$"'
 assert_not_contains "$lua" 'Disk Usage'
 
@@ -1507,8 +1511,8 @@ echo "$legacy" | jq -e '
 ' >/dev/null || fail "a pre-startupKeys config must normalize the field to []: $legacy"
 echo "$legacy" | jq -e '.ok == true' >/dev/null || fail "a legacy config must list cleanly"
 "$RELAUNCH" generate >/dev/null || fail "a legacy config must generate cleanly"
-assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'class = "^(brave-browser)$"'
-assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'startupKeys'
+assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'class = "^(brave-browser)$"'
+assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'startupKeys'
 echo '[]' >"$FAKE_CLIENTS"
 "$RELAUNCH" boot >/dev/null 2>&1
 jq -e '.outcome == "launched"' "$RELAUNCH_CONFIG_DIR/last-boot.json" >/dev/null \
@@ -1721,16 +1725,18 @@ symenv() {
 mkdir -p "$SYM/cfg"
 symenv ensure-hooks >/dev/null 2>&1 || fail "ensure-hooks failed against symlinked config"
 symcheck "after install"
-# The content must have changed on the TARGET, reached through the link.
-grep -q 'relaunch boot' "$SYM/dotfiles/autostart.lua" \
-  || fail "the hook must be written through the link into the dotfiles target"
-grep -q 'sunsetr' "$SYM/dotfiles/autostart.lua" || fail "install ate an unrelated autostart line"
+# The bootstrap must have reached the TARGET through the link. The boot hook
+# itself no longer lives in autostart.lua at all -- it is in the owned loader.
 grep -q 'relaunch.lua' "$SYM/dotfiles/hyprland.lua" \
   || fail "the dofile hook must reach the dotfiles target"
-# Repair path: remove_managed_block is the helper that used to break this.
-printf '%s\n' '-- omarchy-relaunch (managed; hidden from the Relaunch list)' >>"$SYM/autostart.lua"
+grep -q 'sunsetr' "$SYM/dotfiles/autostart.lua" || fail "install ate an unrelated autostart line"
+grep -q 'relaunch boot' "$SYM/dotfiles/autostart.lua" \
+  && fail "the boot hook must not be written into the user's autostart.lua"
+# ensure-hooks is idempotent through the link and never touches autostart.lua.
 symenv ensure-hooks >/dev/null 2>&1
 symcheck "after repair"
+[[ "$(grep -c 'relaunch.lua' "$SYM/dotfiles/hyprland.lua")" -eq 1 ]] \
+  || fail "a second ensure-hooks duplicated the bootstrap in the target"
 # config.json goes through the same writer.
 ln -sf "$SYM/dotfiles/config.json" "$SYM/cfg/config.json"
 printf '{"staggerSeconds":0,"ignored":[],"entries":[]}\n' >"$SYM/dotfiles/config.json"
@@ -1738,13 +1744,16 @@ symenv save >/dev/null 2>&1 || fail "save failed against a symlinked config.json
 [[ -L "$SYM/cfg/config.json" ]] || fail "save replaced the symlinked config.json with a regular file"
 jq -e '.entries' "$SYM/dotfiles/config.json" >/dev/null \
   || fail "save must write through the link into the dotfiles target"
-# …and uninstall, which is the third caller of remove_managed_block.
+# …and uninstall, which removes our bootstrap through the same resolver.
+# Clean removal is the one guarantee, so it has to reach the link TARGET.
 symenv uninstall --yes >/dev/null 2>&1
 symcheck "after uninstall"
-grep -q 'relaunch boot' "$SYM/dotfiles/autostart.lua" \
-  && fail "uninstall must remove the hook from the target"
+grep -q 'relaunch.lua' "$SYM/dotfiles/hyprland.lua" \
+  && fail "uninstall must remove the bootstrap from the target"
+grep -q 'require("hypr.autostart")' "$SYM/dotfiles/hyprland.lua" \
+  || fail "uninstall ate an unrelated hyprland.lua line"
 grep -q 'sunsetr' "$SYM/dotfiles/autostart.lua" \
-  || fail "uninstall ate an unrelated autostart line"
+  || fail "uninstall must leave the user autostart.lua alone"
 
 # A dangling symlink writes through to the named target rather than being
 # replaced by a regular file. Exercised on the files this change owns:
@@ -1861,6 +1870,165 @@ chmod 0640 "$MODE/cfg/config.json"
 [[ "$(stat -c '%a' "$MODE/cfg/config.json")" == "640" ]] \
   || fail "a rewrite must preserve file mode, got $(stat -c '%a' "$MODE/cfg/config.json")"
 
+# --- owned boot module (github issue #19, closes #5) ---
+OB="$WORKDIR/ownedboot"
+obrun() {
+  env RELAUNCH_CONFIG_DIR="$OB/cfg" RELAUNCH_AUTOSTART="$OB/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$OB/hyprland.lua" RELAUNCH_HYPR_CONF="$OB/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$OB/plugin" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS" \
+    RELAUNCH_VERIFY_SLEEP=0 RELAUNCH_VERIFY_DEADLINE=0 RELAUNCH_VERIFY_INTERVAL=0 \
+    "$RELAUNCH" "$@"
+}
+obreset() {
+  rm -rf "$OB"; mkdir -p "$OB/cfg"
+  printf '%s\n' '-- Extra autostart processes.' 'o.launch_on_start("sunsetr")' >"$OB/autostart.lua"
+  printf '%s\n' 'require("hypr.autostart")' >"$OB/hyprland.lua"
+  echo '[]' >"$FAKE_CLIENTS"
+}
+
+# First install, before any save: the loader must already register boot.
+# A bare `return` placeholder would leave the bootstrap live with no hook.
+obreset
+obrun ensure-hooks >/dev/null 2>&1
+[[ -f "$OB/cfg/relaunch.lua" ]] || fail "first install must create the loader"
+grep -Fq "$RELAUNCH boot" "$OB/cfg/relaunch.lua" \
+  || fail "the loader must register boot on first install, before any save"
+grep -qx 'return' "$OB/cfg/relaunch.lua" \
+  && fail "the loader must not be the bare return placeholder"
+[[ -f "$OB/cfg/rules.lua" ]] || fail "rules.lua must exist for the loader to read"
+grep -q 'relaunch boot' "$OB/autostart.lua" \
+  && fail "nothing may be written into the user's autostart.lua"
+
+# Boot registration must come BEFORE the disable/skip gate, or a skipped
+# session never registers the handler that clears skip-once.
+regline="$(grep -n 'exec_on_start' "$OB/cfg/relaunch.lua" | head -1 | cut -d: -f1)"
+gateline="$(grep -n 'disabled' "$OB/cfg/relaunch.lua" | head -1 | cut -d: -f1)"
+[[ -n "$regline" && -n "$gateline" && "$regline" -lt "$gateline" ]] \
+  || fail "boot registration must precede the disable/skip gate (reg=$regline gate=$gateline)"
+
+# Fault isolation, EXECUTED rather than grepped: feed the loader a malformed
+# rules.lua under a real Lua interpreter with o.exec_on_start mocked, and
+# require that registration still happened and the error was reported.
+grep -q 'o.window' "$OB/cfg/relaunch.lua" \
+  && fail "generated pins must live in rules.lua, not the loader"
+LUABIN="$(command -v lua5.4 || command -v lua || command -v luajit || true)"
+if [[ -n "$LUABIN" ]]; then
+  printf 'this is not ) valid lua (\n' >"$OB/cfg/rules.lua"
+  cat >"$OB/harness.lua" <<'EOF'
+local captured = nil
+o = { exec_on_start = function(cmd) captured = cmd end }
+local reported = nil
+local real_print = print
+print = function(msg) reported = tostring(msg) end
+local ok = pcall(dofile, os.getenv("LOADER"))
+print = real_print
+if captured == nil then print("NO_REGISTRATION"); os.exit(1) end
+if reported == nil or not string.find(reported, "rules.lua failed to load", 1, true) then
+  print("NO_ERROR_REPORT"); os.exit(1)
+end
+if not ok then print("LOADER_ABORTED"); os.exit(1) end
+print("OK " .. captured)
+EOF
+  # The loader derives its dir from XDG_CONFIG_HOME, so point that at a tree
+  # whose omarchy-relaunch IS this test's config dir.
+  mkdir -p "$OB/xdg"
+  ln -sfn "$OB/cfg" "$OB/xdg/omarchy-relaunch"
+  luaout="$(HOME="$OB" XDG_CONFIG_HOME="$OB/xdg" LOADER="$OB/cfg/relaunch.lua" \
+    "$LUABIN" "$OB/harness.lua" 2>&1)" || fail "loader must survive a malformed rules.lua: $luaout"
+  [[ "$luaout" == OK* ]] || fail "loader fault isolation: $luaout"
+  [[ "$luaout" == *"boot"* ]] || fail "registration must carry the boot command: $luaout"
+  # Restore a valid rules file for anything that follows.
+  printf -- '-- Generated by omarchy-relaunch. Do not edit by hand.\n' >"$OB/cfg/rules.lua"
+else
+  grep -q 'pcall' "$OB/cfg/relaunch.lua" || fail "rules must be loaded with pcall"
+fi
+cat >"$OB/cfg/config.json" <<'EOF'
+{"staggerSeconds":0,"ignored":[],"entries":[
+  {"class":"herdr","workspace":1,"exec":"true","execSource":"guess","enabled":true}
+]}
+EOF
+obrun generate >/dev/null 2>&1
+grep -q 'o.window' "$OB/cfg/rules.lua" || fail "generate must write pins into rules.lua"
+grep -Fq "$RELAUNCH boot" "$OB/cfg/relaunch.lua" \
+  || fail "generate must leave the loader's boot registration intact"
+
+# ensure-hooks never touches autostart.lua -- not to install, not to clean up,
+# not to adopt a hand-written line. Relaunch owns its own module; whatever is
+# in the user's file stays exactly as they left it.
+obreset
+cat >"$OB/autostart.lua" <<'EOF'
+-- Extra autostart processes.
+o.launch_on_start("sunsetr")
+o.exec_on_start("relaunch boot")
+-- omarchy-relaunch (managed; hidden from the Relaunch list)
+o.launch_on_start("brave")
+EOF
+cp "$OB/autostart.lua" "$OB/autostart.before"
+obrun ensure-hooks >/dev/null 2>&1
+diff -q "$OB/autostart.before" "$OB/autostart.lua" >/dev/null \
+  || fail "ensure-hooks modified the user's autostart.lua"
+obrun uninstall --yes >/dev/null 2>&1
+diff -q "$OB/autostart.before" "$OB/autostart.lua" >/dev/null \
+  || fail "uninstall modified the user's autostart.lua"
+
+# Clean removal is the one guarantee, and the standard is BYTE-FOR-BYTE: the
+# file Relaunch hands back has to be the file it was given. Grepping that the
+# hook is gone and the user's lines remain passes on a file that has grown a
+# blank line on every cycle, which is how ten of them ended up in a user's
+# autostart.lua. cmp against a saved copy, or this proves nothing.
+cyclecheck() {
+  # $1 label, $2 the exact original bytes (already in $OB/hyprland.before)
+  cp "$OB/hyprland.before" "$OB/hyprland.lua"
+  obrun ensure-hooks >/dev/null 2>&1
+  grep -q 'relaunch.lua' "$OB/hyprland.lua" || fail "$1: ensure-hooks must write the bootstrap"
+  cmp -s "$OB/hyprland.before" "$OB/hyprland.lua" \
+    && fail "$1: ensure-hooks did not change hyprland.lua at all"
+  obrun uninstall --yes >/dev/null 2>&1
+  cmp -s "$OB/hyprland.before" "$OB/hyprland.lua" \
+    || fail "$1: uninstall did not restore hyprland.lua byte-for-byte: $(diff <(od -c "$OB/hyprland.before") <(od -c "$OB/hyprland.lua") | head -4 | tr '\n' ' ')"
+}
+
+obreset
+printf '%s\n' 'require("hypr.autostart")' '-- trailing comment' >"$OB/hyprland.before"
+cyclecheck "a normal hyprland.lua"
+
+# Repeat the cycle. A residue of one byte per cycle is invisible in a single
+# install/uninstall and obvious after five.
+obreset
+printf '%s\n' 'require("hypr.autostart")' >"$OB/hyprland.before"
+for _i in 1 2 3 4 5; do
+  obrun ensure-hooks >/dev/null 2>&1
+  obrun uninstall --yes >/dev/null 2>&1
+  cp "$OB/hyprland.lua" "$OB/hyprland.cycled"
+  cmp -s "$OB/hyprland.before" "$OB/hyprland.cycled" \
+    || fail "cycle $_i left residue in hyprland.lua: $(od -c "$OB/hyprland.cycled" | head -3 | tr '\n' ' ')"
+  cp "$OB/hyprland.cycled" "$OB/hyprland.lua"
+done
+
+# A file whose last line has NO trailing newline must not come back with one.
+obreset
+printf '%s' 'require("hypr.autostart")' >"$OB/hyprland.before"
+[[ -n "$(tail -c1 "$OB/hyprland.before")" ]] || fail "fixture should have no final newline"
+cyclecheck "an hyprland.lua with no final newline"
+
+obreset
+obrun ensure-hooks >/dev/null 2>&1
+obrun uninstall --yes >/dev/null 2>&1
+[[ ! -d "$OB/cfg" ]] || fail "uninstall must remove the config dir"
+
+# A hyprland.lua carrying our exact hook WITHOUT the marker is still ours,
+# byte for byte, and leaving it behind would keep Relaunch loading after
+# uninstall -- which is the one thing the project promises will not happen.
+obreset
+obrun ensure-hooks >/dev/null 2>&1
+hookline="$(grep 'relaunch.lua' "$OB/hyprland.lua")"
+printf '%s\n' 'require("hypr.autostart")' "$hookline" >"$OB/hyprland.lua"
+obrun uninstall --yes >/dev/null 2>&1
+grep -q 'relaunch.lua' "$OB/hyprland.lua" \
+  && fail "an unmarked copy of our own bootstrap must still be removed"
+grep -qx 'require("hypr.autostart")' "$OB/hyprland.lua" \
+  || fail "uninstall ate an unrelated hyprland.lua line"
+
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"
 printf '' >"$WORKDIR/globdir/not-the-class"
@@ -1904,7 +2072,7 @@ cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[{"class":"foo\\bar","workspace":1,"exec":"foo","enabled":true}]}
 EOF
 "$RELAUNCH" generate >/dev/null
-assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/relaunch.lua")" 'o.window({ class = "^(foo\\\\bar)$"'
+assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'o.window({ class = "^(foo\\\\bar)$"'
 
 # --- env-prefixed exec is not treated as the class ---
 cat >"$RELAUNCH_AUTOSTART" <<'EOF'
@@ -1919,17 +2087,21 @@ EOF
     and .[0] != "FOO=bar" and .[0] != ""
 ' >/dev/null || fail "env-prefixed exec class"
 
-# --- uninstall must not delete adjacent user startup lines ---
-printf '%s\n' '-- keep' '-- omarchy-relaunch' 'local _rl = "/tmp/omarchy-relaunch/relaunch.lua"; dofile(_rl)' '-- after' >"$RELAUNCH_HYPRLAND_LUA"
+# --- uninstall removes our bootstrap and nothing else ---
+"$RELAUNCH" ensure-hooks >/dev/null 2>&1
+hookline="$(grep 'relaunch.lua' "$RELAUNCH_HYPRLAND_LUA")"
+[[ -n "$hookline" ]] || fail "ensure-hooks did not write the bootstrap"
+printf '%s\n' '-- keep' '-- omarchy-relaunch' "$hookline" '-- after' >"$RELAUNCH_HYPRLAND_LUA"
+cp "$RELAUNCH_AUTOSTART" "$WORKDIR/autostart.before-uninstall"
 "$RELAUNCH" uninstall --yes >/dev/null
-grep -q 'o.launch_on_start("keep-me")' "$RELAUNCH_AUTOSTART" || fail "unrelated keep-me deleted"
-grep -q 'o.launch_on_start("also-keep")' "$RELAUNCH_AUTOSTART" || fail "adjacent also-keep deleted"
-grep -q 'relaunch boot' "$RELAUNCH_AUTOSTART" && fail "boot hook survived uninstall"
-grep -q 'omarchy-relaunch' "$RELAUNCH_AUTOSTART" && fail "marker survived uninstall"
 grep -q 'omarchy-relaunch' "$RELAUNCH_HYPRLAND_LUA" && fail "hyprland marker survived uninstall"
-grep -q 'dofile' "$RELAUNCH_HYPRLAND_LUA" && fail "hyprland dofile survived uninstall"
+grep -q 'dofile' "$RELAUNCH_HYPRLAND_LUA" && fail "hyprland bootstrap survived uninstall"
 grep -q -- '-- keep' "$RELAUNCH_HYPRLAND_LUA" || fail "unrelated hyprland comment deleted"
 grep -q -- '-- after' "$RELAUNCH_HYPRLAND_LUA" || fail "adjacent hyprland comment deleted"
+# autostart.lua is the user's file. Uninstall reads it for the inventory and
+# writes nothing to it, whatever it happens to contain.
+diff -q "$WORKDIR/autostart.before-uninstall" "$RELAUNCH_AUTOSTART" >/dev/null \
+  || fail "uninstall modified the user's autostart.lua"
 
 grep -q 'install -m 0755 "$REPO_DIR/relaunch"      "$PLUGIN_DST/relaunch"' \
   "$ROOT/install.sh" || fail "install.sh must copy relaunch into the plugin folder"

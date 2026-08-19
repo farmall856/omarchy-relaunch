@@ -11,8 +11,13 @@ This folder is the source tree. The public repo is
 
 ## Architecture
 
-No daemon. Save inventories windows; `relaunch boot` (a hidden autostart
-hook) launches the list. Workspace pins live in generated `relaunch.lua`.
+No daemon. Save inventories windows; `relaunch boot` launches the list. The
+boot hook and the workspace pins live in two files Relaunch owns outright:
+`relaunch.lua` is a stable loader that registers the hook, `rules.lua` holds
+the generated `o.window` pins. Installing, maintaining and uninstalling
+Relaunch never writes to the user's `autostart.lua`; the one thing that does
+is the explicit **Delete startup config** action in the panel, because the
+user chose that edit in our UI.
 
 | Piece | Role |
 |---|---|
@@ -26,7 +31,8 @@ Runtime files (user-owned, never commit):
 
 - `~/.config/omarchy-relaunch/config.json` — entries, ignored startup ids, `skipOnce`
 - `~/.config/omarchy-relaunch/overrides.json` — user `class → exec` exceptions (starts empty)
-- `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
+- `~/.config/omarchy-relaunch/relaunch.lua` — owned loader; registers the boot hook, then loads the rules
+- `~/.config/omarchy-relaunch/rules.lua` — generated `o.window` pins
 - `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags (skip is also in config.json so Save cannot drop it)
 - `~/.config/omarchy-relaunch/last-boot.log` / `last-boot.json` — last `relaunch boot` diagnostic
 - `~/.config/omarchy-relaunch/last-session.json` — window snapshot, written
@@ -38,9 +44,13 @@ Do not generate `relaunch.conf` / `windowrulev2`. Pins are Lua only.
 any `source = …/relaunch.conf` line in `hyprland.conf`.
 
 `install.sh` copies the engine and plugin files, then runs `ensure-hooks`
-(hidden `o.exec_on_start("relaunch boot")` in `autostart.lua` and
-`dofile(.../relaunch.lua)` in `hyprland.lua`). It does not touch
-`hyprland.conf`. Never show that hook in the inventory.
+(the guarded `dofile(.../relaunch.lua)` in `hyprland.lua`, which is the only
+line Relaunch writes outside its own config dir). It does not touch
+`hyprland.conf` or `autostart.lua` — not to install, not to clean up, not to
+adopt a hand-written `relaunch boot` line. `autostart.lua` is read for the
+startup inventory, and the only code that writes it is `cmd_drop_startup`,
+behind the panel's explicit **Delete startup config** action. Automatic
+maintenance never does.
 
 ## Engine CLI
 
@@ -49,7 +59,7 @@ relaunch save [--json]                 # capture running layout
 relaunch generate [--json]             # rebuild rules
 relaunch list [--json]                 # entries + startup inventory + rows + boot
 relaunch reload
-relaunch boot                          # hidden autostart hook
+relaunch boot                          # registered by the owned loader
 relaunch import --class CLASS --workspace N
 relaunch import --exec CMD --workspace N
 relaunch set-exec --class CLASS --exec CMD
@@ -67,6 +77,39 @@ relaunch uninstall --yes
 `--json` is the widget contract. Keep `ok`, `error`, `added`, `updated`,
 `entries`, `rows`, `startup`, `ignored`, `boot`, `snippetPath`, `configPath`
 stable. `Panel.qml` parses that object.
+
+## What Relaunch promises
+
+Read this before proposing any mechanism. It decides how much engineering a problem is worth,
+and several past rounds were spent building elaborate answers to problems this section says are
+not ours.
+
+**Best effort, not guaranteed.** Relaunch makes its best effort to launch the user's chosen
+applications into their chosen workspaces. That is the whole ambition. A restore that misses one
+window is a normal outcome, not a defect to be engineered away.
+
+**Application startup behaviour is not ours to control.** An application that restores its own
+session, opens on the wrong workspace, takes thirty seconds to map a window, or spawns a second
+window of its own accord is doing something Relaunch cannot see coming and must not try to
+correct. Do not add reconciliation, window-closing, retry loops or heuristics to compensate.
+**When an application does not come back correctly, the user's remedy is to stop launching that
+application through Relaunch.** That is an acceptable answer and should be documented as one.
+
+**Edits made outside Relaunch's UI are not our concern.** If a user hand-edits `autostart.lua`,
+`hyprland.lua` or anything in the config directory, Relaunch does not owe them correct behaviour
+and must not grow machinery to detect, classify, adopt or repair what they did. Relaunch reads
+its own files and the inventory it presents in the panel; that is the boundary.
+
+**The one guarantee: clean removal.** Uninstalling Relaunch completely removes Relaunch's own
+files and restores Hyprland to the state it was found in. This is the only promise the project
+makes unconditionally, and it is the one place where thoroughness is warranted — every file
+written must be removable, and teardown must be ordered so it still works when the pieces it
+depends on are about to be deleted.
+
+**Sizing rule.** When a proposal adds locking, retries, parsing, reconciliation or session
+bookkeeping, check it against the four statements above. If it exists to cope with a misbehaving
+application or a hand-edited config, it is almost certainly over-built. Propose the smaller thing,
+or nothing.
 
 ## Invariants
 
@@ -253,7 +296,46 @@ stable. `Panel.qml` parses that object.
   parent directory is absent, which is why `ensure_file_with` exists and
   creates the resolved target's parent first. Temp files go **beside the resolved target**, never `mktemp`
   in `/tmp`, or the move is cross-filesystem and not atomic either.
-- Persist with temp-file + rename (`config.json.tmp`, `relaunch.lua.tmp`).
+- **Relaunch owns two Lua files, and no automatic path writes into the
+  user's `autostart.lua`** — only `drop-startup`, which the user invokes
+  deliberately from the panel. `relaunch.lua` is a stable loader that registers the
+  boot hook; `rules.lua` holds the generated `o.window` declarations, loaded
+  with `pcall`. The split is fault isolation: a malformed rules file loses
+  the pins without losing boot. Boot registration comes **before** the
+  disable/skip gate — gate it and a skipped session never registers the
+  handler that consumes skip-once, so skip becomes permanent. `$SELF` is **shell-quoted first**
+  (`printf %q`, because `hl.exec_cmd` word-splits the command) and the
+  resulting complete command is **then** Lua-escaped (because it sits in a
+  Lua string literal). One layer is not enough; a path with a space needs the
+  first and a path with a quote needs the second. `snippetPath` in the
+  `--json` contract names `rules.lua`, the generated file.
+- `ensure_hooks` order matters: install the loader and `rules.lua` first,
+  then point `hyprland.lua` at the loader. `list` calls it without
+  regenerating anything, so a bootstrap written before the file it sources
+  would source nothing.
+- **`relaunch boot` has no once-guard.** There is no lock, no completion
+  marker, no runtime-dir validation and no `--force`; boot simply runs. The
+  guard existed to survive a second registration — a hand-written
+  `o.exec_on_start("relaunch boot")`, a doubled `dofile` of the loader, a
+  half-finished migration — and every one of those is a hand-edited config,
+  which the promises above put out of scope. It was deleted in full, along
+  with its tests. Do not reintroduce it, and do not replace it with something
+  smaller that does the same job.
+- **There is no legacy migration.** Relaunch never had an installed base to
+  migrate: zero tags, zero releases, never on the marketplace. The code that
+  recognised and removed an old `autostart.lua` hook is gone, and with it the
+  last place the engine tried to classify Lua it did not write.
+- Uninstall removes our bootstrap from `hyprland.lua` by **exact match** on
+  the marker and the hook line, both of which this script emits verbatim, so
+  there is nothing to classify. An exact copy of our hook without the marker
+  is still removed — leaving it would keep Relaunch loading after uninstall,
+  and clean removal is the one guarantee. Teardown order is load-bearing: the
+  snapshot unit goes first (its `ExecStop` runs the engine), then the
+  bootstrap, then the config dir, then the plugin copy.
+- Do not add `_G.__relaunch_loaded`. If globals survive `hyprctl reload` it
+  would suppress reloading updated rules.
+- Persist with temp-file + rename (`config.json.tmp`, `relaunch.lua.tmp`,
+  `rules.lua.tmp`).
 - Everything runs as the user. No sudo, no IPC beyond `hyprctl` and the
   `relaunch` script on `PATH`.
 - **No speculative persistence.** If no defined feature consumes a field, it
@@ -327,8 +409,8 @@ omarchy plugin add https://github.com/farmall856/omarchy-relaunch.git --enable
 
 `omarchy plugin add <repo-url> --enable` is the supported install. The
 widget invokes `./relaunch` from the plugin folder (not PATH). First
-`list`/`save`/`generate` runs `ensure_hooks` so autostart and
-`hyprland.lua` get wired without `install.sh`.
+`list`/`save`/`generate` runs `ensure_hooks`, so the loader, `rules.lua` and
+the one `hyprland.lua` bootstrap line get wired without `install.sh`.
 
 ## Repo / publish
 
