@@ -14,9 +14,10 @@ you had them.
 No daemon. Nothing runs in the background unless you opt in to the session
 snapshot below. When you save, the widget inventories running
 windows (`hyprctl clients -j`) and records one `class → workspace` mapping per
-app. A hidden `relaunch boot` hook in `~/.config/hypr/autostart.lua` launches
-the list. Workspace pins live in generated `~/.config/omarchy-relaunch/relaunch.lua`
-(`o.window` rules) and are loaded from `hyprland.lua`. Because that is
+app. The boot hook and the workspace pins live in two files Relaunch owns:
+`~/.config/omarchy-relaunch/relaunch.lua` registers the hook, and
+`rules.lua` holds the generated `o.window` pins. Both are reached through one
+guarded line in `hyprland.lua`; nothing is written into your `autostart.lua`. Because that is
 declarative config rather than live state, it survives a crash for free.
 
 - **Bar widget (`BarWidget.qml` / `Panel.qml`):** Save, list edits, and boot
@@ -166,7 +167,8 @@ Runtime files (not in git):
 
 - `~/.config/omarchy-relaunch/config.json` — entries and skip/ignore state
 - `~/.config/omarchy-relaunch/overrides.json` — class → exec exceptions you set
-- `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
+- `~/.config/omarchy-relaunch/relaunch.lua` — owned loader; registers the boot hook
+- `~/.config/omarchy-relaunch/rules.lua` — generated `o.window` pins
 - `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags
 - `~/.config/omarchy-relaunch/last-boot.log` / `last-boot.json` — last `relaunch boot` diagnostic
 - `~/.config/omarchy-relaunch/last-session.json` — window snapshot, written only when you run `relaunch snapshot`

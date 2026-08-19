@@ -11,8 +11,11 @@ This folder is the source tree. The public repo is
 
 ## Architecture
 
-No daemon. Save inventories windows; `relaunch boot` (a hidden autostart
-hook) launches the list. Workspace pins live in generated `relaunch.lua`.
+No daemon. Save inventories windows; `relaunch boot` launches the list. The
+boot hook and the workspace pins live in two files Relaunch owns outright:
+`relaunch.lua` is a stable loader that registers the hook, `rules.lua` holds
+the generated `o.window` pins. Nothing is written into the user's
+`autostart.lua`.
 
 | Piece | Role |
 |---|---|
@@ -26,7 +29,8 @@ Runtime files (user-owned, never commit):
 
 - `~/.config/omarchy-relaunch/config.json` — entries, ignored startup ids, `skipOnce`
 - `~/.config/omarchy-relaunch/overrides.json` — user `class → exec` exceptions (starts empty)
-- `~/.config/omarchy-relaunch/relaunch.lua` — generated `o.window` pins
+- `~/.config/omarchy-relaunch/relaunch.lua` — owned loader; registers the boot hook, then loads the rules
+- `~/.config/omarchy-relaunch/rules.lua` — generated `o.window` pins
 - `~/.config/omarchy-relaunch/disabled` / `skip-once` — boot flags (skip is also in config.json so Save cannot drop it)
 - `~/.config/omarchy-relaunch/last-boot.log` / `last-boot.json` — last `relaunch boot` diagnostic
 - `~/.config/omarchy-relaunch/last-session.json` — window snapshot, written
@@ -38,9 +42,11 @@ Do not generate `relaunch.conf` / `windowrulev2`. Pins are Lua only.
 any `source = …/relaunch.conf` line in `hyprland.conf`.
 
 `install.sh` copies the engine and plugin files, then runs `ensure-hooks`
-(hidden `o.exec_on_start("relaunch boot")` in `autostart.lua` and
-`dofile(.../relaunch.lua)` in `hyprland.lua`). It does not touch
-`hyprland.conf`. Never show that hook in the inventory.
+(the guarded `dofile(.../relaunch.lua)` in `hyprland.lua`, which is the only
+line Relaunch writes outside its own config dir). It does not touch
+`hyprland.conf` or `autostart.lua`. A legacy hook left in `autostart.lua` by
+an older install is migrated away once; any hand-written one is left alone
+and stays hidden from the inventory.
 
 ## Engine CLI
 
@@ -49,7 +55,7 @@ relaunch save [--json]                 # capture running layout
 relaunch generate [--json]             # rebuild rules
 relaunch list [--json]                 # entries + startup inventory + rows + boot
 relaunch reload
-relaunch boot                          # hidden autostart hook
+relaunch boot [--force] [--quiet]      # registered by the owned loader
 relaunch import --class CLASS --workspace N
 relaunch import --exec CMD --workspace N
 relaunch set-exec --class CLASS --exec CMD
@@ -259,8 +265,11 @@ stable. `Panel.qml` parses that object.
   with `pcall`. The split is fault isolation: a malformed rules file loses
   the pins without losing boot. Boot registration comes **before** the
   disable/skip gate — gate it and a skipped session never registers the
-  handler that consumes skip-once, so skip becomes permanent. `$SELF` is
-  escaped for a Lua string literal before embedding. `snippetPath` in the
+  handler that consumes skip-once, so skip becomes permanent. `$SELF` is **shell-quoted first**
+  (`printf %q`, because `hl.exec_cmd` word-splits the command) and the
+  resulting complete command is **then** Lua-escaped (because it sits in a
+  Lua string literal). One layer is not enough; a path with a space needs the
+  first and a path with a quote needs the second. `snippetPath` in the
   `--json` contract names `rules.lua`, the generated file.
 - `ensure_hooks` order is load-bearing: install the loader and `rules.lua`,
   ensure the `hyprland.lua` bootstrap, and only **then** migrate the legacy
@@ -272,6 +281,12 @@ stable. `Panel.qml` parses that object.
   hand-written hook is **left alone** — the runtime once-guard handles the
   duplication, so there is nothing to gain by deleting a line we did not
   write. This is what replaces PR #18's hook classification.
+- **Session identity is the signature alone.** `hyprctl reload` keeps the
+  same `HYPRLAND_INSTANCE_SIGNATURE` and does not re-fire `hyprland.start`; a
+  compositor restart produces a new one. Measured on `omarchy13`: the
+  signature's second field is the session start time
+  (`..._1787108674_...` decoded to 2026-08-18 22:04:34). Adding instance
+  time/pid was considered and rejected on that evidence — do not re-open it.
 - The once-guard is `flock` plus a completion marker written only **after**
   boot reaches a terminal outcome. Not a pre-created file: a crashed first
   boot would then lock out every retry for the session. `XDG_RUNTIME_DIR`

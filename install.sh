@@ -5,7 +5,7 @@
 #   1. Install the `relaunch` engine (bash + jq) onto your PATH. The QML bar
 #      widget shells out to it.
 #   2. Install the plugin folder into ~/.config/omarchy/plugins/ and wire
-#      the hidden boot hook plus relaunch.lua pins (via `relaunch ensure-hooks`).
+#      the owned boot module plus the hyprland.lua bootstrap (via `relaunch ensure-hooks`).
 #
 # Prefer `omarchy plugin add <repo-url> --enable` for the QML side once this is
 # published; this script is for local development / manual installs.
@@ -38,9 +38,9 @@ install -m 0644 "$REPO_DIR/Overlay.qml"   "$PLUGIN_DST/Overlay.qml"
 install -m 0755 "$REPO_DIR/relaunch"      "$PLUGIN_DST/relaunch"
 echo "    installed $PLUGIN_DST"
 
-echo "==> wiring hidden boot hook (not shown in the Relaunch list)"
+echo "==> wiring the owned boot module and the hyprland.lua bootstrap"
 "$BIN_DIR/relaunch" ensure-hooks
-echo "    autostart.lua -> relaunch boot"
+echo "    relaunch.lua  -> registers relaunch boot"
 echo "    hyprland.lua  -> dofile relaunch.lua"
 
 echo "==> discovering plugin in the shell"
