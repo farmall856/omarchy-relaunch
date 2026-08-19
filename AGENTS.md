@@ -44,9 +44,9 @@ any `source = …/relaunch.conf` line in `hyprland.conf`.
 `install.sh` copies the engine and plugin files, then runs `ensure-hooks`
 (the guarded `dofile(.../relaunch.lua)` in `hyprland.lua`, which is the only
 line Relaunch writes outside its own config dir). It does not touch
-`hyprland.conf` or `autostart.lua`. A legacy hook left in `autostart.lua` by
-an older install is migrated away once; any hand-written one is left alone
-and stays hidden from the inventory.
+`hyprland.conf` or `autostart.lua` — not to install, not to clean up, not to
+adopt a hand-written `relaunch boot` line. `autostart.lua` is read for the
+startup inventory and never written.
 
 ## Engine CLI
 
@@ -55,7 +55,7 @@ relaunch save [--json]                 # capture running layout
 relaunch generate [--json]             # rebuild rules
 relaunch list [--json]                 # entries + startup inventory + rows + boot
 relaunch reload
-relaunch boot [--force] [--quiet]      # registered by the owned loader
+relaunch boot                          # registered by the owned loader
 relaunch import --class CLASS --workspace N
 relaunch import --exec CMD --workspace N
 relaunch set-exec --class CLASS --exec CMD
@@ -304,34 +304,33 @@ or nothing.
   Lua string literal). One layer is not enough; a path with a space needs the
   first and a path with a quote needs the second. `snippetPath` in the
   `--json` contract names `rules.lua`, the generated file.
-- `ensure_hooks` order is load-bearing: install the loader and `rules.lua`,
-  ensure the `hyprland.lua` bootstrap, and only **then** migrate the legacy
-  `autostart.lua` block. `list` calls it without regenerating anything, so
-  the reverse order can delete the only working boot hook.
-- Migration is the narrow `remove_managed_block`: our marker plus the line
-  directly below when that line is our own hook. It matches the marker, not
-  the current `$SELF`, because the path differs across installs. An unmarked
-  hand-written hook is **left alone** — the runtime once-guard handles the
-  duplication, so there is nothing to gain by deleting a line we did not
-  write. This is what replaces PR #18's hook classification.
-- **Session identity is the signature alone.** `hyprctl reload` keeps the
-  same `HYPRLAND_INSTANCE_SIGNATURE` and does not re-fire `hyprland.start`; a
-  compositor restart produces a new one. Measured on `omarchy13`: the
-  signature's second field is the session start time
-  (`..._1787108674_...` decoded to 2026-08-18 22:04:34). Adding instance
-  time/pid was considered and rejected on that evidence — do not re-open it.
-- The once-guard is `flock` plus a completion marker written only **after**
-  boot reaches a terminal outcome. Not a pre-created file: a crashed first
-  boot would then lock out every retry for the session. `XDG_RUNTIME_DIR`
-  must exist, be user-owned, writable and not a symlink; there is no `/tmp`
-  fallback, and without a usable runtime dir or a compositor signature the
-  guard is simply inactive — losing deduplication beats refusing to restore.
-  Suppression exits 0, leaves the real last-boot record alone and prints a
-  concise message; the generated hook passes `--quiet`. `--force` overrides.
+- `ensure_hooks` order matters: install the loader and `rules.lua` first,
+  then point `hyprland.lua` at the loader. `list` calls it without
+  regenerating anything, so a bootstrap written before the file it sources
+  would source nothing.
+- **`relaunch boot` has no once-guard.** There is no lock, no completion
+  marker, no runtime-dir validation and no `--force`; boot simply runs. The
+  guard existed to survive a second registration — a hand-written
+  `o.exec_on_start("relaunch boot")`, a doubled `dofile` of the loader, a
+  half-finished migration — and every one of those is a hand-edited config,
+  which the promises above put out of scope. It was deleted in full, along
+  with its tests. Do not reintroduce it, and do not replace it with something
+  smaller that does the same job.
+- **There is no legacy migration.** Relaunch never had an installed base to
+  migrate: zero tags, zero releases, never on the marketplace. The code that
+  recognised and removed an old `autostart.lua` hook is gone, and with it the
+  last place the engine tried to classify Lua it did not write.
+- Uninstall removes our bootstrap from `hyprland.lua` by **exact match** on
+  the marker and the hook line, both of which this script emits verbatim, so
+  there is nothing to classify. An exact copy of our hook without the marker
+  is still removed — leaving it would keep Relaunch loading after uninstall,
+  and clean removal is the one guarantee. Teardown order is load-bearing: the
+  snapshot unit goes first (its `ExecStop` runs the engine), then the
+  bootstrap, then the config dir, then the plugin copy.
 - Do not add `_G.__relaunch_loaded`. If globals survive `hyprctl reload` it
-  would suppress reloading updated rules, and the runtime guard already
-  covers duplicate boots.
-- Persist with temp-file + rename (`config.json.tmp`, `relaunch.lua.tmp`).
+  would suppress reloading updated rules.
+- Persist with temp-file + rename (`config.json.tmp`, `relaunch.lua.tmp`,
+  `rules.lua.tmp`).
 - Everything runs as the user. No sudo, no IPC beyond `hyprctl` and the
   `relaunch` script on `PATH`.
 - **No speculative persistence.** If no defined feature consumes a field, it

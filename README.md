@@ -36,8 +36,8 @@ omarchy plugin add https://github.com/farmall856/omarchy-relaunch.git --enable
 ```
 
 That clone is enough. Opening the widget (or just loading the bar) runs the
-engine from the plugin folder and wires the hidden boot hook plus the
-`relaunch.lua` source line. Optionally also:
+engine from the plugin folder and installs the owned loader plus the one
+`relaunch.lua` source line in `hyprland.lua`. Optionally also:
 
 ```sh
 git clone https://github.com/farmall856/omarchy-relaunch.git
@@ -176,8 +176,13 @@ Runtime files (not in git):
 ## Remove
 
 From the panel: **Remove Relaunch permanently** (click twice). That removes the
-autostart hook, the `hyprland.lua` source line, `~/.config/omarchy-relaunch/`,
-and the plugin folder.
+`hyprland.lua` source line, `~/.config/omarchy-relaunch/` (loader, rules and
+all state), and the plugin folder. Your `autostart.lua` is not touched, because
+Relaunch never wrote to it.
+
+Complete removal is the one thing Relaunch promises unconditionally: every file
+it writes is removable, and after an uninstall Hyprland is left as it was
+found.
 
 Or from a terminal:
 
