@@ -369,8 +369,8 @@ or nothing.
   there is nothing to classify. An exact copy of our hook without the marker
   is still removed — leaving it would keep Relaunch loading after uninstall,
   and clean removal is the one guarantee. Teardown order is load-bearing: the
-  snapshot unit goes first (its `ExecStop` runs the engine), then the
-  bootstrap, then the config dir, then the plugin copy.
+  bootstrap, then the config dir, then the PATH copy, then the plugin copy —
+  the plugin folder holds the QML the panel is running from, so it goes last.
 - Do not add `_G.__relaunch_loaded`. If globals survive `hyprctl reload` it
   would suppress reloading updated rules.
 - Persist with temp-file + rename (`config.json.tmp`, `relaunch.lua.tmp`,
@@ -399,6 +399,25 @@ or nothing.
 ## QML conventions
 
 Mirror `omarchy.clock` / `omarchy.weather`:
+
+- **Every `Text` element sets `textFormat: Text.PlainText`. No exceptions, and
+  none may rely on the default.** The default is `Text.AutoText`, which guesses
+  per string with `Qt::mightBeRichText()` and renders as `StyledText` when the
+  guess says markup — and `StyledText` supports `<img src=…>` and `<a href=…>`.
+  Relaunch displays window classes, `.desktop` `Name=` values, launch commands
+  and boot-log text, every one of them chosen by other software. A window class
+  of `<img src="https://x/y.png">` would become an outbound request the moment
+  the panel opened, and again on every refresh. Set it on new `Text` elements
+  when you add them, not only on the ones showing window data today.
+- **A string we did not author is never passed to a component whose rendering
+  we do not control.** `hint` reaches the shell's `PanelToolTip`, whose
+  `contentItem` is a bare `Text` with no `textFormat`, and `/usr/share/omarchy`
+  is not ours to edit. The rule is *do not pass it*, not *escape it on the way
+  in*: escaping is a mechanism that has to be maintained and got right at every
+  call site, while a tooltip that never receives the string cannot fail. The
+  Remove chip reads "Remove", not "Remove <app> from relaunch" — the row shows
+  the name immediately to its left, so the interpolation bought nothing and was
+  the only route by which untrusted text left our own `Text` elements.
 
 - Root type is `BarWidget` with `moduleName` matching `manifest.json` `id`.
 - Expose `opened`, `open()`, `close()`, `toggle()`, `closeForPopoutSwitch()`,
@@ -555,20 +574,14 @@ recorder the principle forbids. Do not propose it again.
 `relaunch snapshot` survives as a manual command, and `last-session --diff`
 still reads what it writes, because the user chose the moment of capture.
 
-Upgrades must disable and delete any `omarchy-relaunch-snapshot.service`
-left by an older install. Without that, an orphaned unit keeps firing at
-every logout with an `ExecStop` pointing at a command that no longer exists.
-`ensure_hooks` does this, guarded by a `[[ -f ]]` test so the normal path
-does not fork `systemctl` on a hot path.
-
-That leaves a one-logout window, which is expected rather than a defect:
-`boot` deliberately does **not** call `ensure_hooks`, so a user who upgrades
-and reboots without running `list` or `save` in between keeps the legacy
-unit for one more logout. The first `list` or `save` after the upgrade
-disarms it — and the panel runs `list` as soon as it opens. Do not "fix"
-this by calling `ensure_hooks` from `boot`: boot is the latency-sensitive
-path, and the cost of the stale unit is one extra `ExecStop` that writes a
-snapshot file, not a failed restore.
+The teardown for that unit is gone too, and deliberately. It cleaned up a
+service **no released version could ever have created**: the creation code was
+removed in `9ebb9d2`, before the `v1.0.0` tag, so there is no installed base
+carrying one. It was also the engine's only reason to invoke `systemctl`, which
+is what made the marketplace security baseline flag `service-management` on the
+submission. The engine now contains no reference to systemd at all, and a test
+asserts that. Do not reintroduce one: if a future feature needs a unit, it
+needs its own justification against "No daemon" above, not this leftover.
 
 ## Known limitations
 
