@@ -468,6 +468,8 @@ jq -n --arg dir "$WORKDIR" '{
     {class: "envwrapbad",  workspace: 1, exec: "env FOO=bar /definitely/not/here"},
     {class: "setsidbad",   workspace: 1, exec: "setsid /definitely/not/here"},
     {class: "setsidok",    workspace: 1, exec: "setsid /bin/true"},
+    {class: "setsidassign",workspace: 1, exec: "setsid FOO=bar /bin/true"},
+    {class: "nestedassign",workspace: 1, exec: "env setsid FOO=bar /bin/true"},
     {class: "singlequote", workspace: 1, exec: ("\u0027" + $dir + "/My App/app\u0027 --flag")},
     {class: "relative",    workspace: 1, exec: "./relbin/relok"},
     {class: "barepath",    workspace: 1, exec: "true"},
@@ -482,6 +484,11 @@ jq -n --arg dir "$WORKDIR" '{
   and ([.entries[] | select(.class == "envwrapbad")  | .execOk] == [false])
   and ([.entries[] | select(.class == "setsidbad")   | .execOk] == [false])
   and ([.entries[] | select(.class == "setsidok")    | .execOk] == [true])
+  # Once setsid is the command, FOO=bar is an ordinary argument and setsid
+  # tries to exec a program with that literal name. Only bash-before-the-
+  # command and env consume assignments.
+  and ([.entries[] | select(.class == "setsidassign") | .execOk] == [false])
+  and ([.entries[] | select(.class == "nestedassign") | .execOk] == [false])
   and ([.entries[] | select(.class == "singlequote") | .execOk] == [true])
   and ([.entries[] | select(.class == "relative")    | .execOk] == [true])
   and ([.entries[] | select(.class == "barepath")    | .execOk] == [true])
@@ -500,7 +507,7 @@ jq -s -e '
 ' "$WORKDIR/agree-list.json" "$RELAUNCH_CONFIG_DIR/last-boot.json" >/dev/null \
   || fail "the panel row and boot disagree: $(jq -s -c '[.[0].entries[] | {class, execOk}], [.[1].launches[] | {class, status}]' "$WORKDIR/agree-list.json" "$RELAUNCH_CONFIG_DIR/last-boot.json")"
 # …and the agreement is not vacuous: both sides must contain a rejection.
-jq -e '[.launches[] | select(.status == "not_found")] | length >= 2' \
+jq -e '[.launches[] | select(.status == "not_found")] | length >= 4' \
   "$RELAUNCH_CONFIG_DIR/last-boot.json" >/dev/null \
   || fail "boot must still skip the genuinely missing commands"
 

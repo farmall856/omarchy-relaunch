@@ -332,6 +332,11 @@ Panel {
       }
     }
     onExited: function(exitCode) {
+      // A real exit code retracts the inference: recovery may have already
+      // decided the process never started, and decideStatus checks that
+      // before the exit code, so the caption would otherwise stay
+      // "Could not run the engine" after a successful run reported 0.
+      root.startFailed = false
       root.lastExitCode = exitCode
       root.settle()
     }

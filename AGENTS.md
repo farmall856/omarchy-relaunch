@@ -152,16 +152,22 @@ or nothing.
 - Entries carry a `label`: a human-readable display name, resolved at
   `save`/`import` time and stored, never resolved at `list` time. Recomputed
   on recapture so it self-heals; it is not a user field, so a hand-edited
-  label is replaced. Tiers: `desktop-file` reads `Name=` from the exact file
-  the exec already names; `terminal` takes the leaf command and looks for a
-  `.desktop` whose Exec is a terminal wrap running that leaf (Omarchy's
+  label is replaced. Tiers, in order: an exec of the exact shape
+  `gio launch <file>.desktop` reads `Name=` from that file **whatever
+  `execSource` says** — this used to be gated on `execSource == desktop-file`,
+  and because editing a launch command in the panel changes the source and not
+  the command, `set-exec` relabelled Signal as "gio", the leaf of its own
+  launcher; then `terminal` takes the leaf command and looks for a `.desktop`
+  whose Exec is a terminal wrap running that leaf (Omarchy's
   `Disk Usage.desktop` maps `dua` → "Disk Usage"), else uses the leaf;
   anything else uses the leaf of the exec; the fallback is `class`.
   **`class` remains the identity and the only lookup key.** The label must
   never key anything and never reaches the generated pins. That is the only
   reason this reverse `.desktop` lookup is acceptable here after being
   rejected for resolving launch commands: a wrong label is cosmetic, a wrong
-  exec is not.
+  exec is not. Ungating the `gio launch` tier does not widen that hole —
+  there is no search and nothing to disambiguate, the exec states which file
+  to read, and a missing or mistyped path falls through to the leaf.
 - Unquote a stored exec before reading a leaf from it. It is `printf %q`
   output, so `bash -c dua\ i\ /` holds `dua i /` as one argument, and naive
   tokenizing yields the leaf `dua\`, which matches nothing. `unquote_argv`

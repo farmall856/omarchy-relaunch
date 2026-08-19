@@ -1262,11 +1262,16 @@ display_label_for() {
   local leaf name file
 
   if [[ -n "$exec" ]]; then
-    # `gio launch <file>.desktop` names the application inside the file, and
-    # that is true whoever wrote the command. This used to be gated on
+    # `gio launch <file>.desktop`: read Name= from the file the command
+    # already names, whatever execSource says. This was gated on
     # execSource == desktop-file, so editing the launch command by hand --
     # which changes the SOURCE and not the command -- turned Signal into
     # "gio", the leaf of its own launcher.
+    #
+    # Ungating it does not reopen the reverse .desktop lookup that was
+    # rejected for resolving execs: there is no search and no ambiguity, the
+    # exec states which file to read, and only the cosmetic Name= comes back.
+    # A missing or mistyped path simply falls through to the leaf.
     mapfile -t -d '' argv < <(unquote_argv "$exec")
     if ((${#argv[@]} >= 3)) && [[ "${argv[0]##*/}" == gio && "${argv[1]}" == launch ]]; then
       file="${argv[2]}"
@@ -1502,27 +1507,39 @@ unset_override_exec() {
 #                         guessing would put us back to judging the wrong word.
 _EXEC_TOKEN=""
 exec_command_token() {
-  local exec="$1" i=0 n tok
+  local exec="$1" i=0 n tok mode=shell
   _EXEC_TOKEN=""
   unquote_argv_arr "$exec"
   n=${#_UARGV[@]}
   ((n > 0)) || return 1
+  # `mode` is whose argument list we are reading, and it decides what a
+  # VAR=value word means. Treating every prefix the same accepted
+  # `setsid FOO=bar /bin/true` as fine: bash has already chosen setsid by
+  # then, so FOO=bar is an ordinary argument and setsid tries to exec a
+  # program with that literal name. It fails either way -- the defect was
+  # reporting it as launchable.
   while ((i < n)); do
     tok="${_UARGV[i]}"
-    # VAR=value: an assignment bash applies to the environment, not the
-    # program. Only before the program, and only with a name-shaped left side.
-    if [[ "$tok" =~ ^[A-Za-z_][A-Za-z_0-9]*= ]]; then
+    # An option we would have to understand to know which word is the
+    # program. Decline rather than judge the wrong one.
+    if [[ "$mode" != shell && "$tok" == -* ]]; then
+      return 0
+    fi
+    # An assignment only where something actually consumes one: bash, while it
+    # is still choosing the command word, and env, which takes assignment
+    # operands. Not after setsid.
+    if [[ "$mode" == shell || "$mode" == env ]] \
+      && [[ "$tok" =~ ^[A-Za-z_][A-Za-z_0-9]*= ]]; then
       ((i++))
       continue
     fi
-    # Wrappers whose whole job is to run the command that follows them.
-    if [[ "$tok" == env || "$tok" == /usr/bin/env || "$tok" == setsid || "$tok" == /usr/bin/setsid ]]; then
-      ((i++))
-      # An option we would have to understand to know which word is the
-      # program. Decline rather than judge the wrong one.
-      [[ $i -lt $n && "${_UARGV[i]}" == -* ]] && return 0
-      continue
-    fi
+    # Wrappers whose whole job is to run the command that follows them. Each
+    # hands the rest of the line to the next reader, so `env setsid FOO=bar x`
+    # ends up judging FOO=bar, which is exactly what setsid would try to run.
+    case "$tok" in
+      env | /usr/bin/env) mode=env; ((i++)); continue ;;
+      setsid | /usr/bin/setsid) mode=setsid; ((i++)); continue ;;
+    esac
     _EXEC_TOKEN="$tok"
     return 0
   done
