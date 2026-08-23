@@ -6,7 +6,8 @@ import qs.Ui
 
 // Relaunch panel. Shells out to `relaunch` for inventory, list edits, and
 // boot-policy changes. Existing Hyprland startup apps are shown so they can
-// be imported, left alone (ignored), or have their startup line removed.
+// be imported. Startup apps are listed and nothing more: Relaunch restores
+// windows, it is not an autostart manager, and it never writes autostart.lua.
 Panel {
   id: root
   moduleName: "io.github.laytonf.relaunch"
@@ -72,14 +73,9 @@ Panel {
     if (a.workspace !== b.workspace) return a.workspace - b.workspace
     return String(a.label).localeCompare(String(b.label))
   })
+  // Running windows are deliberately not here: they do not start at login,
+  // and one box holding both is what issue #30 was about.
   readonly property var startupRows: rows.filter(function(r) { return r.kind === "startup" })
-  readonly property var ignoredRows: rows.filter(function(r) { return r.kind === "ignored" })
-
-  // The startup apps box shows both, in one list: `ignored` is a startup app
-  // the user chose to leave alone, which is a state of one, not a third kind
-  // of thing. Running windows are deliberately NOT here -- they do not start
-  // at login, and one box holding both is what issue #30 was about.
-  readonly property var startupAppRows: root.startupRows.concat(root.ignoredRows)
 
   // One bordered box per workspace. relaunchRows is already sorted by
   // workspace, so a run of equal workspace numbers is one group.
@@ -702,7 +698,6 @@ Panel {
                         anchors.rightMargin: Style.space(6)
                         anchors.verticalCenter: parent.verticalCenter
                         text: relaunchRow.modelData.label
-                          + (relaunchRow.modelData.kind === "both" ? "  · also a startup app" : "")
                           + (root.rowUnverified(relaunchRow.modelData) ? "  (unverified)" : "")
                         elide: Text.ElideRight
                         color: root.rowBroken(relaunchRow.modelData) ? Color.urgent : root.barForeground
@@ -793,18 +788,6 @@ Panel {
                         onClicked: root.saveExec(relaunchRow.modelData.class, execField.text)
                       }
                     }
-
-                    Flow {
-                      visible: relaunchRow.expanded
-                        && relaunchRow.modelData.kind === "both"
-                        && relaunchRow.modelData.startupId
-                      width: parent.width
-                      spacing: Style.space(6)
-                      Chip {
-                        label: "Delete startup config"
-                        onClicked: root.run(["drop-startup", "--id", relaunchRow.modelData.startupId, "--json"])
-                      }
-                    }
                   }
                 }
               }
@@ -891,16 +874,18 @@ Panel {
             }
           }
 
-          // Entries in autostart.lua that Relaunch does not manage. These do
-          // start at login, which is the whole reason they are not in the box
-          // above. The section is informational -- it exists so a user can
-          // see where a stray app comes from -- so nothing here writes to
-          // autostart.lua. Ignore and Add both write Relaunch's own config.
-          // `ignored` is a state of a startup app, not a category of its own,
-          // so it lives in this list too, dimmed.
+          // Entries in the user's autostart.lua. These do start at login,
+          // which is the whole reason they are not in the box above.
+          //
+          // The list is READ-ONLY, and that is the point: Relaunch restores
+          // app windows to their workspaces, it is not an autostart manager.
+          // The box exists so a user can recognise where an app they did not
+          // expect at login comes from. The rows have no actions because
+          // every action one could carry would write autostart.lua, and
+          // Relaunch never does. An app on both lists appears on both.
           Item {
             id: startGroup
-            visible: root.startupAppRows.length > 0
+            visible: root.startupRows.length > 0
             width: content.width
             height: visible ? startBox.height + startLegend.height / 2 : 0
 
@@ -928,59 +913,16 @@ Panel {
               spacing: Style.space(6)
 
               Repeater {
-                model: root.startupAppRows
-                delegate: Item {
-                  id: startRow
+                model: root.startupRows
+                delegate: Text {
                   required property var modelData
+                  textFormat: Text.PlainText
                   width: startBody.width
-                  height: startActions.height
-
-                  Text {
-                    textFormat: Text.PlainText
-                    anchors.left: parent.left
-                    anchors.right: startActions.left
-                    anchors.rightMargin: Style.space(6)
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: startRow.modelData.label
-                    elide: Text.ElideRight
-                    color: root.barForeground
-                    // Left-alone rows are opted out, so they read as quieter.
-                    opacity: startRow.modelData.kind === "ignored" ? 0.55 : 1.0
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                    font.pixelSize: Style.font.bodySmall
-                  }
-
-                  Row {
-                    id: startActions
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: Style.space(6)
-
-                    IconChip {
-                      visible: startRow.modelData.kind === "startup"
-                      glyph: "\uf070"  // nf-fa-eye_slash
-                      hint: "Leave this startup app alone"
-                      onClicked: root.run(["ignore", "--id", startRow.modelData.startupId, "--json"])
-                    }
-                    IconChip {
-                      visible: startRow.modelData.kind === "ignored"
-                      glyph: "\uf06e"  // nf-fa-eye
-                      hint: "Stop leaving this startup app alone"
-                      onClicked: root.run(["unignore", "--id", startRow.modelData.startupId, "--json"])
-                    }
-                    IconChip {
-                      visible: startRow.modelData.kind !== "ignored"
-                      glyph: "+"
-                      glyphSize: Style.font.body
-                      // A startup app has no window to read a workspace from,
-                      // so it starts on 1; launching it and saving moves it.
-                      hint: "Add to relaunch on workspace 1"
-                      onClicked: root.run([
-                        "import", "--exec", startRow.modelData.exec,
-                        "--workspace", "1", "--json"
-                      ])
-                    }
-                  }
+                  text: modelData.label
+                  elide: Text.ElideRight
+                  color: root.barForeground
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.bodySmall
                 }
               }
             }

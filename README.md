@@ -17,10 +17,10 @@ windows (`hyprctl clients -j`) and records one `class → workspace` mapping per
 app. The boot hook and the workspace pins live in two files Relaunch owns:
 `~/.config/omarchy-relaunch/relaunch.lua` registers the hook, and
 `rules.lua` holds the generated `o.window` pins. Both are reached through one
-guarded line in `hyprland.lua`. Installing, updating and removing Relaunch
-never write to your `autostart.lua` — the only thing that edits it is the
-**Delete startup config** button, when you press it. Because that is
-declarative config rather than live state, it survives a crash for free.
+guarded line in `hyprland.lua`. **Relaunch never writes your
+`autostart.lua`** — it reads it, to show you what already starts at login, and
+that is all. Because the pins are declarative config rather than live state,
+they survive a crash for free.
 
 - **Bar widget (`BarWidget.qml` / `Panel.qml`):** Save, list edits, and boot
   policy, grouped into bordered sections. The last-boot log is a second plugin
@@ -80,8 +80,7 @@ line: its name, then two icons.
 
 - **Rocket** — show the launch command. It opens an editable field with a
   **Save** button, so the same icon both views and edits it. `Esc` closes the
-  field. For an app that is also a Hyprland startup app, a **Delete startup
-  config** button appears here too.
+  field.
 - **Trash can** — remove that app from the relaunch list.
 
 An app whose launch command cannot be found is drawn in the urgent colour and
@@ -101,20 +100,17 @@ The box is hidden when every open window is already on the list.
 
 ### STARTUP APPS
 
-Hyprland startup apps — entries in your `autostart.lua` — that the relaunch
-list does not cover. These *do* start when you log in, which is why they are
-kept apart from the windows above. The box is informational: it is here so you
-can see where an app you did not expect at login comes from. Relaunch does not
-edit `autostart.lua` from this box; both controls write Relaunch's own config.
+Hyprland startup apps — the entries in your `autostart.lua`. These *do* start
+when you log in, which is why they are kept apart from the windows above.
 
-- **+** — add that app to the relaunch list. It has no window to read a
-  workspace from, so it is added on workspace 1; launch it, put it where you
-  want it, and save again to move it.
-- **Crossed-out eye** — leave a startup app alone. It stops being offered for
-  import but stays listed, dimmed, so you can see the choice was deliberate.
-- **Eye** — stop leaving it alone.
+The list is read-only, and the rows have no buttons. Relaunch makes your app
+windows reappear in their workspaces after a reboot or a crash; it is not an
+autostart manager, and it never writes `autostart.lua`. The box is here so
+that when something you did not expect turns up at login, you can see where it
+came from — then edit `autostart.lua` yourself, or use whatever put it there.
 
-The box is hidden when you have no unmanaged startup apps.
+An app that is on both lists appears on both. The box is hidden when your
+`autostart.lua` has no entries.
 
 ### RELAUNCH ON BOOT
 
@@ -155,7 +151,6 @@ Fine-tune by editing `~/.config/omarchy-relaunch/config.json`:
 ```json
 {
   "staggerSeconds": 0,
-  "ignored": [],
   "skipOnce": false,
   "entries": [
     { "class": "herdr",         "workspace": 1, "exec": "xdg-terminal-exec --app-id=herdr -e herdr", "enabled": true },
@@ -174,14 +169,13 @@ Fine-tune by editing `~/.config/omarchy-relaunch/config.json`:
   leaves float alone, which lets Omarchy's own rules decide.
 - `skipOnce` is set by **Skip next boot**. Save keeps it; `relaunch boot`
   consumes it.
-- `ignored` is startup-app ids you chose to leave alone.
 - `staggerSeconds` waits N seconds between launches if apps race the pins.
 
 After a manual edit, run `relaunch generate` (or Save again from the panel).
 
 Runtime files (not in git):
 
-- `~/.config/omarchy-relaunch/config.json` — entries and skip/ignore state
+- `~/.config/omarchy-relaunch/config.json` — entries and boot-skip state
 - `~/.config/omarchy-relaunch/overrides.json` — class → exec exceptions you set
 - `~/.config/omarchy-relaunch/relaunch.lua` — owned loader; registers the boot hook
 - `~/.config/omarchy-relaunch/rules.lua` — generated `o.window` pins

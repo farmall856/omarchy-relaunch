@@ -119,8 +119,7 @@ def normalize_entry:
     enabled: (.enabled == true),
     # Display only. class stays the identity and the only lookup key, so a
     # wrong label is cosmetic and can never mis-pin a window.
-    label: ((.label // "") | tostring),
-    startupKeys: ((.startupKeys // []) | map(ascii_downcase))
+    label: ((.label // "") | tostring)
   }
   + (
       # float is a real boolean: false is a captured fact ("this window was
@@ -133,7 +132,6 @@ def normalize_entry:
 def load_config:
   {
     staggerSeconds: ((.staggerSeconds // 0) | tonumber),
-    ignored: ((.ignored // []) | map(tostring)),
     skipOnce: (.skipOnce == true),
     entries: ((.entries // []) | map(normalize_entry))
   };
@@ -141,7 +139,6 @@ def load_config:
 def dump_config:
   {
     staggerSeconds: .staggerSeconds,
-    ignored: (.ignored // []),
     skipOnce: (.skipOnce == true),
     entries: ([.entries[] | normalize_entry] | sort_by(.workspace, .class))
   };
@@ -181,14 +178,6 @@ def capture($clients):
                then
                  .by[$cl.match].label = $cl.relaunchLabel
                else . end)
-            # Same override protection as the label: a user override keeps
-            # its typed exec, so correlation keys describing the live hosted
-            # command would associate it with a startup line it never runs.
-            | (if (($cl.relaunchStartupKeys // []) | length) > 0
-                  and ((.by[$cl.match].execSource | normalize_exec_source) != "overrides-table")
-               then
-                 .by[$cl.match].startupKeys = $cl.relaunchStartupKeys
-               else . end)
             | (
                 (.by[$cl.match].execSource | normalize_exec_source) as $src
                 | (($cl.relaunchExecSource // "") | normalize_exec_source) as $nsrc
@@ -227,8 +216,7 @@ def capture($clients):
                 label: (
                   if ($cl.relaunchLabel // "") != "" then $cl.relaunchLabel
                   else $cl.match end
-                ),
-                startupKeys: ($cl.relaunchStartupKeys // [])
+                )
               }
               + {float: ($cl.floating == true)}
             )
@@ -239,7 +227,6 @@ def capture($clients):
     )
   | {
       staggerSeconds: $cfg.staggerSeconds,
-      ignored: $cfg.ignored,
       skipOnce: $cfg.skipOnce,
       entries: [ .order[] as $c | .by[$c] ],
       added, updated
@@ -284,7 +271,7 @@ load_config_json() {
   local path
   path="$(config_path)"
   if [[ ! -f "$path" ]]; then
-    printf '%s\n' '{"staggerSeconds":0,"ignored":[],"entries":[]}'
+    printf '%s\n' '{"staggerSeconds":0,"entries":[]}'
     return
   fi
   jq -e "$jq_lib"' load_config' "$path" || die "parse config: $path"
@@ -1246,41 +1233,6 @@ desktop_exec_line_from_file() {
   return 1
 }
 
-# Tokens by which an autostart line can be recognised as this entry, so
-# `o.launch_on_start("brave")` correlates with a saved brave-browser entry
-# and the row keeps kind: both. Resolved at save/import time and stored;
-# `list` must never index applications dirs to work this out.
-startup_keys_for() {
-  local class="$1" exec="$2" source="$3"
-  local -a keys=() argv=()
-  local leaf file id dexec
-  [[ -n "$class" ]] && keys+=("${class,,}")
-  if [[ "$source" == desktop-file ]]; then
-    mapfile -t -d '' argv < <(unquote_argv "$exec")
-    if ((${#argv[@]} >= 3)) && [[ "${argv[0]##*/}" == gio && "${argv[1]}" == launch ]]; then
-      file="${argv[2]}"
-      id="${file##*/}"
-      id="${id%.desktop}"
-      [[ -n "$id" ]] && keys+=("${id,,}")
-      dexec="$(desktop_exec_line_from_file "$file" 2>/dev/null || true)"
-      if [[ -n "$dexec" ]]; then
-        leaf="$(leaf_command_for_exec "$dexec" 2>/dev/null || true)"
-        [[ -n "$leaf" ]] && keys+=("${leaf,,}")
-      fi
-    fi
-  else
-    leaf="$(leaf_command_for_exec "$exec" 2>/dev/null || true)"
-    [[ -n "$leaf" ]] && keys+=("${leaf,,}")
-  fi
-  ((${#keys[@]})) || return 0
-  printf '%s\n' "${keys[@]}" | awk 'NF && !seen[$0]++'
-}
-
-startup_keys_json() {
-  startup_keys_for "$1" "$2" "$3" \
-    | jq -R -s 'split("\n") | map(select(length > 0))'
-}
-
 desktop_name_for_leaf() {
   local k
   ensure_desktop_index
@@ -1631,7 +1583,7 @@ annotate_clients() {
   # mode=display: only unwrap terminal hosts (cheap /proc walk). Do not
   # index .desktop files or read cmdline launchers — that is save/import.
   local clients="$1" mode="${2:-full}"
-  local addr pid class exec source patches line label skeys
+  local addr pid class exec source patches line label
   # One JSON object per window, assembled into the array once at the end.
   # Re-running jq over the whole accumulator per window was O(n) spawns of an
   # O(n) document.
@@ -1664,15 +1616,13 @@ annotate_clients() {
     if [[ "$source" == terminal ]]; then
       identity_pid_into_globals "$pid"
       label="$(display_label_for "$_ID_CLASS" "$exec" "$source")"
-      skeys="$(startup_keys_json "$_ID_CLASS" "$exec" "$source")"
-      rows+=("$(jq -nc --arg addr "$addr" --arg class "$_ID_CLASS" --arg exec "$exec" --arg label "$label" --argjson skeys "$skeys" \
-        '{addr: $addr, wrapped: true, class: $class, exec: $exec, execSource: "terminal", label: $label, startupKeys: $skeys}')")
+      rows+=("$(jq -nc --arg addr "$addr" --arg class "$_ID_CLASS" --arg exec "$exec" --arg label "$label" \
+        '{addr: $addr, wrapped: true, class: $class, exec: $exec, execSource: "terminal", label: $label}')")
       continue
     fi
     label="$(display_label_for "$class" "$exec" "$source")"
-    skeys="$(startup_keys_json "$class" "$exec" "$source")"
-    rows+=("$(jq -nc --arg addr "$addr" --arg class "$class" --arg exec "$exec" --arg src "$source" --arg label "$label" --argjson skeys "$skeys" \
-      '{addr: $addr, wrapped: false, class: $class, exec: $exec, execSource: $src, label: $label, startupKeys: $skeys}')")
+    rows+=("$(jq -nc --arg addr "$addr" --arg class "$class" --arg exec "$exec" --arg src "$source" --arg label "$label" \
+      '{addr: $addr, wrapped: false, class: $class, exec: $exec, execSource: $src, label: $label}')")
   done < <(jq -r '
     .[] | select(.pid != null)
     | [
@@ -1702,12 +1652,10 @@ annotate_clients() {
             | .relaunchExec = $p.exec
             | .relaunchExecSource = $p.execSource
             | .relaunchLabel = ($p.label // "")
-            | .relaunchStartupKeys = ($p.startupKeys // [])
           else
             .relaunchExec = $p.exec
             | .relaunchExecSource = $p.execSource
             | .relaunchLabel = ($p.label // "")
-            | .relaunchStartupKeys = ($p.startupKeys // [])
           end
       )
   ' <<<"$clients"
@@ -1762,57 +1710,39 @@ build_rows() {
   clients="${3:-[]}"
   jq --argjson startup "$startup" --argjson clients "$clients" "$jq_lib"'
     load_config as $cfg
-    | ($cfg.ignored) as $ign
     | ([ $cfg.entries[] | {key: (.class | ascii_downcase), value: .} ] | from_entries) as $byClass
-    | ([ $cfg.entries[] | {key: (.exec | ascii_downcase), value: .} ] | from_entries) as $byExec
     | [
         $cfg.entries[]
         | . as $e
-        | (($e.startupKeys // [])) as $keys
-        | ($startup | map(select(
-              . as $sl
-              | ($sl.class | ascii_downcase) == ($e.class | ascii_downcase)
-                or ($sl.exec | ascii_downcase) == ($e.exec | ascii_downcase)
-                or ($keys | index($sl.class | ascii_downcase)) != null
-                or ($keys | index($sl.exec | ascii_downcase)) != null
-                or ($keys | index($sl.exec | ascii_downcase | split(" ")[0])) != null
-            )) | .[0] // null) as $s
         | {
             id: ("relaunch:" + $e.class),
-            kind: (if $s != null then (if ($ign | index($s.id)) then "relaunch" else "both" end) else "relaunch" end),
+            kind: "relaunch",
             class: $e.class,
             label: (if ($e.label // "") != "" then $e.label else $e.class end),
             exec: (if $e.exec != "" then $e.exec else ($e.class | guess_exec) end),
             execSource: ($e.execSource // ""),
             workspace: $e.workspace,
             enabled: $e.enabled,
-            inRelaunch: true,
-            ignored: (if $s != null then (($ign | index($s.id)) != null) else false end),
-            startupId: (if $s != null then $s.id else null end)
+            inRelaunch: true
           }
       ] | sort_by(.workspace, .class) as $fromRelaunch
+    # Every startup line is listed, always. There is no correlation with the
+    # relaunch entries: an app that is on both lists appears on both, which
+    # says so more directly than a merged row ever did. The machinery that
+    # used to merge them only existed to attach an action to the merged
+    # state, and Relaunch no longer has one -- it never writes autostart.lua.
     | [
         $startup[]
         | . as $s
-        | select(([$fromRelaunch[] | .startupId] | index($s.id)) == null)
-        | (
-            $byClass[($s.class | ascii_downcase)]
-            // $byExec[($s.exec | ascii_downcase)]
-            // $byExec[($s.exec | split(" ")[0] | ascii_downcase)]
-            // null
-          ) as $e
-        | select($e == null)
         | {
             id: $s.id,
-            kind: (if ($ign | index($s.id)) then "ignored" else "startup" end),
+            kind: "startup",
             class: $s.class,
             label: (if $s.class != "" then $s.class else $s.exec end),
             exec: $s.exec,
             workspace: 0,
             enabled: false,
-            inRelaunch: false,
-            ignored: (($ign | index($s.id)) != null),
-            startupId: $s.id
+            inRelaunch: false
           }
       ] as $fromStartup
     | (
@@ -1835,9 +1765,7 @@ build_rows() {
             execSource: (if ($c.relaunchExecSource // "") != "" then $c.relaunchExecSource else "guess" end),
             workspace: $c.workspace.id,
             enabled: false,
-            inRelaunch: false,
-            ignored: false,
-            startupId: null
+            inRelaunch: false
           }
       ] as $fromRunning
     | ($fromRunning + $fromRelaunch + $fromStartup)
@@ -1921,7 +1849,6 @@ emit_state() {
       ok: true,
       staggerSeconds: $cfg.staggerSeconds,
       entries: $cfg.entries,
-      ignored: $cfg.ignored,
       startup: $startup,
       rows: $rows,
       boot: $boot,
@@ -2487,51 +2414,39 @@ arg_value() {
   return 1
 }
 
+# Adds a RUNNING window to the relaunch list. There is deliberately no way to
+# import a startup line: importing one meant writing an override for a command
+# Relaunch did not resolve, and the startup list is read-only.
 cmd_import() {
-  local exec ws class cfg pid line source label skeys write_override=false
-  exec="$(arg_value --exec "$@" || true)"
+  local ws class cfg pid line exec source label
   ws="$(arg_value --workspace "$@" || true)"
   class="$(arg_value --class "$@" || true)"
   [[ "$ws" =~ ^[1-9][0-9]*$ ]] || die "import requires --workspace N (N>=1)"
-  [[ -n "$class" || -n "$exec" ]] || die "import requires --class or --exec"
-  # Import can write an override, so refuse an unparseable one up front rather
-  # than after config.json has been rewritten.
+  [[ -n "$class" ]] || die "import requires --class"
   require_overrides_parseable
-  if [[ -n "$class" && -z "$exec" ]]; then
-    pid="$(pid_for_running_class "$class" || true)"
-    line="$(resolve_launch "$class" "${pid:-}")"
-    exec="${line%%$'\t'*}"
-    source="${line#*$'\t'}"
-  else
-    if [[ -z "$class" ]]; then
-      class="$(class_for_startup_exec "$exec")"
-    fi
-    source="overrides-table"
-    write_override=true
-  fi
+  pid="$(pid_for_running_class "$class" || true)"
+  line="$(resolve_launch "$class" "${pid:-}")"
+  exec="${line%%$'\t'*}"
+  source="${line#*$'\t'}"
   [[ -n "$exec" ]] || die "import could not resolve a launch command for ${class}"
   label="$(display_label_for "$class" "$exec" "$source")"
-  skeys="$(startup_keys_json "$class" "$exec" "$source")"
   cfg="$(load_config_json)"
   if jq -e --arg class "$class" '.entries[] | select(.class == $class)' >/dev/null <<<"$cfg"; then
-    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" --arg label "$label" --argjson skeys "$skeys" '
-      .entries |= map(if .class == $class then .workspace = $ws | .exec = $exec | .execSource = $src | .label = $label | .startupKeys = $skeys | .enabled = true else . end)
+    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" --arg label "$label" '
+      .entries |= map(if .class == $class then .workspace = $ws | .exec = $exec | .execSource = $src | .label = $label | .enabled = true else . end)
     ' <<<"$cfg")"
   else
-    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" --arg label "$label" --argjson skeys "$skeys" '
-      .entries += [{class: $class, workspace: $ws, exec: $exec, execSource: $src, label: $label, startupKeys: $skeys, enabled: true}]
+    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" --arg label "$label" '
+      .entries += [{class: $class, workspace: $ws, exec: $exec, execSource: $src, label: $label, enabled: true}]
     ' <<<"$cfg")"
   fi
   jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
-  if $write_override; then
-    set_override_exec "$class" "$exec"
-  fi
   jq "$jq_lib"' load_config' <<<"$cfg" | write_generated
   if $json_out; then emit_state; else printf 'Imported %s -> workspace %s\n' "$class" "$ws"; fi
 }
 
 cmd_set_exec() {
-  local class exec cfg label skeys
+  local class exec cfg label
   class="$(arg_value --class "$@" || true)"
   exec="$(arg_value --exec "$@" || true)"
   [[ -n "$class" ]] || die "set-exec requires --class"
@@ -2544,9 +2459,8 @@ cmd_set_exec() {
     die "no relaunch entry for class: $class"
   fi
   label="$(display_label_for "$class" "$exec" "overrides-table")"
-  skeys="$(startup_keys_json "$class" "$exec" "overrides-table")"
-  cfg="$(jq --arg class "$class" --arg exec "$exec" --arg label "$label" --argjson skeys "$skeys" '
-    .entries |= map(if .class == $class then .exec = $exec | .execSource = "overrides-table" | .label = $label | .startupKeys = $skeys else . end)
+  cfg="$(jq --arg class "$class" --arg exec "$exec" --arg label "$label" '
+    .entries |= map(if .class == $class then .exec = $exec | .execSource = "overrides-table" | .label = $label else . end)
   ' <<<"$cfg")"
   jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
   set_override_exec "$class" "$exec"
@@ -2569,70 +2483,6 @@ cmd_drop() {
   unset_override_exec "$class"
   jq "$jq_lib"' load_config' <<<"$cfg" | write_generated
   if $json_out; then emit_state; else printf 'Removed %s from relaunch\n' "$class"; fi
-}
-
-# True when this line is the startup call named by kind+exec.
-_drop_startup_matches() {
-  local kind="$1" want="$2" line="$3"
-  [[ "$line" =~ ^[[:space:]]*-- ]] && return 1
-  if [[ "$kind" == launch_on_start && "$line" =~ o\.launch_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
-    [[ "${BASH_REMATCH[1]}" == "$want" ]] && return 0
-  fi
-  if [[ "$kind" == exec_on_start && "$line" =~ o\.exec_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
-    [[ "${BASH_REMATCH[1]}" == "$want" ]] && return 0
-  fi
-  return 1
-}
-
-_drop_startup_filter() {
-  local kind="$1" want="$2" line
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    _drop_startup_matches "$kind" "$want" "$line" && continue
-    printf '%s\n' "$line"
-  done
-}
-
-cmd_drop_startup() {
-  local id kind exec file line kept=0
-  id="$(arg_value --id "$@" || true)"
-  [[ -n "$id" ]] || die "drop-startup requires --id"
-  kind="${id#*:}"
-  kind="${kind%%:*}"
-  exec="${id#*:}"
-  exec="${exec#*:}"
-  file="$(autostart_path)"
-  [[ -e "$file" ]] || die "no autostart file: $file"
-  # Confirm the line exists before rewriting, so a bad --id still errors
-  # rather than silently rewriting the file unchanged.
-  kept=0
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    _drop_startup_matches "$kind" "$exec" "$line" && { kept=1; break; }
-  done <"$file"
-  [[ "$kept" == 1 ]] || die "startup line not found: $id"
-  # Through the resolver: this renamed a /tmp file straight onto a possibly
-  # symlinked autostart.lua.
-  rewrite_through_link "$file" _drop_startup_filter "$kind" "$exec"
-  if $json_out; then emit_state; else printf 'Deleted startup config: %s\n' "$exec"; fi
-}
-
-cmd_ignore() {
-  local id cfg
-  id="$(arg_value --id "$@" || true)"
-  [[ -n "$id" ]] || die "ignore requires --id"
-  cfg="$(load_config_json)"
-  cfg="$(jq --arg id "$id" '.ignored = ((.ignored // []) + [$id] | unique)' <<<"$cfg")"
-  jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
-  if $json_out; then emit_state; else printf 'Ignoring startup config: %s\n' "$id"; fi
-}
-
-cmd_unignore() {
-  local id cfg
-  id="$(arg_value --id "$@" || true)"
-  [[ -n "$id" ]] || die "unignore requires --id"
-  cfg="$(load_config_json)"
-  cfg="$(jq --arg id "$id" '.ignored = [(.ignored // [])[] | select(. != $id)]' <<<"$cfg")"
-  jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
-  if $json_out; then emit_state; else printf 'No longer ignoring: %s\n' "$id"; fi
 }
 
 cmd_boot_skip() {
@@ -2810,19 +2660,15 @@ relaunch — engine for omarchy-relaunch
 
   relaunch save [--json]                 capture running layout
   relaunch generate [--json]             rebuild rules from config
-  relaunch list [--json]                 relaunch + startup inventory
+  relaunch list [--json]                 relaunch list + startup inventory
   relaunch reload                        hyprctl reload
   relaunch boot                          run by the owned loader module
   relaunch last-boot [--json] [--open]
   relaunch snapshot                      capture the layout now (diagnostic)
   relaunch last-session [--json] [--diff]   compare that snapshot with the boot
   relaunch import --class CLASS --workspace N
-  relaunch import --exec CMD --workspace N
   relaunch set-exec --class CLASS --exec CMD
   relaunch drop --class CLASS            remove from relaunch list
-  relaunch drop-startup --id ID          delete the Hyprland startup line
-  relaunch ignore --id ID                leave startup alone, remember it
-  relaunch unignore --id ID
   relaunch boot-skip                     skip relaunch on the next boot
   relaunch boot-disable                  disable until re-enabled
   relaunch boot-enable
@@ -2856,9 +2702,6 @@ main() {
     import) cmd_import "$@" ;;
     set-exec) cmd_set_exec "$@" ;;
     drop) cmd_drop "$@" ;;
-    drop-startup) cmd_drop_startup "$@" ;;
-    ignore) cmd_ignore "$@" ;;
-    unignore) cmd_unignore "$@" ;;
     boot-skip) cmd_boot_skip ;;
     boot-disable) cmd_boot_disable ;;
     boot-enable) cmd_boot_enable ;;
