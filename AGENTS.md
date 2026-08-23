@@ -350,13 +350,17 @@ or nothing.
   which the promises above put out of scope. It was deleted in full, along
   with its tests. Do not reintroduce it, and do not replace it with something
   smaller that does the same job.
-- **There is no legacy migration.** Relaunch never had an installed base to
-  migrate: zero tags, zero releases, never on the marketplace. The code that
-  recognised and removed an old `autostart.lua` hook is gone, and with it the
-  last place the engine tried to classify Lua it did not write.
+- **The engine never classifies Lua it did not write.** There is no migration
+  of anything the user or another tool put in a config file, and no attempt to
+  recognise one.
 - Uninstall removes our bootstrap from `hyprland.lua` by **exact match** on
-  the marker and the hook line, both of which this script emits verbatim, so
-  there is nothing to classify. An exact copy of our hook without the marker
+  the marker and on a hook line this script emits verbatim, so there is
+  nothing to classify. `hyprland_hook_line` is the line written today;
+  `hyprland_hook_lines_superseded` lists the ones released versions wrote, and
+  both `ensure_hooks` and uninstall match the whole set. That list is the one
+  place a released bootstrap is named: adding to it when the hook text changes
+  is what keeps clean removal unconditional and stops `ensure_hooks` appending
+  a second loader beside the first. An exact copy of a hook without the marker
   is still removed — leaving it would keep Relaunch loading after uninstall,
   and clean removal is the one guarantee. Teardown order is load-bearing: the
   bootstrap, then the config dir, then the PATH copy, then the plugin copy —
@@ -396,6 +400,10 @@ or nothing.
 
 Mirror `omarchy.clock` / `omarchy.weather`:
 
+- **The panel's row metadata is paired with its rows by position.** Rows are
+  not unique by `class`: a `startup` row and a `relaunch` row for the same app
+  both exist by design. `decorate_items` emits one metadata entry per item,
+  including items with no class, so the two arrays stay 1:1.
 - **Every `Text` element sets `textFormat: Text.PlainText`. No exceptions, and
   none may rely on the default.** The default is `Text.AutoText`, which guesses
   per string with `Qt::mightBeRichText()` and renders as `StyledText` when the
