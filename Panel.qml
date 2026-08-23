@@ -6,7 +6,8 @@ import qs.Ui
 
 // Relaunch panel. Shells out to `relaunch` for inventory, list edits, and
 // boot-policy changes. Existing Hyprland startup apps are shown so they can
-// be imported, left alone (ignored), or have their startup line removed.
+// be imported. Startup apps are listed and nothing more: Relaunch restores
+// windows, it is not an autostart manager, and it never writes autostart.lua.
 Panel {
   id: root
   moduleName: "io.github.laytonf.relaunch"
@@ -72,16 +73,9 @@ Panel {
     if (a.workspace !== b.workspace) return a.workspace - b.workspace
     return String(a.label).localeCompare(String(b.label))
   })
+  // Running windows are deliberately not here: they do not start at login,
+  // and one box holding both is what issue #30 was about.
   readonly property var startupRows: rows.filter(function(r) { return r.kind === "startup" })
-  readonly property var ignoredRows: rows.filter(function(r) { return r.kind === "ignored" })
-
-  // Everything not on the relaunch list, in one box: running windows that
-  // could be added, startup apps not yet imported, and startup apps the user
-  // chose to leave alone. Each row carries its own `kind`, which decides
-  // which actions it gets.
-  readonly property var notInRelaunchRows: root.runningRows
-    .concat(root.startupRows)
-    .concat(root.ignoredRows)
 
   // One bordered box per workspace. relaunchRows is already sorted by
   // workspace, so a run of equal workspace numbers is one group.
@@ -704,7 +698,6 @@ Panel {
                         anchors.rightMargin: Style.space(6)
                         anchors.verticalCenter: parent.verticalCenter
                         text: relaunchRow.modelData.label
-                          + (relaunchRow.modelData.kind === "both" ? "  · also a startup app" : "")
                           + (root.rowUnverified(relaunchRow.modelData) ? "  (unverified)" : "")
                         elide: Text.ElideRight
                         color: root.rowBroken(relaunchRow.modelData) ? Color.urgent : root.barForeground
@@ -795,37 +788,27 @@ Panel {
                         onClicked: root.saveExec(relaunchRow.modelData.class, execField.text)
                       }
                     }
-
-                    Flow {
-                      visible: relaunchRow.expanded
-                        && relaunchRow.modelData.kind === "both"
-                        && relaunchRow.modelData.startupId
-                      width: parent.width
-                      spacing: Style.space(6)
-                      Chip {
-                        label: "Delete startup config"
-                        onClicked: root.run(["drop-startup", "--id", relaunchRow.modelData.startupId, "--json"])
-                      }
-                    }
                   }
                 }
               }
             }
           }
 
-          // Everything not on the relaunch list, in one box: running
-          // windows, startup apps, and the ones left alone. One line each.
+          // Open windows Relaunch does not manage. Ephemeral: close the
+          // window and the row goes with it, and nothing here starts at
+          // login. Split from the startup apps below because one box holding
+          // both made "removed from relaunch" read as "moved to autostart".
           Item {
-            id: notInGroup
-            visible: root.notInRelaunchRows.length > 0
+            id: winGroup
+            visible: root.runningRows.length > 0
             width: content.width
-            height: visible ? notInBox.height + notInLegend.height / 2 : 0
+            height: visible ? winBox.height + winLegend.height / 2 : 0
 
             Rectangle {
-              id: notInBox
-              y: notInLegend.height / 2
+              id: winBox
+              y: winLegend.height / 2
               width: parent.width
-              height: notInBody.implicitHeight + Style.space(18)
+              height: winBody.implicitHeight + Style.space(18)
               radius: Style.space(6)
               color: "transparent"
               border.color: root.barForeground
@@ -833,85 +816,113 @@ Panel {
             }
 
             BorderLegend {
-              id: notInLegend
-              title: "NOT IN RELAUNCH"
+              id: winLegend
+              title: "WINDOWS NOT IN RELAUNCH"
             }
 
             Column {
-              id: notInBody
+              id: winBody
               x: Style.space(10)
-              y: notInBox.y + Style.space(9)
+              y: winBox.y + Style.space(9)
               width: parent.width - Style.space(20)
               spacing: Style.space(6)
 
               Repeater {
-                model: root.notInRelaunchRows
+                model: root.runningRows
                 delegate: Item {
-                  id: notInRow
+                  id: winRow
                   required property var modelData
-                  width: notInBody.width
-                  height: notInActions.height
+                  width: winBody.width
+                  height: winActions.height
 
                   Text {
                     textFormat: Text.PlainText
                     anchors.left: parent.left
-                    anchors.right: notInActions.left
+                    anchors.right: winActions.left
                     anchors.rightMargin: Style.space(6)
                     anchors.verticalCenter: parent.verticalCenter
-                    text: notInRow.modelData.kind === "running"
-                      ? "ws " + notInRow.modelData.workspace + "  ·  " + notInRow.modelData.label
-                      : notInRow.modelData.label
+                    text: "ws " + winRow.modelData.workspace + "  ·  " + winRow.modelData.label
                     elide: Text.ElideRight
                     color: root.barForeground
-                    // Left-alone rows are opted out, so they read as quieter.
-                    opacity: notInRow.modelData.kind === "ignored" ? 0.55 : 1.0
                     font.family: root.bar ? root.bar.fontFamily : Style.font.family
                     font.pixelSize: Style.font.bodySmall
                   }
 
                   Row {
-                    id: notInActions
+                    id: winActions
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: Style.space(6)
 
                     IconChip {
-                      visible: notInRow.modelData.kind === "startup"
-                      glyph: "\uf070"  // nf-fa-eye_slash
-                      hint: "Leave this startup app alone"
-                      onClicked: root.run(["ignore", "--id", notInRow.modelData.startupId, "--json"])
-                    }
-                    IconChip {
-                      visible: notInRow.modelData.kind === "ignored"
-                      glyph: "\uf06e"  // nf-fa-eye
-                      hint: "Stop leaving this startup app alone"
-                      onClicked: root.run(["unignore", "--id", notInRow.modelData.startupId, "--json"])
-                    }
-                    IconChip {
-                      visible: notInRow.modelData.kind !== "ignored"
                       glyph: "+"
                       glyphSize: Style.font.body
-                      // A running window is added where it already is. A
-                      // startup app has no window to read a workspace from,
-                      // so it starts on 1; launching it and saving moves it.
-                      // Workspace is an integer from our own JSON and cannot
-                      // carry markup; the app name is text chosen by other
-                      // software, so it stays out of a tooltip we do not
-                      // render. See the Remove chip above.
-                      hint: notInRow.modelData.kind === "running"
-                        ? "Add to relaunch on workspace " + notInRow.modelData.workspace
-                        : "Add to relaunch on workspace 1"
-                      onClicked: notInRow.modelData.kind === "running"
-                        ? root.run([
-                            "import", "--class", notInRow.modelData.class,
-                            "--workspace", String(notInRow.modelData.workspace), "--json"
-                          ])
-                        : root.run([
-                            "import", "--exec", notInRow.modelData.exec,
-                            "--workspace", "1", "--json"
-                          ])
+                      // Added where it already is. Workspace is an integer
+                      // from our own JSON and cannot carry markup; the app
+                      // name is text chosen by other software, so it stays
+                      // out of a tooltip we do not render. See the Remove
+                      // chip on the relaunch rows.
+                      hint: "Add to relaunch on workspace " + winRow.modelData.workspace
+                      onClicked: root.run([
+                        "import", "--class", winRow.modelData.class,
+                        "--workspace", String(winRow.modelData.workspace), "--json"
+                      ])
                     }
                   }
+                }
+              }
+            }
+          }
+
+          // Entries in the user's autostart.lua. These do start at login,
+          // which is the whole reason they are not in the box above.
+          //
+          // The list is READ-ONLY, and that is the point: Relaunch restores
+          // app windows to their workspaces, it is not an autostart manager.
+          // The box exists so a user can recognise where an app they did not
+          // expect at login comes from. The rows have no actions because
+          // every action one could carry would write autostart.lua, and
+          // Relaunch never does. An app on both lists appears on both.
+          Item {
+            id: startGroup
+            visible: root.startupRows.length > 0
+            width: content.width
+            height: visible ? startBox.height + startLegend.height / 2 : 0
+
+            Rectangle {
+              id: startBox
+              y: startLegend.height / 2
+              width: parent.width
+              height: startBody.implicitHeight + Style.space(18)
+              radius: Style.space(6)
+              color: "transparent"
+              border.color: root.barForeground
+              border.width: 1
+            }
+
+            BorderLegend {
+              id: startLegend
+              title: "STARTUP APPS"
+            }
+
+            Column {
+              id: startBody
+              x: Style.space(10)
+              y: startBox.y + Style.space(9)
+              width: parent.width - Style.space(20)
+              spacing: Style.space(6)
+
+              Repeater {
+                model: root.startupRows
+                delegate: Text {
+                  required property var modelData
+                  textFormat: Text.PlainText
+                  width: startBody.width
+                  text: modelData.label
+                  elide: Text.ElideRight
+                  color: root.barForeground
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.bodySmall
                 }
               }
             }

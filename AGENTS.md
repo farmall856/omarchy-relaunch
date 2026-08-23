@@ -14,10 +14,9 @@ This folder is the source tree. The public repo is
 No daemon. Save inventories windows; `relaunch boot` launches the list. The
 boot hook and the workspace pins live in two files Relaunch owns outright:
 `relaunch.lua` is a stable loader that registers the hook, `rules.lua` holds
-the generated `o.window` pins. Installing, maintaining and uninstalling
-Relaunch never writes to the user's `autostart.lua`; the one thing that does
-is the explicit **Delete startup config** action in the panel, because the
-user chose that edit in our UI.
+the generated `o.window` pins. **Relaunch never writes the user's
+`autostart.lua`.** Not automatically, not on request, not with a
+confirmation. It reads it once, for the inventory, and that is all.
 
 | Piece | Role |
 |---|---|
@@ -29,7 +28,7 @@ user chose that edit in our UI.
 
 Runtime files (user-owned, never commit):
 
-- `~/.config/omarchy-relaunch/config.json` — entries, ignored startup ids, `skipOnce`
+- `~/.config/omarchy-relaunch/config.json` — entries and `skipOnce`
 - `~/.config/omarchy-relaunch/overrides.json` — user `class → exec` exceptions (starts empty)
 - `~/.config/omarchy-relaunch/relaunch.lua` — owned loader; registers the boot hook, then loads the rules
 - `~/.config/omarchy-relaunch/rules.lua` — generated `o.window` pins
@@ -48,9 +47,8 @@ any `source = …/relaunch.conf` line in `hyprland.conf`.
 line Relaunch writes outside its own config dir). It does not touch
 `hyprland.conf` or `autostart.lua` — not to install, not to clean up, not to
 adopt a hand-written `relaunch boot` line. `autostart.lua` is read for the
-startup inventory, and the only code that writes it is `cmd_drop_startup`,
-behind the panel's explicit **Delete startup config** action. Automatic
-maintenance never does.
+startup inventory and written by nothing: `autostart_path` has exactly one
+caller, `scan_startup`, and that caller only reads.
 
 ## Engine CLI
 
@@ -61,12 +59,8 @@ relaunch list [--json]                 # entries + startup inventory + rows + bo
 relaunch reload
 relaunch boot                          # registered by the owned loader
 relaunch import --class CLASS --workspace N
-relaunch import --exec CMD --workspace N
 relaunch set-exec --class CLASS --exec CMD
 relaunch drop --class CLASS
-relaunch drop-startup --id ID
-relaunch ignore --id ID
-relaunch unignore --id ID
 relaunch boot-skip | boot-disable | boot-enable
 relaunch last-boot [--json] [--open]
 relaunch snapshot                      # layout now, for shutdown/boot diffs
@@ -75,8 +69,10 @@ relaunch uninstall --yes
 ```
 
 `--json` is the widget contract. Keep `ok`, `error`, `added`, `updated`,
-`entries`, `rows`, `startup`, `ignored`, `boot`, `snippetPath`, `configPath`
-stable. `Panel.qml` parses that object.
+`entries`, `rows`, `startup`, `boot`, `snippetPath`, `configPath` stable.
+`Panel.qml` parses that object. A row's `kind` is exactly one of `relaunch`,
+`startup` or `running`. There is no `both`: a startup line is listed whether
+or not an entry resembles it, so an app on both lists appears on both.
 
 ## What Relaunch promises
 
@@ -199,19 +195,14 @@ or nothing.
   Chromium profiles and other browsers stay unresolved and keep the existing
   cmdline fallback and its `unverified` flag. Do not broaden the matcher by
   guessing at suffix formats.
-- Entries carry `startupKeys`: a lowercased list of tokens by which an
-  autostart line can be recognised as this entry — the class, the
-  desktop-file id, and the `Exec` leaf of the `.desktop` the exec already
-  names. Resolved at `save`/`import` time and stored, never at `list` time,
-  because `list` must not index applications dirs. It exists so
-  `o.launch_on_start("brave")` correlates with a saved `brave-browser` entry
-  and the row keeps `kind: both` and its "Delete startup config" action.
-  **It is a correlation list only.** It is never an identity, never a lookup
-  key, and never reaches the generated pins — `class` remains the only
-  identity. A missing field normalizes to `[]`, so a config written before
-  the field behaves exactly as it did before; the next `save` fills it in.
-  It gets the same override protection as `label`: recapture leaves it alone
-  on an `overrides-table` entry, whose exec is the user's own text.
+- **There is no correlation between entries and startup lines.** Earlier
+  versions stored `startupKeys` on each entry so `o.launch_on_start("brave")`
+  could be matched to a saved `brave-browser` entry and merged into a single
+  `kind: both` row. That existed only to hang the "Delete startup config"
+  action off the merged state. With no such action the correlation earns
+  nothing, so it is gone: entries and startup lines are listed independently,
+  and an app on both lists simply appears on both. Both fields are read as
+  unknown keys in an old config and dropped by the next write.
 - A synthesized `--app-id=<class>` goes through `quote_argv` like the inner
   argv. Boot runs the whole string through `bash -c`, so an app id containing
   a space would split and one containing a metacharacter would execute.
@@ -330,9 +321,8 @@ or nothing.
   `config.json` and `overrides.json` refuse to load when they will not parse
   rather than falling back to a default: a parse fallback is a silent edit to
   the list of things this machine will execute at login.
-- **Relaunch owns two Lua files, and no automatic path writes into the
-  user's `autostart.lua`** — only `drop-startup`, which the user invokes
-  deliberately from the panel. `relaunch.lua` is a stable loader that registers the
+- **Relaunch owns two Lua files, and nothing writes the user's
+  `autostart.lua`** — no automatic path and no command. `relaunch.lua` is a stable loader that registers the
   boot hook; `rules.lua` holds the generated `o.window` declarations, loaded
   with `pcall`. The split is fault isolation: a malformed rules file loses
   the pins without losing boot. Boot registration comes **before** the
@@ -389,12 +379,18 @@ or nothing.
   the invariants are not. This is the write-side counterpart to the rule
   above: do not store what nothing reads, and do not resolve at display time
   what should have been resolved at save time.
+- **Relaunch never writes `autostart.lua`.** It is read once, by
+  `scan_startup`, for the inventory. `autostart_path` has exactly one caller
+  and that caller only reads. There is no command, flag or confirmation that
+  edits it: `drop-startup`, `ignore` and `unignore` were deleted along with
+  the `ignored` list and `import --exec`, which wrote an override for a
+  command Relaunch never resolved. Relaunch makes app windows reappear in
+  their workspaces after a reboot or crash; it is not an autostart manager.
+  If something is an autostart app, Relaunch lists it and never manipulates
+  it. Adding any write path here is a scope change, not a feature.
 - Inventory only the user's `~/.config/hypr/autostart.lua`. Never list or
   edit packaged Omarchy autostart. Hide any `relaunch` / `omarchy-relaunch`
   hook from every list.
-- Existing startup lines are not deleted unless the user chooses "Delete
-  startup config". "Leave alone" records the id in `ignored` and still
-  shows the row when editing.
 
 ## QML conventions
 
@@ -418,6 +414,15 @@ Mirror `omarchy.clock` / `omarchy.weather`:
   Remove chip reads "Remove", not "Remove <app> from relaunch" — the row shows
   the name immediately to its left, so the interpolation bought nothing and was
   the only route by which untrusted text left our own `Text` elements.
+- **The panel's `STARTUP APPS` box is read-only, and its rows have no
+  actions.** That is the point, not an omission: the box exists so a user can
+  recognise where an app they did not expect at login comes from, and every
+  action such a row could carry would write `autostart.lua`. Do not add one —
+  not a delete, not an ignore, not a confirmation dialog. Running windows are
+  a separate box, `WINDOWS NOT IN RELAUNCH`, whose rows keep their **Add to
+  relaunch** action because that writes Relaunch's own entry list. One box
+  holding both made "I removed it from relaunch" read as "it moved to
+  autostart", which is what issue #30 was about.
 
 - Root type is `BarWidget` with `moduleName` matching `manifest.json` `id`.
 - Expose `opened`, `open()`, `close()`, `toggle()`, `closeForPopoutSwitch()`,

@@ -153,7 +153,7 @@ cat >"$FAKE_CLIENTS" <<'EOF'
 ]
 EOF
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 CALC_DESK="$XDG_APPS/libreoffice-calc.desktop"
 MAIL_DESK="$XDG_APPS/proton-mail.desktop"
@@ -163,7 +163,7 @@ mkdir -p "$WORKDIR/xdg-sym/applications"
 ln -s "$CALC_DESK" "$WORKDIR/xdg-sym/applications/libreoffice-calc.desktop"
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-sym"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"class":"libreoffice-calc","initialClass":"libreoffice-calc","pid":71,"floating":false,"workspace":{"id":7}}]
@@ -174,7 +174,7 @@ EOF
 ' >/dev/null || fail "symlinked .desktop files must be indexed"
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -190,7 +190,7 @@ EOF
   and ([.entries[] | select(.class == "libreoffice-calc") | .execSource] == ["desktop-file"])
 ' >/dev/null || fail "desktop match must store gio launch <desktop-file>"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"libreoffice-calc","workspace":7,"exec":"libreoffice-calc","enabled":true}
 ]}
 EOF
@@ -198,7 +198,7 @@ EOF
   [.entries[] | select(.class == "libreoffice-calc") | .exec] == [$calc]
 ' >/dev/null || fail "recapture must heal fallback exec from desktop"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"libreoffice-calc","workspace":7,"exec":"localc --norestore","enabled":true}
 ]}
 EOF
@@ -212,7 +212,7 @@ printf '%s\n' '[Desktop Entry]' 'Name=X' 'Exec=omarchy-launch-webapp https://x.c
 printf '%s\n' '[Desktop Entry]' 'Name=X' 'Exec=should-not-win' >"$WORKDIR/xdg-system/applications/X.desktop"
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-user:$WORKDIR/xdg-system"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"class":"X","initialClass":"X","pid":74,"floating":false,"workspace":{"id":8}}]
@@ -239,7 +239,7 @@ Type=Application
 EOF
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-pwa"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -260,7 +260,7 @@ cat >"$FAKE_CLIENTS" <<'EOF'
 ]
 EOF
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"libreoffice-calc","workspace":7,"exec":"libreoffice-calc","enabled":true,"execSource":"guess"}
 ]}
 EOF
@@ -272,7 +272,7 @@ jq -e 'type == "object"' "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null || fai
 jq -e '.["libreoffice-calc"] == "localc --norestore"' "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null \
   || fail "set-exec must write overrides.json"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 "$RELAUNCH" save --json | jq -e '
   ([.entries[] | select(.class == "libreoffice-calc") | .exec] == ["localc --norestore"])
@@ -281,7 +281,7 @@ EOF
 
 # list / display must not search .desktop files. Add-from-running uses --class.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 printf '{}\n' >"$RELAUNCH_CONFIG_DIR/overrides.json"
 cat >"$FAKE_CLIENTS" <<'EOF'
@@ -301,7 +301,7 @@ jq -e '.["libreoffice-calc"]' "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null \
 "$RELAUNCH" set-exec --class missing --exec true 2>/dev/null \
   && fail "set-exec on missing class should fail"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"libreoffice-calc","workspace":7,"exec":"gio launch /tmp/x.desktop","enabled":true}
 ]}
 EOF
@@ -317,7 +317,7 @@ jq -e '.["libreoffice-calc"]' "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null \
 # wrote that empty object back: one bad byte discarded every override the user
 # had. config.json already fails loudly here; so must this.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"keepme","workspace":1,"exec":"true","execSource":"guess","enabled":true}
 ]}
 EOF
@@ -402,7 +402,7 @@ chmod +x "$WORKDIR/My App/app"
 # Built with jq, not a heredoc: the escaped form needs a literal backslash in
 # the JSON string and heredoc quoting would eat it.
 jq -n --arg dir "$WORKDIR" '{
-  staggerSeconds: 0, ignored: [],
+  staggerSeconds: 0,
   entries: [
     {class: "quoted",  workspace: 1, exec: ("\"" + $dir + "/My App/app\" --flag"),
      execSource: "desktop-file", enabled: true},
@@ -446,7 +446,7 @@ Exec=labelled-app
 EOF
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-label"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<EOF
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"labelme","workspace":1,"exec":"gio launch $WORKDIR/xdg-label/applications/labelled.desktop","execSource":"desktop-file","label":"Properly Named App","enabled":true}
 ]}
 EOF
@@ -465,7 +465,7 @@ mkdir -p "$WORKDIR/relbin"
 printf '#!/bin/sh\nexit 0\n' >"$WORKDIR/relbin/relok"
 chmod +x "$WORKDIR/relbin/relok"
 jq -n --arg dir "$WORKDIR" '{
-  staggerSeconds: 0, ignored: [],
+  staggerSeconds: 0,
   entries: [
     {class: "envassign",   workspace: 1, exec: "FOO=bar /bin/true"},
     {class: "envwrapok",   workspace: 1, exec: "env FOO=bar /bin/true"},
@@ -520,7 +520,7 @@ export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-empty"
 export RELAUNCH_CMDLINE_DIR="$WORKDIR/nocmd"
 mkdir -p "$WORKDIR/xdg-empty/applications" "$WORKDIR/nocmd"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"class":"NoSuchApp99","initialClass":"NoSuchApp99","pid":88,"floating":false,"workspace":{"id":9}}]
@@ -539,7 +539,7 @@ printf 'herdr\0' >"$RELAUNCH_CMDLINE_DIR/90"
 printf '91\n' >"$RELAUNCH_CMDLINE_DIR/90.ppid"
 printf 'foot\0--app-id=herdr\0-e\0herdr\0' >"$RELAUNCH_CMDLINE_DIR/91"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"class":"herdr","initialClass":"herdr","pid":90,"floating":false,"workspace":{"id":1}}]
@@ -605,7 +605,7 @@ echo "$(cat "$RELAUNCH_CONFIG_DIR/config.json")" | jq -e '
   .entries | length == 1 and .[0].class == "foot" and .[0].workspace == 1
 ' >/dev/null || fail "first-seen lowest workspace"
 
-# --- startup inventory / ignore / import / drop ---
+# --- startup inventory is READ-ONLY / import / drop ---
 cat >"$RELAUNCH_AUTOSTART" <<'EOF'
 -- Extra autostart processes.
 o.launch_on_start("sunsetr")
@@ -615,6 +615,7 @@ o.exec_on_start("setsid uwsm-app -- xdg-terminal-exec --app-id=org.omarchy.termi
 -- omarchy-relaunch (managed; hidden from the Relaunch list)
 o.exec_on_start("relaunch boot")
 EOF
+cp "$RELAUNCH_AUTOSTART" "$WORKDIR/autostart.readonly-before"
 
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
 listed="$("$RELAUNCH" list --json)"
@@ -626,30 +627,43 @@ echo "$listed" | jq -e '
   and ([.rows[] | select(.kind == "startup" and .exec == "brave")] | length == 1)
 ' >/dev/null || fail "inventory: $listed"
 
-"$RELAUNCH" ignore --id 'lua:launch_on_start:sunsetr' --json >/dev/null
-"$RELAUNCH" list --json | jq -e '
-  (.ignored | index("lua:launch_on_start:sunsetr") != null)
-  and ([.rows[] | select(.kind == "ignored" and .exec == "sunsetr")] | length == 1)
-' >/dev/null || fail "ignore sunsetr"
+# No row carries a kind or a field that only an autostart-editing action could
+# have used. `ignored` and `both` were both states of "we are going to write
+# your autostart file"; nothing does that now.
+echo "$listed" | jq -e '
+  ([.rows[].kind] | unique | map(. == "relaunch" or . == "startup" or . == "running") | all)
+  and (has("ignored") | not)
+  and ([.rows[] | select(has("startupId") or has("ignored"))] | length == 0)
+' >/dev/null || fail "list still carries autostart-editing state: $listed"
 
-"$RELAUNCH" import --exec brave --workspace 2 --json >/dev/null
-"$RELAUNCH" list --json | jq -e '
-  ([.rows[] | select(.kind == "both" and .class == "brave-browser" and .workspace == 2)] | length == 1)
-' >/dev/null || fail "import brave"
+# The commands that edited autostart.lua are gone from the CLI, not merely
+# unreachable from the panel.
+for gone in drop-startup ignore unignore; do
+  "$RELAUNCH" "$gone" --id 'lua:launch_on_start:sunsetr' >/dev/null 2>&1     && fail "removed command still runs: $gone"
+done
+# So is the import branch that wrote an override for a command Relaunch never
+# resolved. --class is the only way in.
+"$RELAUNCH" import --exec brave --workspace 2 >/dev/null 2>&1   && fail "import --exec must be gone"
 
-"$RELAUNCH" drop-startup --id 'lua:launch_on_start:brave'
-grep -q 'o.launch_on_start("brave")' "$RELAUNCH_AUTOSTART" && fail "startup brave still present"
+# An app on both lists appears on both. There is no correlation left to merge
+# them, and none is wanted: two rows say it more directly than one merged row.
+"$RELAUNCH" import --class brave --workspace 2 --json >/dev/null
 "$RELAUNCH" list --json | jq -e '
-  ([.rows[] | select(.class == "brave-browser") | .kind] | .[0] == "relaunch")
-' >/dev/null || fail "brave should be relaunch-only after drop-startup"
+  ([.rows[] | select(.kind == "relaunch" and .class == "brave" and .workspace == 2)] | length == 1)
+  and ([.rows[] | select(.kind == "startup" and .exec == "brave")] | length == 1)
+' >/dev/null || fail "an app on both lists must appear on both"
 
-"$RELAUNCH" drop --class brave-browser
+"$RELAUNCH" drop --class brave
 "$RELAUNCH" list --json | jq -e '
-  ([.rows[] | select(.class == "brave-browser")] | length == 0)
-' >/dev/null || fail "drop from relaunch"
+  ([.rows[] | select(.kind == "relaunch" and .class == "brave")] | length == 0)
+  and ([.rows[] | select(.kind == "startup" and .exec == "brave")] | length == 1)
+' >/dev/null || fail "drop from relaunch must leave the startup line listed"
+
+# The whole point: none of that touched the user'"'"'s file.
+diff -q "$WORKDIR/autostart.readonly-before" "$RELAUNCH_AUTOSTART" >/dev/null   || fail "the startup inventory is read-only, but autostart.lua changed"
 
 # --- boot skip / disable, and hidden self ---
-"$RELAUNCH" import --exec proton-mail --workspace 3 >/dev/null
+"$RELAUNCH" import --class proton-mail --workspace 3 >/dev/null
 "$RELAUNCH" boot-skip
 [[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] || fail "skip-once file"
 jq -e '.skipOnce == true' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null || fail "skipOnce not persisted in config"
@@ -679,7 +693,7 @@ assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'o.window'
 "$RELAUNCH" reload | grep -qx 'Hyprland reloaded.' || fail "reload text"
 
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"NoSuch","workspace":1,"exec":"/no/such/relaunch-test-cmd","enabled":true}
 ]}
 EOF
@@ -712,7 +726,7 @@ printf 'foot\0-e\0herdr\0' >"$RELAUNCH_CMDLINE_DIR/4242"
 printf 'foot\0\0' >"$RELAUNCH_CMDLINE_DIR/4243"
 printf 'foot\0-e\0btop\0' >"$RELAUNCH_CMDLINE_DIR/4244"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -735,7 +749,7 @@ EOF
 
 printf 'foot\0--app-id=mytool\0-e\0mytool\0--flag\0value\0' >"$RELAUNCH_CMDLINE_DIR/4300"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"class": "mytool", "initialClass": "mytool", "pid": 4300, "floating": false, "workspace": {"id": 2}}]
@@ -755,7 +769,7 @@ export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"
 mkdir -p "$RELAUNCH_CMDLINE_DIR"
 printf 'foot\0--app-id=TUI.float\0-e\0bash\0-c\0dua i /\0' >"$RELAUNCH_CMDLINE_DIR/4400"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"class": "TUI.float", "initialClass": "TUI.float", "pid": 4400, "floating": true, "workspace": {"id": 4}}]
@@ -777,7 +791,7 @@ eval "set -- ${saved#xdg-terminal-exec }"
 # is re-derived from live /proc on every save, and the user's own text lives
 # in overrides.json, so a differing resolution must win.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"TUI.float","workspace":4,"exec":"xdg-terminal-exec --app-id=TUI.float bash -c dua i /","execSource":"terminal","enabled":true,"float":true}
 ]}
 EOF
@@ -805,7 +819,7 @@ echo "$out" | jq -e '.updated >= 1' >/dev/null   || fail "re-healing a stale ter
 # A stale desktop-file entry re-heals the same way.
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"libreoffice-calc","workspace":7,"exec":"gio launch /gone/libreoffice-calc.desktop","execSource":"desktop-file","enabled":true}
 ]}
 EOF
@@ -824,7 +838,7 @@ unset RELAUNCH_CMDLINE_DIR
 # tiled comes back floating at 875x600. The generated rule has to say which
 # one it wants. relaunch.lua is loaded after the Omarchy defaults, so it wins.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -880,7 +894,7 @@ EOF
 # A legacy entry with no float at all is unknown, not tiled: it must not
 # start emitting tile = true until a live window says so.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"legacy","workspace":2,"exec":"legacy","execSource":"guess","enabled":true}
 ]}
 EOF
@@ -889,7 +903,7 @@ lua="$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")"
 assert_contains "$lua" 'o.window({ class = "^(legacy)$" }, { workspace = "2 silent" })'
 assert_not_contains "$lua" 'legacy)$" }, { workspace = "2 silent", tile'
 # …and import, which has no window to read, leaves it unknown too.
-"$RELAUNCH" import --exec legacy2 --workspace 5 --json >/dev/null
+"$RELAUNCH" import --class legacy2 --workspace 5 --json >/dev/null
 jq -e '[.entries[] | select(.class == "legacy2") | has("float")] == [false]'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "import has no live window, so float must stay unknown"
 
 # --- display labels: stored at save time, one tier at a time ---
@@ -919,7 +933,7 @@ printf 'foot\0--app-id=TUI.float\0-e\0bash\0-c\0dua i /\0' >"$RELAUNCH_CMDLINE_D
 # tier 2b: hosted TUI with no .desktop anywhere
 printf 'foot\0--app-id=herdr\0-e\0herdr\0' >"$RELAUNCH_CMDLINE_DIR/701"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -948,7 +962,7 @@ lbl() { jq -r --arg c "$1" '[.entries[] | select(.class == $c) | .label] | .[0] 
 
 # Tier 4: no exec to read at all -> class.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"LegacyApp","workspace":2,"exec":"","execSource":"","enabled":true}
 ]}
 EOF
@@ -959,7 +973,7 @@ EOF
 # The stored label survives, and the class remains the only lookup key: the
 # generated pin still matches on class, never on the label.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 "$RELAUNCH" save >/dev/null
 jq -e '[.entries[] | select(.class == "TUI.float") | .label] == ["Disk Usage"]' \
@@ -1006,7 +1020,7 @@ unset RELAUNCH_CMDLINE_DIR
 # --- manual session snapshot (diagnostic; user-invoked; changes nothing) ---
 export FAKE_MONITORS="$WORKDIR/monitors.json"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"brave-browser","workspace":2,"exec":"brave","execSource":"guess","label":"Brave","enabled":true}
 ]}
 EOF
@@ -1073,7 +1087,7 @@ mkdir -p "$RELAUNCH_CMDLINE_DIR"
 printf 'weirdapp\0--title=two words\0--re=a;b&c\0--glob=*.txt\0--sub=$(touch /tmp/rl-pwned)\0--q=he said "hi"\0--bs=back\\slash\0' \
   >"$RELAUNCH_CMDLINE_DIR/950"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"class":"weirdapp","initialClass":"weirdapp","pid":950,"floating":false,"workspace":{"id":4}}]
@@ -1154,7 +1168,7 @@ printf "$BRAVE_ARGV" >"$RELAUNCH_CMDLINE_DIR/1002"
 printf "$BRAVE_ARGV" >"$RELAUNCH_CMDLINE_DIR/1003"
 printf "$BRAVE_ARGV" >"$RELAUNCH_CMDLINE_DIR/1004"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -1189,7 +1203,7 @@ wsrc() { jq -r --arg c "$1" '[.entries[] | select(.class == $c) | .execSource] |
 
 # A previously saved cmdline entry heals to desktop-file on recapture.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"brave-maps.google.com__-Default","workspace":8,"exec":"/opt/brave-bin/brave --ozone-platform=wayland","execSource":"cmdline","enabled":true}
 ]}
 EOF
@@ -1215,7 +1229,7 @@ jq -e '[.entries[] | select(.class == "brave-maps.google.com__-Default") | .labe
 # pid, so from_entries collapsed them and both windows took whichever
 # resolution ran last -- Maps resolved to brave-browser.desktop.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -1233,7 +1247,7 @@ jq -e '.entries | length == 2' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null \
 
 # --- unsupported class variants stay unresolved (no guessing) ---
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -1255,7 +1269,7 @@ Exec=omarchy-launch-webapp https://example.com/foo_bar
 Type=Application
 EOF
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"class":"brave-example.com__foo_bar-Default","initialClass":"brave-example.com__foo_bar-Default","pid":1001,"floating":false,"workspace":{"id":9}}]
@@ -1275,7 +1289,7 @@ Exec=omarchy-launch-webapp https://maps.google.com
 Type=Application
 EOF
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"class":"brave-maps.google.com__-Default","initialClass":"brave-maps.google.com__-Default","pid":1000,"floating":false,"workspace":{"id":8}}]
@@ -1293,7 +1307,7 @@ Hidden=true
 Type=Application
 EOF
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 out="$("$RELAUNCH" save --json)"
 [[ "$(wsrc 'brave-maps.google.com__-Default')" == "cmdline" ]] \
@@ -1307,7 +1321,7 @@ Exec=some-other-launcher
 Type=Application
 EOF
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 out="$("$RELAUNCH" save --json)"
 [[ "$(wsrc 'brave-maps.google.com__-Default')" == "cmdline" ]] \
@@ -1324,7 +1338,7 @@ export RELAUNCH_CMDLINE_DIR="$WORKDIR/prcmd"
 mkdir -p "$RELAUNCH_CMDLINE_DIR"
 printf 'foot\0--app-id=my app; touch /tmp/rl-appid-pwned\0-e\0htop\0' >"$RELAUNCH_CMDLINE_DIR/1200"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"class":"my app; touch /tmp/rl-appid-pwned","initialClass":"my app; touch /tmp/rl-appid-pwned","pid":1200,"floating":false,"workspace":{"id":3}}]
@@ -1353,7 +1367,7 @@ export RELAUNCH_DATA_DIRS="$WORKDIR/gurl"
 export RELAUNCH_CMDLINE_DIR="$WORKDIR/gurlcmd"
 mkdir -p "$RELAUNCH_CMDLINE_DIR"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -1373,7 +1387,7 @@ pex() { jq -r --arg c "$1" '[.entries[] | select(.class == $c) | .exec] | .[0] /
 # Port and no-port share one Chromium class, so both launchers is ambiguous.
 printf '%s\n' '[Desktop Entry]' 'Name=Unported' 'Exec=omarchy-launch-webapp https://ported.example.com/app' 'Type=Application' >"$WB/Unported.desktop"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"address":"0x1","class":"brave-ported.example.com__app-Default","initialClass":"brave-ported.example.com__app-Default","pid":1300,"floating":false,"workspace":{"id":3}}]
@@ -1389,7 +1403,7 @@ rm -f "$WB/Unported.desktop"
 printf '%s\n' '[Desktop Entry]' 'Name=Upper' 'Exec=omarchy-launch-webapp https://upper.example.com' 'Type=Application' >"$WB/Foo.desktop"
 printf '%s\n' '[Desktop Entry]' 'Name=Lower' 'Exec=omarchy-launch-webapp https://lower.example.com' 'Type=Application' >"$WB/foo.desktop"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -1407,7 +1421,7 @@ rm -f "$WB/Foo.desktop" "$WB/foo.desktop"
 mkdir -p "$WB/sub"
 printf '%s\n' '[Desktop Entry]' 'Name=Nested' 'Exec=omarchy-launch-webapp https://nested.example.com' 'Type=Application' >"$WB/sub/bar.desktop"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"address":"0x1","class":"brave-nested.example.com__-Default","initialClass":"brave-nested.example.com__-Default","pid":1500,"floating":false,"workspace":{"id":3}}]
@@ -1423,7 +1437,7 @@ unset RELAUNCH_CMDLINE_DIR
 # live hosted command.
 export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"herdr","workspace":1,"exec":"my-custom-herdr","execSource":"overrides-table","label":"My Custom Herdr","enabled":true}
 ]}
 EOF
@@ -1443,7 +1457,7 @@ unset RELAUNCH_CMDLINE_DIR
 export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-empty"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 printf '{}\n' >"$RELAUNCH_CONFIG_DIR/overrides.json"
 cat >"$FAKE_CLIENTS" <<'EOF'
@@ -1461,10 +1475,10 @@ jq -e '.herdr' "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null \
 unset RELAUNCH_CMDLINE_DIR
 unset RELAUNCH_DATA_DIRS
 
-# (5) A cheap startup class must still correlate with a saved entry, so the
-# row is kind: both and keeps its Delete startup config action.
-# o.launch_on_start("brave") inventories as class brave while the saved entry
-# is brave-browser; the entry carries startup keys resolved at save time.
+# (5) A startup line is listed on its own terms, whether or not a saved entry
+# resembles it. o.launch_on_start("brave") inventories as class brave while
+# the saved entry is brave-browser; older versions merged the two into one
+# kind: both row so the panel could offer to delete the startup line.
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
 # Sandbox the argv lookup too. The fixture below names pid 1600, and with
 # this unset the engine reads the HOST's /proc/1600 -- on a machine where
@@ -1477,23 +1491,23 @@ cat >"$RELAUNCH_AUTOSTART" <<'EOF'
 o.launch_on_start("brave")
 EOF
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"class":"brave-browser","initialClass":"brave-browser","pid":1600,"floating":false,"workspace":{"id":2}}]
 EOF
 "$RELAUNCH" save >/dev/null
-jq -e '[.entries[] | select(.class == "brave-browser") | .startupKeys] | .[0] | index("brave") != null' \
+jq -e '[.entries[] | select(.class == "brave-browser") | has("startupKeys")] == [false]' \
   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null \
-  || fail "save must persist startup keys so list can correlate cheaply"
+  || fail "save must not persist correlation keys"
+# A saved brave-browser window and an `o.launch_on_start("brave")` line are
+# two facts about the same app, and the panel now shows two rows saying so.
+# Merging them existed only to hang an autostart-editing action off the merged
+# state, and there is no such action.
 "$RELAUNCH" list --json | jq -e '
-  ([.rows[] | select(.class == "brave-browser") | .kind] == ["both"])
-  and ([.rows[] | select(.class == "brave-browser") | .startupId] | .[0] != null)
-' >/dev/null || fail "a cheap startup class must correlate into kind: both"
-# …and it must not also appear as its own NOT IN RELAUNCH row.
-"$RELAUNCH" list --json | jq -e '
-  [.rows[] | select(.kind == "startup" and .exec == "brave")] | length == 0
-' >/dev/null || fail "a correlated startup line must not be listed separately"
+  ([.rows[] | select(.class == "brave-browser") | .kind] == ["relaunch"])
+  and ([.rows[] | select(.kind == "startup" and .exec == "brave")] | length == 1)
+' >/dev/null || fail "a startup line must be listed whether or not an entry resembles it"
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
@@ -1518,7 +1532,7 @@ mkdir -p "$RELAUNCH_CONFIG_DIR"
 # Manual capture is explicitly fine and must keep working.
 export FAKE_MONITORS="$WORKDIR/monitors.json"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"address":"0x1","class":"stillhere","initialClass":"stillhere","pid":5000,"floating":false,"monitor":0,"workspace":{"id":2},"title":"t"}]
@@ -1541,7 +1555,7 @@ assert_contains "$err" "relaunch snapshot"
 # (9) last-session --diff must compare workspace and float, not just counts.
 export FAKE_MONITORS="$WORKDIR/monitors.json"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -1596,7 +1610,7 @@ export RELAUNCH_DATA_DIRS="$WORKDIR/rfc"
 export RELAUNCH_CMDLINE_DIR="$WORKDIR/rfccmd"
 mkdir -p "$RELAUNCH_CMDLINE_DIR"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -1624,7 +1638,7 @@ rex() { jq -r --arg c "$1" '[.entries[] | select(.class == $c) | .exec] | .[0] /
 # identity. The guard used to be unreachable and accepted it.
 mkrfc "Schemeless" "example.com/app"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"address":"0x9","class":"brave-example.com__app-Default","initialClass":"brave-example.com__app-Default","pid":2100,"floating":false,"workspace":{"id":7}}]
@@ -1636,12 +1650,12 @@ rm -f "$RFC/Schemeless.desktop"
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
-# --- an overrides-table entry keeps exec, label AND startupKeys ---
+# --- an overrides-table entry keeps its exec and its label ---
 export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"herdr","workspace":1,"exec":"my-custom-herdr","execSource":"overrides-table",
-   "label":"My Custom Herdr","startupKeys":["herdr","my-custom-herdr"],"enabled":true}
+   "label":"My Custom Herdr","enabled":true}
 ]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
@@ -1651,13 +1665,13 @@ EOF
   [.entries[] | select(.class == "herdr")] | .[0]
   | .exec == "my-custom-herdr"
     and .label == "My Custom Herdr"
-    and (.startupKeys | index("my-custom-herdr")) != null
-' >/dev/null || fail "an overrides-table entry must keep exec, label and startupKeys"
+' >/dev/null || fail "an overrides-table entry must keep exec and label"
 unset RELAUNCH_CMDLINE_DIR
 
-# --- a config written before startupKeys existed upgrades cleanly ---
-# Not an empty config: a real pre-schema entry, exercising load/list/generate/
-# boot before any Save, then the Save that fills the keys in.
+# --- a config written by an older version upgrades cleanly ---
+# `ignored` and `startupKeys` were written by versions that edited
+# autostart.lua. A config holding both must still load, list, generate and
+# boot, and the next write must drop them rather than carry them forever.
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
 cat >"$RELAUNCH_AUTOSTART" <<'EOF'
 o.launch_on_start("brave")
@@ -1665,20 +1679,28 @@ EOF
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {
   "staggerSeconds": 0,
-  "ignored": [],
+  "ignored": ["lua:launch_on_start:brave"],
   "skipOnce": false,
   "entries": [
     {"class":"brave-browser","workspace":2,
      "exec":"gio launch /tmp/does-not-matter/brave-browser.desktop",
-     "execSource":"desktop-file","enabled":true}
+     "execSource":"desktop-file","enabled":true,
+     "startupKeys":["brave","brave-browser"]}
   ]
 }
 EOF
 legacy="$("$RELAUNCH" list --json)"
-echo "$legacy" | jq -e '
-  ([.entries[] | select(.class == "brave-browser") | .startupKeys] == [[]])
-' >/dev/null || fail "a pre-startupKeys config must normalize the field to []: $legacy"
 echo "$legacy" | jq -e '.ok == true' >/dev/null || fail "a legacy config must list cleanly"
+echo "$legacy" | jq -e '
+  (has("ignored") | not)
+  and ([.entries[] | select(.class == "brave-browser") | has("startupKeys")] == [false])
+' >/dev/null || fail "legacy fields must not reappear in the JSON contract: $legacy"
+# The old `ignored` entry named this very startup line. It is listed anyway:
+# leaving an autostart line alone is not a state Relaunch keeps any more,
+# because it never had anything to do to that line in the first place.
+echo "$legacy" | jq -e '
+  [.rows[] | select(.kind == "startup" and .exec == "brave")] | length == 1
+' >/dev/null || fail "a legacy ignored line must still be listed"
 "$RELAUNCH" generate >/dev/null || fail "a legacy config must generate cleanly"
 assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'class = "^(brave-browser)$"'
 assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'startupKeys'
@@ -1686,21 +1708,16 @@ echo '[]' >"$FAKE_CLIENTS"
 "$RELAUNCH" boot >/dev/null 2>&1
 jq -e '.outcome == "launched"' "$RELAUNCH_CONFIG_DIR/last-boot.json" >/dev/null \
   || fail "a legacy config must boot cleanly"
-# Before a Save the association is simply absent -- same as before the field.
-"$RELAUNCH" list --json | jq -e '
-  [.rows[] | select(.class == "brave-browser") | .kind] == ["relaunch"]
-' >/dev/null || fail "a legacy entry correlates only after a Save"
-# The Save fills them in, and the association appears.
+# The next write drops them from the file itself.
 cat >"$FAKE_CLIENTS" <<'EOF'
 [{"class":"brave-browser","initialClass":"brave-browser","pid":2200,"floating":false,"workspace":{"id":2}}]
 EOF
 "$RELAUNCH" save >/dev/null
-jq -e '[.entries[] | select(.class == "brave-browser") | .startupKeys] | .[0] | index("brave") != null' \
-  "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null \
-  || fail "a Save must populate startupKeys on a legacy entry"
-"$RELAUNCH" list --json | jq -e '
-  [.rows[] | select(.class == "brave-browser") | .kind] == ["both"]
-' >/dev/null || fail "after the upgrade Save the legacy entry must correlate"
+jq -e '
+  (has("ignored") | not)
+  and ([.entries[] | has("startupKeys")] | any | not)
+' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null \
+  || fail "a Save must drop the legacy autostart-editing fields"
 unset RELAUNCH_DATA_DIRS
 
 # --- normalize_desktop_key derivation is pinned (github issue #13) ---
@@ -1745,7 +1762,7 @@ keycheck "Ünïcödé-näme"    "Ünïcödé-Näme"
 # has not mapped yet. LibreOffice and the Chromium web app were both reported
 # MISPLACED after restoring correctly.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"ontarget","workspace":3,"exec":"true","execSource":"guess","enabled":true},
   {"class":"wrongws","workspace":4,"exec":"true","execSource":"guess","enabled":true},
   {"class":"nowindow","workspace":5,"exec":"true","execSource":"guess","enabled":true}
@@ -1816,7 +1833,7 @@ cat >"$WORKDIR/grow-late.json" <<'EOF'
 EOF
 rm -f "$WORKDIR/grow.count"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"slowapp","workspace":7,"exec":"true","execSource":"guess","enabled":true}
 ]}
 EOF
@@ -1844,7 +1861,7 @@ export RELAUNCH_DATA_DIRS="$WORKDIR/crlf"
 export RELAUNCH_CMDLINE_DIR="$WORKDIR/crlfcmd"
 mkdir -p "$RELAUNCH_CMDLINE_DIR"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[]}
+{"staggerSeconds":0,"entries":[]}
 EOF
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
@@ -1908,7 +1925,7 @@ symcheck "after repair"
   || fail "a second ensure-hooks duplicated the bootstrap in the target"
 # config.json goes through the same writer.
 ln -sf "$SYM/dotfiles/config.json" "$SYM/cfg/config.json"
-printf '{"staggerSeconds":0,"ignored":[],"entries":[]}\n' >"$SYM/dotfiles/config.json"
+printf '{"staggerSeconds":0,"entries":[]}\n' >"$SYM/dotfiles/config.json"
 symenv save >/dev/null 2>&1 || fail "save failed against a symlinked config.json"
 [[ -L "$SYM/cfg/config.json" ]] || fail "save replaced the symlinked config.json with a regular file"
 jq -e '.entries' "$SYM/dotfiles/config.json" >/dev/null \
@@ -1949,7 +1966,7 @@ jq -e '.entries' "$SYM/dangle/config-not-there.json" >/dev/null \
 rm -rf "$SYM/cfg3"; mkdir -p "$SYM/cfg3" "$SYM/chaintarget"
 printf '{}\n' >"$SYM/chaintarget/real-overrides.json"
 cat >"$SYM/cfg3/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"chainapp","workspace":1,"exec":"old","execSource":"guess","enabled":true}
 ]}
 EOF
@@ -1984,8 +2001,10 @@ ln -s "$MP/dotfiles/rl/overrides.json" "$MP/cfg/overrides.json"
 jq -e 'type == "object"' "$MP/dotfiles/rl/overrides.json" >/dev/null \
   || fail "the overrides target must hold valid content"
 
-# --- the two writers that bypassed the resolver (PR #18 review) ---
-# remove_legacy_conf and drop-startup both did mktemp + mv onto the user path.
+# --- the writers that bypassed the resolver (PR #18 review) ---
+# remove_legacy_conf and the bootstrap removal both did mktemp + mv onto a
+# user path. Both go through rewrite_through_link now, and this proves the
+# link and the mode survive a FILTER rewrite, not just an atomic_write.
 BP="$WORKDIR/bypass"
 rm -rf "$BP"; mkdir -p "$BP/dotfiles" "$BP/cfg"
 printf '%s\n' '# keep me' "source = $BP/cfg/relaunch.conf" '# omarchy-relaunch' '# also keep' \
@@ -1995,6 +2014,10 @@ printf '%s\n' '-- Extra autostart processes.' 'o.launch_on_start("brave")' 'o.la
   >"$BP/dotfiles/autostart.lua"
 ln -sf "$BP/dotfiles/autostart.lua" "$BP/autostart.lua"
 printf 'windowrulev2 leftover\n' >"$BP/cfg/relaunch.conf"
+# Mode must survive a FILTER rewrite, not just an atomic_write. Set before
+# the rewrite happens, or the check measures nothing.
+chmod 0640 "$BP/dotfiles/hyprland.conf"
+chmod 0640 "$BP/dotfiles/autostart.lua"
 bprun() {
   env RELAUNCH_CONFIG_DIR="$BP/cfg" RELAUNCH_AUTOSTART="$BP/autostart.lua" \
     RELAUNCH_HYPRLAND_LUA="$BP/hyprland.lua" RELAUNCH_HYPR_CONF="$BP/hyprland.conf" \
@@ -2009,21 +2032,23 @@ grep -q 'relaunch.conf' "$BP/dotfiles/hyprland.conf" \
   && fail "the legacy source line must be removed from the target"
 grep -q '# keep me' "$BP/dotfiles/hyprland.conf" || fail "legacy cleanup ate an unrelated line"
 grep -q '# also keep' "$BP/dotfiles/hyprland.conf" || fail "legacy cleanup ate an unrelated line"
+[[ "$(stat -c '%a' "$BP/dotfiles/hyprland.conf")" == "640" ]] \
+  || fail "rewrite_through_link must preserve mode, got $(stat -c '%a' "$BP/dotfiles/hyprland.conf")"
 
-bprun drop-startup --id 'lua:launch_on_start:brave' >/dev/null 2>&1 \
-  || fail "drop-startup failed against a symlinked autostart.lua"
+# The user's autostart.lua went through this same writer once, under
+# drop-startup. Nothing does now, and no command is left that could: a full
+# install/save/list/uninstall cycle leaves the link, every byte of the target,
+# and its mode exactly as they were.
+cp "$BP/dotfiles/autostart.lua" "$BP/autostart.before"
+bprun save >/dev/null 2>&1
+bprun list --json >/dev/null 2>&1 || fail "list failed on the bypass fixture"
+bprun uninstall --yes >/dev/null 2>&1 || fail "uninstall failed on the bypass fixture"
 [[ -L "$BP/autostart.lua" ]] \
-  || fail "drop-startup replaced a symlinked autostart.lua with a regular file"
-grep -q 'brave' "$BP/dotfiles/autostart.lua" && fail "drop-startup must remove the named line"
-grep -q 'signal' "$BP/dotfiles/autostart.lua" || fail "drop-startup ate an unrelated line"
-bprun drop-startup --id 'lua:launch_on_start:nosuchthing' >/dev/null 2>&1 \
-  && fail "drop-startup must still fail on an unknown id"
-# Mode must survive a FILTER rewrite too, not just atomic_write.
-chmod 0640 "$BP/dotfiles/autostart.lua"
-bprun drop-startup --id 'lua:launch_on_start:signal' >/dev/null 2>&1 \
-  || fail "drop-startup failed on the mode fixture"
+  || fail "a symlinked autostart.lua was replaced by a regular file"
+diff -q "$BP/autostart.before" "$BP/dotfiles/autostart.lua" >/dev/null \
+  || fail "something wrote to the user's autostart.lua"
 [[ "$(stat -c '%a' "$BP/dotfiles/autostart.lua")" == "640" ]] \
-  || fail "rewrite_through_link must preserve mode, got $(stat -c '%a' "$BP/dotfiles/autostart.lua")"
+  || fail "the user's autostart.lua mode changed, got $(stat -c '%a' "$BP/dotfiles/autostart.lua")"
 
 # --- Relaunch's own files are private (github issue #24) ---
 # The config directory describes what the user runs, and last-session.json
@@ -2101,7 +2126,7 @@ rm -rf "$MODE"; mkdir -p "$MODE"
   || fail "the config dir must be CREATED 0700, got $(stat -c '%a' "$MODE/cfg")"
 [[ "$(stat -c '%a' "$MODE/cfg/overrides.json")" == "600" ]] \
   || fail "ensure_file_with must CREATE 0600, got $(stat -c '%a' "$MODE/cfg/overrides.json")"
-printf '{"staggerSeconds":0,"ignored":[],"entries":[]}\n' >"$MODE/cfg/config.json"
+printf '{"staggerSeconds":0,"entries":[]}\n' >"$MODE/cfg/config.json"
 chmod 600 "$MODE/cfg/config.json"
 ( umask 000; modeenv boot >/dev/null 2>&1 )
 [[ "$(stat -c '%a' "$MODE/cfg/last-boot.json")" == "600" ]] \
@@ -2266,7 +2291,7 @@ else
   grep -q 'pcall' "$OB/cfg/relaunch.lua" || fail "rules must be loaded with pcall"
 fi
 cat >"$OB/cfg/config.json" <<'EOF'
-{"staggerSeconds":0,"ignored":[],"entries":[
+{"staggerSeconds":0,"entries":[
   {"class":"herdr","workspace":1,"exec":"true","execSource":"guess","enabled":true}
 ]}
 EOF
@@ -2371,7 +2396,6 @@ EOF
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {
   "staggerSeconds": 5,
-  "ignored": [],
   "entries": [
     {"class": "a", "workspace": 1, "exec": "true", "enabled": true},
     {"class": "b", "workspace": 2, "exec": "true", "enabled": true},
