@@ -88,19 +88,33 @@ An app whose launch command cannot be found is drawn in the urgent colour and
 opens its editor by itself, since there is nothing else on a one-line row to
 fix it with. Type the command that starts it and press **Save**.
 
-### NOT IN RELAUNCH
+### WINDOWS NOT IN RELAUNCH
 
-One box for everything not on the relaunch list — running windows, Hyprland
-startup apps you have not imported, and startup apps you told Relaunch to
-leave alone. One line each.
+Windows open right now that the relaunch list does not cover, one line each,
+each with the workspace it is on. Nothing in this box starts at login: close
+the window and its line goes with it.
 
-- **+** — add that app to the relaunch list. A running window is added on the
-  workspace it is already on. A startup app has no window to read a workspace
-  from, so it is added on workspace 1; launch it, put it where you want it,
-  and save again to move it.
+- **+** — add that window to the relaunch list, on the workspace it is
+  already on.
+
+The box is hidden when every open window is already on the list.
+
+### STARTUP APPS
+
+Hyprland startup apps — entries in your `autostart.lua` — that the relaunch
+list does not cover. These *do* start when you log in, which is why they are
+kept apart from the windows above. The box is informational: it is here so you
+can see where an app you did not expect at login comes from. Relaunch does not
+edit `autostart.lua` from this box; both controls write Relaunch's own config.
+
+- **+** — add that app to the relaunch list. It has no window to read a
+  workspace from, so it is added on workspace 1; launch it, put it where you
+  want it, and save again to move it.
 - **Crossed-out eye** — leave a startup app alone. It stops being offered for
   import but stays listed, dimmed, so you can see the choice was deliberate.
-- **Eye** — stop leaving it alone, putting it back in the list above.
+- **Eye** — stop leaving it alone.
+
+The box is hidden when you have no unmanaged startup apps.
 
 ### RELAUNCH ON BOOT
 

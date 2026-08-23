@@ -75,13 +75,11 @@ Panel {
   readonly property var startupRows: rows.filter(function(r) { return r.kind === "startup" })
   readonly property var ignoredRows: rows.filter(function(r) { return r.kind === "ignored" })
 
-  // Everything not on the relaunch list, in one box: running windows that
-  // could be added, startup apps not yet imported, and startup apps the user
-  // chose to leave alone. Each row carries its own `kind`, which decides
-  // which actions it gets.
-  readonly property var notInRelaunchRows: root.runningRows
-    .concat(root.startupRows)
-    .concat(root.ignoredRows)
+  // The startup apps box shows both, in one list: `ignored` is a startup app
+  // the user chose to leave alone, which is a state of one, not a third kind
+  // of thing. Running windows are deliberately NOT here -- they do not start
+  // at login, and one box holding both is what issue #30 was about.
+  readonly property var startupAppRows: root.startupRows.concat(root.ignoredRows)
 
   // One bordered box per workspace. relaunchRows is already sorted by
   // workspace, so a run of equal workspace numbers is one group.
@@ -813,19 +811,21 @@ Panel {
             }
           }
 
-          // Everything not on the relaunch list, in one box: running
-          // windows, startup apps, and the ones left alone. One line each.
+          // Open windows Relaunch does not manage. Ephemeral: close the
+          // window and the row goes with it, and nothing here starts at
+          // login. Split from the startup apps below because one box holding
+          // both made "removed from relaunch" read as "moved to autostart".
           Item {
-            id: notInGroup
-            visible: root.notInRelaunchRows.length > 0
+            id: winGroup
+            visible: root.runningRows.length > 0
             width: content.width
-            height: visible ? notInBox.height + notInLegend.height / 2 : 0
+            height: visible ? winBox.height + winLegend.height / 2 : 0
 
             Rectangle {
-              id: notInBox
-              y: notInLegend.height / 2
+              id: winBox
+              y: winLegend.height / 2
               width: parent.width
-              height: notInBody.implicitHeight + Style.space(18)
+              height: winBody.implicitHeight + Style.space(18)
               radius: Style.space(6)
               color: "transparent"
               border.color: root.barForeground
@@ -833,83 +833,152 @@ Panel {
             }
 
             BorderLegend {
-              id: notInLegend
-              title: "NOT IN RELAUNCH"
+              id: winLegend
+              title: "WINDOWS NOT IN RELAUNCH"
             }
 
             Column {
-              id: notInBody
+              id: winBody
               x: Style.space(10)
-              y: notInBox.y + Style.space(9)
+              y: winBox.y + Style.space(9)
               width: parent.width - Style.space(20)
               spacing: Style.space(6)
 
               Repeater {
-                model: root.notInRelaunchRows
+                model: root.runningRows
                 delegate: Item {
-                  id: notInRow
+                  id: winRow
                   required property var modelData
-                  width: notInBody.width
-                  height: notInActions.height
+                  width: winBody.width
+                  height: winActions.height
 
                   Text {
                     textFormat: Text.PlainText
                     anchors.left: parent.left
-                    anchors.right: notInActions.left
+                    anchors.right: winActions.left
                     anchors.rightMargin: Style.space(6)
                     anchors.verticalCenter: parent.verticalCenter
-                    text: notInRow.modelData.kind === "running"
-                      ? "ws " + notInRow.modelData.workspace + "  ·  " + notInRow.modelData.label
-                      : notInRow.modelData.label
+                    text: "ws " + winRow.modelData.workspace + "  ·  " + winRow.modelData.label
                     elide: Text.ElideRight
                     color: root.barForeground
-                    // Left-alone rows are opted out, so they read as quieter.
-                    opacity: notInRow.modelData.kind === "ignored" ? 0.55 : 1.0
                     font.family: root.bar ? root.bar.fontFamily : Style.font.family
                     font.pixelSize: Style.font.bodySmall
                   }
 
                   Row {
-                    id: notInActions
+                    id: winActions
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: Style.space(6)
 
                     IconChip {
-                      visible: notInRow.modelData.kind === "startup"
-                      glyph: "\uf070"  // nf-fa-eye_slash
-                      hint: "Leave this startup app alone"
-                      onClicked: root.run(["ignore", "--id", notInRow.modelData.startupId, "--json"])
-                    }
-                    IconChip {
-                      visible: notInRow.modelData.kind === "ignored"
-                      glyph: "\uf06e"  // nf-fa-eye
-                      hint: "Stop leaving this startup app alone"
-                      onClicked: root.run(["unignore", "--id", notInRow.modelData.startupId, "--json"])
-                    }
-                    IconChip {
-                      visible: notInRow.modelData.kind !== "ignored"
                       glyph: "+"
                       glyphSize: Style.font.body
-                      // A running window is added where it already is. A
-                      // startup app has no window to read a workspace from,
+                      // Added where it already is. Workspace is an integer
+                      // from our own JSON and cannot carry markup; the app
+                      // name is text chosen by other software, so it stays
+                      // out of a tooltip we do not render. See the Remove
+                      // chip on the relaunch rows.
+                      hint: "Add to relaunch on workspace " + winRow.modelData.workspace
+                      onClicked: root.run([
+                        "import", "--class", winRow.modelData.class,
+                        "--workspace", String(winRow.modelData.workspace), "--json"
+                      ])
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // Entries in autostart.lua that Relaunch does not manage. These do
+          // start at login, which is the whole reason they are not in the box
+          // above. The section is informational -- it exists so a user can
+          // see where a stray app comes from -- so nothing here writes to
+          // autostart.lua. Ignore and Add both write Relaunch's own config.
+          // `ignored` is a state of a startup app, not a category of its own,
+          // so it lives in this list too, dimmed.
+          Item {
+            id: startGroup
+            visible: root.startupAppRows.length > 0
+            width: content.width
+            height: visible ? startBox.height + startLegend.height / 2 : 0
+
+            Rectangle {
+              id: startBox
+              y: startLegend.height / 2
+              width: parent.width
+              height: startBody.implicitHeight + Style.space(18)
+              radius: Style.space(6)
+              color: "transparent"
+              border.color: root.barForeground
+              border.width: 1
+            }
+
+            BorderLegend {
+              id: startLegend
+              title: "STARTUP APPS"
+            }
+
+            Column {
+              id: startBody
+              x: Style.space(10)
+              y: startBox.y + Style.space(9)
+              width: parent.width - Style.space(20)
+              spacing: Style.space(6)
+
+              Repeater {
+                model: root.startupAppRows
+                delegate: Item {
+                  id: startRow
+                  required property var modelData
+                  width: startBody.width
+                  height: startActions.height
+
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.left: parent.left
+                    anchors.right: startActions.left
+                    anchors.rightMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: startRow.modelData.label
+                    elide: Text.ElideRight
+                    color: root.barForeground
+                    // Left-alone rows are opted out, so they read as quieter.
+                    opacity: startRow.modelData.kind === "ignored" ? 0.55 : 1.0
+                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+                  }
+
+                  Row {
+                    id: startActions
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(6)
+
+                    IconChip {
+                      visible: startRow.modelData.kind === "startup"
+                      glyph: "\uf070"  // nf-fa-eye_slash
+                      hint: "Leave this startup app alone"
+                      onClicked: root.run(["ignore", "--id", startRow.modelData.startupId, "--json"])
+                    }
+                    IconChip {
+                      visible: startRow.modelData.kind === "ignored"
+                      glyph: "\uf06e"  // nf-fa-eye
+                      hint: "Stop leaving this startup app alone"
+                      onClicked: root.run(["unignore", "--id", startRow.modelData.startupId, "--json"])
+                    }
+                    IconChip {
+                      visible: startRow.modelData.kind !== "ignored"
+                      glyph: "+"
+                      glyphSize: Style.font.body
+                      // A startup app has no window to read a workspace from,
                       // so it starts on 1; launching it and saving moves it.
-                      // Workspace is an integer from our own JSON and cannot
-                      // carry markup; the app name is text chosen by other
-                      // software, so it stays out of a tooltip we do not
-                      // render. See the Remove chip above.
-                      hint: notInRow.modelData.kind === "running"
-                        ? "Add to relaunch on workspace " + notInRow.modelData.workspace
-                        : "Add to relaunch on workspace 1"
-                      onClicked: notInRow.modelData.kind === "running"
-                        ? root.run([
-                            "import", "--class", notInRow.modelData.class,
-                            "--workspace", String(notInRow.modelData.workspace), "--json"
-                          ])
-                        : root.run([
-                            "import", "--exec", notInRow.modelData.exec,
-                            "--workspace", "1", "--json"
-                          ])
+                      hint: "Add to relaunch on workspace 1"
+                      onClicked: root.run([
+                        "import", "--exec", startRow.modelData.exec,
+                        "--workspace", "1", "--json"
+                      ])
                     }
                   }
                 }

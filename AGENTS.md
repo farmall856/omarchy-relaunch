@@ -418,6 +418,18 @@ Mirror `omarchy.clock` / `omarchy.weather`:
   Remove chip reads "Remove", not "Remove <app> from relaunch" — the row shows
   the name immediately to its left, so the interpolation bought nothing and was
   the only route by which untrusted text left our own `Text` elements.
+- **The panel's `STARTUP APPS` box is informational and never edits
+  `autostart.lua`.** Relaunch controls its own list, not the user's autostart
+  list. The box exists so a user can recognise where an app they did not expect
+  at login comes from. Its two controls are allowed because both write
+  *Relaunch's* config and not the user's file: **Ignore/Unignore** writes the
+  ignored list, **Add to relaunch** writes the entry list. `drop-startup` exists
+  in the engine and works, but the panel does not offer it from this box — the
+  engine having a capability is not a reason to surface it. (The pre-existing
+  **Delete startup config** on a `kind === "both"` row is the one exception, and
+  it is under review, not endorsed.) Running windows are a separate box,
+  `WINDOWS NOT IN RELAUNCH`: nothing there starts at login, and one box holding
+  both made "I removed it from relaunch" read as "it moved to autostart".
 
 - Root type is `BarWidget` with `moduleName` matching `manifest.json` `id`.
 - Expose `opened`, `open()`, `close()`, `toggle()`, `closeForPopoutSwitch()`,
