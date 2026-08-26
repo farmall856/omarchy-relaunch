@@ -387,7 +387,7 @@ set_skip_once() {
   local on="$1" cfg
   ensure_config_dir
   if [[ "$on" == true ]]; then
-    : >"$(skip_path)"
+    (umask 077; : >"$(skip_path)")
   else
     rm -f "$(skip_path)"
   fi
@@ -1504,12 +1504,8 @@ exec_command_token() {
   unquote_argv_arr "$exec"
   n=${#_UARGV[@]}
   ((n > 0)) || return 1
-  # `mode` is whose argument list we are reading, and it decides what a
-  # VAR=value word means. Treating every prefix the same accepted
-  # `setsid FOO=bar /bin/true` as fine: bash has already chosen setsid by
-  # then, so FOO=bar is an ordinary argument and setsid tries to exec a
-  # program with that literal name. It fails either way -- the defect was
-  # reporting it as launchable.
+  # `mode` is whose argument list is being read, and it decides what a
+  # VAR=value word means.
   while ((i < n)); do
     tok="${_UARGV[i]}"
     # An option we would have to understand to know which word is the
@@ -1517,21 +1513,20 @@ exec_command_token() {
     if [[ "$mode" != shell && "$tok" == -* ]]; then
       return 0
     fi
-    # An assignment only where something actually consumes one: bash, while it
-    # is still choosing the command word, and env, which takes assignment
-    # operands. Not after setsid.
+    # An assignment only where something consumes one: bash while it is still
+    # choosing the command word, and env.
     if [[ "$mode" == shell || "$mode" == env ]] \
       && [[ "$tok" =~ ^[A-Za-z_][A-Za-z_0-9]*= ]]; then
       ((i++))
       continue
     fi
-    # Wrappers whose whole job is to run the command that follows them. Each
-    # hands the rest of the line to the next reader, so `env setsid FOO=bar x`
-    # ends up judging FOO=bar, which is exactly what setsid would try to run.
-    case "$tok" in
-      env | /usr/bin/env) mode=env; ((i++)); continue ;;
-      setsid | /usr/bin/setsid) mode=setsid; ((i++)); continue ;;
-    esac
+    # Wrappers run the command that follows them, so the program is further
+    # along. env is the one that also consumes assignment operands.
+    if is_wrapper_cmd "$tok"; then
+      if [[ "${tok##*/}" == env ]]; then mode=env; else mode=wrapper; fi
+      ((i++))
+      continue
+    fi
     _EXEC_TOKEN="$tok"
     return 0
   done
@@ -1539,9 +1534,7 @@ exec_command_token() {
   return 0
 }
 
-# Boot and the panel MUST reach the same verdict, so they call one function.
-# They disagreed before: the row warned about `FOO=bar /bin/true` while boot
-# spotted the `=`, skipped its own check and launched it happily.
+# Boot and the panel reach the same verdict by calling one function.
 exec_is_ok() {
   exec_command_token "$1" || return 1
   # A form we do not judge is not a form we warn about.
@@ -1772,43 +1765,43 @@ build_rows() {
   ' <<<"$cfg"
 }
 
+# Metadata is paired with items by position: a startup row and a relaunch row
+# can share a class, so `_meta` carries one entry per item, class or not.
 decorate_items() {
   local _items="$1"
   local _meta='[]'
   local _class _exec _src _ok _unverified
-  while IFS=$'\037' read -r _class _exec _src; do
-    [[ -n "$_class" ]] || continue
-    if [[ -z "$_src" ]]; then
-      if [[ -n "$(override_exec_for_class "$_class")" ]]; then
-        _src="overrides-table"
-      elif [[ "$_exec" == "${_class,,}" ]]; then
-        _src="guess"
+  # Unit separator between fields, NUL between records: @tsv escapes
+  # backslashes, and a shell-quoted hosted command contains them.
+  while IFS=$'\037' read -r -d '' _class _exec _src; do
+    if [[ -n "$_class" ]]; then
+      if [[ -z "$_src" ]]; then
+        if [[ -n "$(override_exec_for_class "$_class")" ]]; then
+          _src="overrides-table"
+        elif [[ "$_exec" == "${_class,,}" ]]; then
+          _src="guess"
+        fi
       fi
+      if exec_is_ok "$_exec"; then _ok=true; else _ok=false; fi
+      if [[ "$_src" == guess || "$_src" == cmdline ]]; then _unverified=true; else _unverified=false; fi
+    else
+      _ok=true
+      _unverified=false
     fi
-    if exec_is_ok "$_exec"; then _ok=true; else _ok=false; fi
-    if [[ "$_src" == guess || "$_src" == cmdline ]]; then _unverified=true; else _unverified=false; fi
-    _meta="$(jq --arg class "$_class" --arg exec "$_exec" --arg src "$_src" \
-      --argjson ok "$_ok" --argjson unverified "$_unverified" '
-        . + [{
-          class: $class,
-          exec: $exec,
-          execSource: $src,
-          execOk: $ok,
-          unverified: $unverified
-        }]
+    _meta="$(jq --arg src "$_src" --argjson ok "$_ok" --argjson unverified "$_unverified" '
+        . + [{execSource: $src, execOk: $ok, unverified: $unverified}]
       ' <<<"$_meta")"
-  # Unit separator, not @tsv: @tsv escapes backslashes and a shell-quoted
-  # hosted command legitimately contains them.
-  done < <(jq -r '.[] | [(.class // ""), (.exec // ""), (.execSource // "")] | join("\u001f")' <<<"$_items")
+  done < <(jq -j '.[] | [(.class // ""), (.exec // ""), (.execSource // "")] | join("\u001f"), "\u0000"' <<<"$_items")
   jq --argjson meta "$_meta" '
-    ($meta | map({key: .class, value: .}) | from_entries) as $by
-    | map(
-        . as $it
-        | ($by[$it.class] // {execSource: ($it.execSource // ""), execOk: true, unverified: false}) as $m
-        | .execSource = $m.execSource
-        | .execOk = $m.execOk
-        | .unverified = $m.unverified
-      )
+    [ to_entries[]
+      | .value as $it
+      | ($meta[.key]) as $m
+      | $it + {
+          execSource: $m.execSource,
+          execOk: $m.execOk,
+          unverified: $m.unverified
+        }
+    ]
   ' <<<"$_items"
 }
 
@@ -2493,7 +2486,7 @@ cmd_boot_skip() {
 
 cmd_boot_disable() {
   ensure_config_dir
-  : >"$(disabled_path)"
+  (umask 077; : >"$(disabled_path)")
   set_skip_once false
   load_config_json | write_generated
   if $json_out; then emit_state; else printf 'Relaunch disabled until re-enabled.\n'; fi
@@ -2508,7 +2501,15 @@ cmd_boot_enable() {
 
 # One-line Hyprland hook. io.open-then-dofile so a missing relaunch.lua
 # (uninstall, first boot before generate) is not a Hyprland config error.
+# An empty XDG_CONFIG_HOME means unset, matching the bash config_dir; Lua
+# would otherwise treat "" as a usable prefix.
 hyprland_hook_line() {
+  printf '%s\n' 'local _c = os.getenv("XDG_CONFIG_HOME"); if _c == nil or _c == "" then _c = os.getenv("HOME") .. "/.config" end; local _rl = _c .. "/omarchy-relaunch/relaunch.lua"; local _f = io.open(_rl); if _f then _f:close(); dofile(_rl) end'
+}
+
+# Hook lines released versions wrote. ensure_hooks replaces one instead of
+# appending beside it, and uninstall still takes it back.
+hyprland_hook_lines_superseded() {
   printf '%s\n' 'local _rl = (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/omarchy-relaunch/relaunch.lua"; local _f = io.open(_rl); if _f then _f:close(); dofile(_rl) end'
 }
 
@@ -2546,11 +2547,23 @@ cmd_uninstall() {
 remove_bootstrap_block() {
   local f="$1"
   [[ -e "$f" ]] || return 0
-  rewrite_through_link "$f" _remove_bootstrap_filter "$(hyprland_hook_line)"
+  local -a hooks=()
+  mapfile -t hooks < <(hyprland_hook_line; hyprland_hook_lines_superseded)
+  rewrite_through_link "$f" _remove_bootstrap_filter "${hooks[@]}"
+}
+
+_is_bootstrap_line() {
+  local line="$1" h
+  shift
+  for h in "$@"; do
+    [[ "$line" == "$h" ]] && return 0
+  done
+  return 1
 }
 
 _remove_bootstrap_filter() {
-  local hook="$1" input line held="" have_held=false out="" final_nl=true
+  local input line held="" have_held=false out="" final_nl=true
+  local -a hooks=("$@")
   # Read the whole file with a sentinel byte, because command substitution
   # eats trailing newlines and the file's EOF state is part of what has to be
   # restored. Emitting every kept line through printf '%s\n' gave a file whose
@@ -2562,8 +2575,8 @@ _remove_bootstrap_filter() {
   while IFS= read -r line; do
     if $have_held; then
       have_held=false
-      # Marker immediately above our exact hook: both lines are ours.
-      [[ "$line" == "$hook" ]] && continue
+      # Marker immediately above one of our hooks: both lines are ours.
+      _is_bootstrap_line "$line" "${hooks[@]}" && continue
       out+="$held"$'\n'
     fi
     if [[ "$line" == '-- omarchy-relaunch' ]]; then
@@ -2571,9 +2584,8 @@ _remove_bootstrap_filter() {
       have_held=true
       continue
     fi
-    # An exact copy of our hook without the marker is still ours, byte for
-    # byte, and leaving it behind would leave Relaunch loading after uninstall.
-    [[ "$line" == "$hook" ]] && continue
+    # An unmarked copy of a hook is still ours, byte for byte.
+    _is_bootstrap_line "$line" "${hooks[@]}" && continue
     out+="$line"$'\n'
   done <<<"${input%$'\n'}"
   $have_held && out+="$held"$'\n'
@@ -2623,6 +2635,7 @@ ensure_hooks() {
   ensure_loader
 
   if [[ -f "$lua" ]] && ! grep -Fq "$hook" "$lua"; then
+    remove_bootstrap_block "$lua"
     # Append EXACTLY the bytes uninstall knows how to take back. There is no
     # blank separator line: uninstall removed the marker and the hook but not
     # the blank, so every install/uninstall cycle left one behind, and the

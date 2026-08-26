@@ -474,6 +474,11 @@ jq -n --arg dir "$WORKDIR" '{
     {class: "setsidok",    workspace: 1, exec: "setsid /bin/true"},
     {class: "setsidassign",workspace: 1, exec: "setsid FOO=bar /bin/true"},
     {class: "nestedassign",workspace: 1, exec: "env setsid FOO=bar /bin/true"},
+    {class: "nohupbad",    workspace: 1, exec: "nohup /definitely/not/here"},
+    {class: "nohupok",     workspace: 1, exec: "nohup /bin/true"},
+    {class: "commandbad",  workspace: 1, exec: "command /definitely/not/here"},
+    {class: "nicebad",     workspace: 1, exec: "nice /definitely/not/here"},
+    {class: "uwsmbad",     workspace: 1, exec: "uwsm-app /definitely/not/here"},
     {class: "singlequote", workspace: 1, exec: ("\u0027" + $dir + "/My App/app\u0027 --flag")},
     {class: "relative",    workspace: 1, exec: "./relbin/relok"},
     {class: "barepath",    workspace: 1, exec: "true"},
@@ -493,6 +498,12 @@ jq -n --arg dir "$WORKDIR" '{
   # command and env consume assignments.
   and ([.entries[] | select(.class == "setsidassign") | .execOk] == [false])
   and ([.entries[] | select(.class == "nestedassign") | .execOk] == [false])
+  # Every wrapper is_wrapper_cmd recognises is unwrapped, from that one list.
+  and ([.entries[] | select(.class == "nohupbad")   | .execOk] == [false])
+  and ([.entries[] | select(.class == "nohupok")    | .execOk] == [true])
+  and ([.entries[] | select(.class == "commandbad") | .execOk] == [false])
+  and ([.entries[] | select(.class == "nicebad")    | .execOk] == [false])
+  and ([.entries[] | select(.class == "uwsmbad")    | .execOk] == [false])
   and ([.entries[] | select(.class == "singlequote") | .execOk] == [true])
   and ([.entries[] | select(.class == "relative")    | .execOk] == [true])
   and ([.entries[] | select(.class == "barepath")    | .execOk] == [true])
@@ -2449,6 +2460,113 @@ grep -q -- '-- after' "$RELAUNCH_HYPRLAND_LUA" || fail "adjacent hyprland commen
 # writes nothing to it, whatever it happens to contain.
 diff -q "$WORKDIR/autostart.before-uninstall" "$RELAUNCH_AUTOSTART" >/dev/null \
   || fail "uninstall modified the user's autostart.lua"
+
+# --- row metadata is paired by position, not by class ---
+# A startup row and a relaunch row share a class here. Each keeps its own
+# execOk, execSource and unverified.
+DEC="$WORKDIR/decorate"
+rm -rf "$DEC"; mkdir -p "$DEC/cfg" "$DEC/nocmd"
+decrun() {
+  env RELAUNCH_CONFIG_DIR="$DEC/cfg" RELAUNCH_AUTOSTART="$DEC/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$DEC/hyprland.lua" RELAUNCH_HYPR_CONF="$DEC/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$DEC/plugin" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS" \
+    RELAUNCH_CMDLINE_DIR="$DEC/nocmd" RELAUNCH_DATA_DIRS="$DEC/xdg" \
+    "$RELAUNCH" "$@"
+}
+echo '[]' >"$FAKE_CLIENTS"
+printf '%s\n' 'o.launch_on_start("collide")' >"$DEC/autostart.lua"
+cat >"$DEC/cfg/config.json" <<'EOF'
+{"staggerSeconds":0,"entries":[
+  {"class":"collide","workspace":2,"exec":"/bin/true","execSource":"desktop-file","enabled":true}
+]}
+EOF
+collided="$(decrun list --json)"
+echo "$collided" | jq -e '
+  ([.rows[] | select(.kind == "relaunch" and .class == "collide")] | .[0]
+    | .execOk == true and .execSource == "desktop-file" and .unverified == false)
+  and ([.rows[] | select(.kind == "startup" and .class == "collide")] | .[0]
+    | .execOk == false)
+' >/dev/null || fail "a relaunch row must keep its own metadata: $(jq -c '[.rows[] | {kind,class,execOk,execSource,unverified}]' <<<"$collided")"
+
+# An item with no class still gets a metadata entry, so later items stay
+# paired with their own.
+: >"$DEC/autostart.lua"
+cat >"$DEC/cfg/config.json" <<'EOF'
+{"staggerSeconds":0,"entries":[
+  {"class":"","workspace":1,"exec":"/bin/true","execSource":"desktop-file","enabled":true},
+  {"class":"aligned","workspace":1,"exec":"/definitely/not/here","execSource":"desktop-file","enabled":true}
+]}
+EOF
+aligned="$(decrun list --json)"
+echo "$aligned" | jq -e '
+  (.entries | length == 2)
+  and (.entries[0].class == "" and .entries[0].execOk == true)
+  and (.entries[1].class == "aligned" and .entries[1].execOk == false)
+' >/dev/null || fail "empty-class item broke metadata alignment: $(jq -c '[.entries[] | {class, execOk}]' <<<"$aligned")"
+
+# --- boot flag files are created private ---
+# Born 0600 under any umask, not tightened afterwards by whatever runs next.
+FLG="$WORKDIR/flags"
+rm -rf "$FLG"; mkdir -p "$FLG/cfg"
+flgrun() {
+  env RELAUNCH_CONFIG_DIR="$FLG/cfg" RELAUNCH_AUTOSTART="$FLG/autostart.lua" \
+    RELAUNCH_HYPRLAND_LUA="$FLG/hyprland.lua" RELAUNCH_HYPR_CONF="$FLG/hyprland.conf" \
+    RELAUNCH_PLUGIN_DIR="$FLG/plugin" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS" \
+    "$RELAUNCH" "$@"
+}
+( umask 022; flgrun boot-skip >/dev/null )
+[[ "$(stat -c '%a' "$FLG/cfg/skip-once")" == "600" ]] \
+  || fail "skip-once mode $(stat -c '%a' "$FLG/cfg/skip-once"), want 600"
+( umask 022; flgrun boot-disable >/dev/null )
+[[ "$(stat -c '%a' "$FLG/cfg/disabled")" == "600" ]] \
+  || fail "disabled mode $(stat -c '%a' "$FLG/cfg/disabled"), want 600"
+
+# --- the hyprland.lua bootstrap treats an empty XDG_CONFIG_HOME as unset ---
+# Lua has no falsy empty string, so this runs the emitted line and checks
+# which relaunch.lua it actually loads.
+command -v lua >/dev/null 2>&1 || fail "lua is required for the bootstrap test"
+BOOT="$WORKDIR/bootstrap"
+rm -rf "$BOOT"; mkdir -p "$BOOT/home/.config/omarchy-relaunch" "$BOOT/xdg/omarchy-relaunch" "$BOOT/cfg"
+for w in home:home/.config xdg:xdg; do
+  printf 'io.open(os.getenv("MARK"), "w"):write("%s"):close()\n' "${w%%:*}" \
+    >"$BOOT/${w#*:}/omarchy-relaunch/relaunch.lua"
+done
+printf '%s\n' 'require("hypr.autostart")' >"$BOOT/hyprland.lua"
+env RELAUNCH_CONFIG_DIR="$BOOT/cfg" RELAUNCH_AUTOSTART="$BOOT/autostart.lua" \
+  RELAUNCH_HYPRLAND_LUA="$BOOT/hyprland.lua" RELAUNCH_HYPR_CONF="$BOOT/hyprland.conf" \
+  RELAUNCH_PLUGIN_DIR="$BOOT/plugin" "$RELAUNCH" ensure-hooks >/dev/null 2>&1
+hook="$(grep -F 'omarchy-relaunch/relaunch.lua' "$BOOT/hyprland.lua")"
+[[ -n "$hook" ]] || fail "ensure-hooks wrote no bootstrap"
+bootload() {
+  rm -f "$BOOT/mark"
+  env HOME="$BOOT/home" MARK="$BOOT/mark" "$@" lua -e "$hook" >/dev/null 2>&1 || true
+  cat "$BOOT/mark" 2>/dev/null || printf 'none'
+}
+[[ "$(bootload env XDG_CONFIG_HOME=)" == "home" ]] \
+  || fail "empty XDG_CONFIG_HOME loaded $(bootload env XDG_CONFIG_HOME=), want home"
+[[ "$(bootload env -u XDG_CONFIG_HOME)" == "home" ]] \
+  || fail "unset XDG_CONFIG_HOME loaded $(bootload env -u XDG_CONFIG_HOME), want home"
+[[ "$(bootload env XDG_CONFIG_HOME=$BOOT/xdg)" == "xdg" ]] \
+  || fail "set XDG_CONFIG_HOME loaded $(bootload env XDG_CONFIG_HOME=$BOOT/xdg), want xdg"
+
+# A hyprland.lua carrying a released bootstrap gets it replaced, not joined,
+# and uninstall still takes it back.
+OLD_HOOK='local _rl = (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/omarchy-relaunch/relaunch.lua"; local _f = io.open(_rl); if _f then _f:close(); dofile(_rl) end'
+printf '%s\n' '-- keep' '-- omarchy-relaunch' "$OLD_HOOK" >"$BOOT/hyprland.lua"
+env RELAUNCH_CONFIG_DIR="$BOOT/cfg" RELAUNCH_AUTOSTART="$BOOT/autostart.lua" \
+  RELAUNCH_HYPRLAND_LUA="$BOOT/hyprland.lua" RELAUNCH_HYPR_CONF="$BOOT/hyprland.conf" \
+  RELAUNCH_PLUGIN_DIR="$BOOT/plugin" "$RELAUNCH" ensure-hooks >/dev/null 2>&1
+[[ "$(grep -cF 'omarchy-relaunch/relaunch.lua' "$BOOT/hyprland.lua")" -eq 1 ]] \
+  || fail "a released bootstrap must be replaced, not joined: $(cat "$BOOT/hyprland.lua")"
+grep -qxF "$OLD_HOOK" "$BOOT/hyprland.lua" && fail "the released bootstrap survived ensure-hooks"
+grep -q -- '-- keep' "$BOOT/hyprland.lua" || fail "ensure-hooks ate an unrelated line"
+printf '%s\n' '-- keep' '-- omarchy-relaunch' "$OLD_HOOK" >"$BOOT/hyprland.lua"
+env RELAUNCH_CONFIG_DIR="$BOOT/cfg" RELAUNCH_AUTOSTART="$BOOT/autostart.lua" \
+  RELAUNCH_HYPRLAND_LUA="$BOOT/hyprland.lua" RELAUNCH_HYPR_CONF="$BOOT/hyprland.conf" \
+  RELAUNCH_PLUGIN_DIR="$BOOT/plugin" "$RELAUNCH" uninstall --yes >/dev/null 2>&1
+grep -q 'omarchy-relaunch' "$BOOT/hyprland.lua" \
+  && fail "uninstall left a released bootstrap behind: $(cat "$BOOT/hyprland.lua")"
+grep -q -- '-- keep' "$BOOT/hyprland.lua" || fail "uninstall ate an unrelated line"
 
 grep -q 'install -m 0755 "$REPO_DIR/relaunch"      "$PLUGIN_DST/relaunch"' \
   "$ROOT/install.sh" || fail "install.sh must copy relaunch into the plugin folder"
