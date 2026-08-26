@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
 # relaunch — engine for the omarchy-relaunch bar widget.
 # Inventories running windows and existing Hyprland startup apps, then
-# generates workspace-pin rules. App launches happen from `relaunch boot`,
-# registered by the loader module Relaunch owns, so this script can skip or
-# disable itself.
+# generates workspace-pin rules. Launches happen from `relaunch boot`,
+# registered by the loader module Relaunch owns.
 set -euo pipefail
 
 HYPRCTL="${HYPRCTL:-hyprctl}"
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 
-# The one engine location: what the loader names, and what the self-install
-# writes. Deliberately NOT $SELF, which is whichever copy happens to be
-# running -- the loader was rewritten to point at a source checkout the moment
-# one ran `list`, and boot then silently did nothing once that directory was
-# moved or deleted. install.sh computes the same path from the same PREFIX.
+# The one engine location: what the loader names and what the self-install
+# writes. Not $SELF, which is whichever copy is running. install.sh computes
+# the same path from the same PREFIX.
 engine_bin_path() { printf '%s\n' "${PREFIX:-$HOME/.local}/bin/relaunch"; }
 
 config_dir() {
@@ -27,10 +24,9 @@ config_dir() {
 config_path() { printf '%s\n' "$(config_dir)/config.json"; }
 overrides_path() { printf '%s\n' "$(config_dir)/overrides.json"; }
 snippet_path() { printf '%s\n' "$(config_dir)/relaunch.conf"; }
-# Two owned files. relaunch.lua is a stable LOADER that registers the boot
-# hook; rules.lua holds the generated o.window declarations. The split exists
-# for fault isolation: a malformed rules file must lose the pins without
-# losing boot, which a single generated file cannot promise.
+# Two owned files. relaunch.lua is a stable loader that registers the boot
+# hook; rules.lua holds the generated o.window declarations. The split is
+# fault isolation: a malformed rules file loses the pins without losing boot.
 lua_path() { printf '%s\n' "$(config_dir)/relaunch.lua"; }
 rules_path() { printf '%s\n' "$(config_dir)/rules.lua"; }
 disabled_path() { printf '%s\n' "$(config_dir)/disabled"; }
@@ -122,10 +118,8 @@ def normalize_entry:
     label: ((.label // "") | tostring)
   }
   + (
-      # float is a real boolean: false is a captured fact ("this window was
-      # tiled"), not the absence of one. Only a genuinely absent float --
-      # a legacy entry, or one added by `import` with no live window to
-      # read -- stays absent, and that means "unknown, emit no rule".
+      # float is a real boolean: false means "this window was tiled", not
+      # "no value". An absent float means unknown, so no rule is emitted.
       if (.float | type) == "boolean" then {float: .float} else {} end
     );
 
@@ -159,20 +153,17 @@ def capture($clients):
       else
         .seen[$cl.match] = true
         | if .by[$cl.match] then
-            # updated counts entries, not fields: one window whose workspace
-            # and float both moved is one update, so compare the whole entry
-            # once at the end rather than incrementing per assignment.
+            # updated counts entries, not fields, so the whole entry is
+            # compared once at the end.
             (.by[$cl.match]) as $before
             | .by[$cl.match].workspace = $cl.workspace.id
             # Live window state is the authority for float, same as for
             # workspace. Recapture refreshes it rather than preserving it.
             | .by[$cl.match].float = ($cl.floating == true)
-            # Same for the display label: recomputed at save time so it
-            # self-heals when a .desktop file appears, moves or is renamed.
-            # Not for an overrides-table entry though: its exec is the text
-            # the user typed and is protected below, so relabelling it from
-            # the live hosted command would describe a command it does not
-            # run.
+            # The label is recomputed at save time, so it self-heals when a
+            # .desktop file appears, moves or is renamed. Not for an
+            # overrides-table entry: its exec is text the user typed, so a
+            # live-derived label would misdescribe it.
             | (if ($cl.relaunchLabel // "") != ""
                   and ((.by[$cl.match].execSource | normalize_exec_source) != "overrides-table")
                then
@@ -188,9 +179,8 @@ def capture($clients):
                     $src == "guess" or $src == "cmdline"
                     or ($src == "" and .by[$cl.match].exec == ($cl.match | ascii_downcase))
                     # An engine-derived value re-heals when live resolution
-                    # disagrees, so a stale entry written by an older version
-                    # cannot survive forever. Only "overrides-table" holds
-                    # text the user typed, and it is never overwritten here.
+                    # disagrees. Only "overrides-table" holds text the user
+                    # typed, and it is never overwritten here.
                     or (($src == "terminal" or $src == "desktop-file")
                         and .by[$cl.match].exec != $cl.relaunchExec)
                   )
@@ -241,23 +231,19 @@ def enabled_entries:
 def lua_rules:
   enabled_entries
   | map(
-      # tile = true alone does NOT beat the Omarchy floating-window tag.
-      # Verified: default/hypr/apps/system.lua tags TUI.float +floating-window
-      # and floats it via o.window({ tag = "floating-window" }, ...). A later
-      # tile = true still came back floating at 875x600; removing the tag first
-      # does work. A direct per-class float rule (steam, screensaver) IS beaten
-      # by a later tile = true, so only the tag path needs this extra line.
+      # tile = true alone does not beat the Omarchy floating-window tag:
+      # system.lua tags TUI.float +floating-window and floats it by tag, so
+      # the tag has to be removed first. A direct per-class float rule is
+      # beaten by a later tile = true, so only the tag path needs this line.
       (if .float == false then
          "o.window({ class = \"^(\(.class | lua_regex))$\" }, { tag = \"-floating-window\" })\n"
        else "" end)
       + "o.window({ class = \"^(\(.class | lua_regex))$\" }, { workspace = \"\(.workspace) silent\""
       + (
-          # Omarchy tags TUI.float etc. +floating-window in
-          # default/hypr/apps/system.lua, so silence means "float" for those
-          # classes. Say tile = true explicitly to bring a tiled window back
-          # tiled. relaunch.lua is loaded by hyprland.lua after the Omarchy
-          # defaults, so this rule wins. tile is a first-class rule: see
-          # default/hypr/apps/browser.lua.
+          # Omarchy tags TUI.float and friends +floating-window, so silence
+          # means "float" for those classes; tile = true says otherwise
+          # explicitly. relaunch.lua loads after the Omarchy defaults, so
+          # this rule wins.
           if .float == true then ", float = true"
           elif .float == false then ", tile = true"
           else "" end
@@ -277,13 +263,10 @@ load_config_json() {
   jq -e "$jq_lib"' load_config' "$path" || die "parse config: $path"
 }
 
-# The path a write should actually land on. A rename replaces whatever sits
-# at the destination, so renaming onto a symlink destroys the link and
-# silently disconnects a dotfiles-managed file. Resolve the chain first and
-# rename onto the *target*, leaving the user-facing symlink untouched.
-#
-# The `[[ -L ]]` test is a builtin, so the ordinary regular-file case costs
-# nothing; readlink only runs for a path that really is a link.
+# The path a write should land on. A rename replaces whatever sits at the
+# destination, so renaming onto a symlink would destroy the link and
+# disconnect a dotfiles-managed file. Resolve the chain and rename onto the
+# target, leaving the user-facing symlink alone.
 resolve_write_target_into() {
   local path="$1" target
   [[ -L "$path" ]] || { _WTARGET="$path"; return 0; }
@@ -293,13 +276,8 @@ resolve_write_target_into() {
   _WTARGET="$target"
 }
 
-# Create PATH (through any symlink) with DEFAULT content if it does not
-# already exist, making the *resolved* target's parent first. Plain
-# redirection follows a symlink but still fails when the target's directory
-# is missing, which is exactly the dangling-into-an-absent-dotfiles-dir case.
-# Relaunch's own directory, created private. Its contents describe what the
-# user runs and, in last-session.json, what their windows were called; that
-# should not depend on /home/<user> happening to be drwx------.
+# Relaunch's own directory, created private: its contents describe what the
+# user runs and, in last-session.json, what their windows were called.
 ensure_config_dir() {
   local dir
   dir="$(config_dir)"
@@ -307,12 +285,9 @@ ensure_config_dir() {
   (umask 077; mkdir -p "$dir")
 }
 
-# Create the parent for one of our own writes. A command that writes before
-# ensure_hooks has run -- `snapshot` is the reachable one -- created the config
-# directory here with the ambient umask, so under umask 022 a fresh install got
-# a 0755 directory until the next ensure_hooks tightened it. Only OUR directory
-# is forced private: the bin directory and the parent of hyprland.lua belong to
-# the user and are not Relaunch's to restrict.
+# Creates the parent for one of our own writes. Only Relaunch's own directory
+# is forced private; the bin directory and the parent of hyprland.lua belong
+# to the user.
 mkdir_for_write() {
   local dir="$1"
   if [[ "$dir" == "$(config_dir)" ]]; then
@@ -322,10 +297,9 @@ mkdir_for_write() {
   fi
 }
 
-# 0600 from creation, never created-then-tightened: a file that exists even
-# briefly at 0644 is a file that could have been read. This and atomic_write
-# write ONLY files Relaunch owns, all of them under the config directory --
-# user files go through rewrite_through_link, which preserves their mode.
+# 0600 from creation, not created-then-tightened. This and atomic_write write
+# only files Relaunch owns, all under the config directory; user files go
+# through rewrite_through_link, which preserves their mode.
 ensure_file_with() {
   local path="$1" default="$2"
   resolve_write_target_into "$path"
@@ -340,24 +314,19 @@ atomic_write() {
   real="$_WTARGET"
   tmp="${real}.tmp"
   mkdir_for_write "$(dirname "$real")"
-  # The temp file is renamed into place, so ITS mode becomes the final mode.
-  # Create it private and set the mode here rather than after the rename:
-  # tightening afterwards would leave a readable window, and a rename does not
-  # carry the destination's mode anyway.
+  # The temp file is renamed into place, so its mode becomes the final mode:
+  # it is created private and chmodded before the rename.
   #
-  # Enforced, not preserved. Mode preservation is for the user's files, which
-  # this function never writes -- every caller is a Relaunch-owned file in the
-  # config directory. Preserving here would mean a pre-0600 install kept its
-  # 0644 forever, since nothing else ever changes the bits.
+  # Enforced, not preserved. Mode preservation is for the user's files, and
+  # every caller here is a Relaunch-owned file in the config directory.
   (umask 077; : >"$tmp")
   cat >"$tmp"
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$real"
 }
 
-# Rewrite a file in place through any symlink, feeding it to a filter.
-# Every rewriter goes through here so symlink preservation, same-directory
-# temp files and mode preservation are decided in one place.
+# Rewrite a file in place through any symlink, feeding it to a filter. Symlink
+# preservation, same-directory temp files and mode preservation live here.
 rewrite_through_link() {
   local path="$1"
   shift
@@ -406,37 +375,28 @@ _strip_legacy_conf_filter() {
 }
 
 remove_legacy_conf() {
-  # Older installs wrote windowrulev2 to relaunch.conf and sourced it from
-  # hyprland.conf. Pins now live only in rules.lua; drop the leftover
-  # file and source line so both install paths stay on one mechanism.
+  # Older installs sourced a relaunch.conf of windowrulev2 lines from
+  # hyprland.conf. Pins live only in rules.lua, so both are dropped.
   rm -f "$(snippet_path)" "$(snippet_path).tmp"
   local hypr_conf="${RELAUNCH_HYPR_CONF:-$HOME/.config/hypr/hyprland.conf}"
   [[ -f "$hypr_conf" ]] || return 0
   if grep -qF "source = $(snippet_path)" "$hypr_conf" || grep -qx '# omarchy-relaunch' "$hypr_conf"; then
-    # Through the resolver like every other writer: a symlinked hyprland.conf
-    # was replaced by a regular file here, and the /tmp move was
-    # cross-filesystem.
     rewrite_through_link "$hypr_conf" _strip_legacy_conf_filter "$(snippet_path)"
   fi
 }
 
-# The loader. Written whenever its content would change, never parsed, and
-# never regenerated per-save beyond that.
+# The loader. Written whenever its content would change, never parsed.
 #
-# Order is load-bearing: boot registration comes FIRST, before the
-# disable/skip gate. A skipped session still has to register the handler that
-# runs `relaunch boot`, because that is what consumes skip-once -- gate the
-# registration and skip becomes permanent.
+# Order is load-bearing: boot registration comes first, before the
+# disable/skip gate, because `relaunch boot` is what consumes skip-once.
 loader_lua_content() {
   local cmd cmd_lua
   # TWO layers, both required, in this order.
   #
-  # 1. Shell-quote, because hl.exec_cmd word-splits the string: a path with a
-  #    space would otherwise run the wrong program with stray arguments.
-  # 2. Lua-escape the COMPLETE command, because it is embedded in a Lua string
-  #    literal: a quote or backslash would otherwise terminate it early.
-  #
-  # printf %q produces the shell form; the sed then escapes what Lua needs.
+  # 1. Shell-quote: hl.exec_cmd word-splits the string, so a path with a
+  #    space would run the wrong program with stray arguments.
+  # 2. Lua-escape the complete command: it sits in a Lua string literal, so a
+  #    quote or backslash would terminate it early.
   printf -v cmd '%q boot' "$(engine_bin_path)"
   cmd_lua="$(printf '%s' "$cmd" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
   cat <<LUA
@@ -551,12 +511,10 @@ is_generic_terminal_class() {
   return 1
 }
 
-# Join argv into one shell-safe line. /proc preserves argument boundaries that
-# a plain "${argv[*]}" join throws away: Omarchy's Disk Usage runs as
-# `foot --app-id=TUI.float -e bash -c 'dua i /'`, where `dua i /` is a single
-# argument. Flattened and re-split, that becomes `bash -c dua i /`, which runs
-# dua with no arguments — it prints and exits, so the window is gone before the
-# workspace pin can apply.
+# Join argv into one shell-safe line. /proc preserves argument boundaries a
+# plain "${argv[*]}" join throws away: Omarchy's Disk Usage runs
+# `foot --app-id=TUI.float -e bash -c 'dua i /'`, where `dua i /` is one
+# argument that must not re-split at launch.
 quote_argv() {
   local out="" a q
   for a in "$@"; do
@@ -568,16 +526,13 @@ quote_argv() {
 
 # Split a shell-quoted exec back into argv, without eval. The stored exec is
 # printf %q output, so `bash -c dua\ i\ /` holds "dua i /" as ONE argument.
-# Tokenizing the raw string instead yields a leaf of `dua\`, which matches no
-# .desktop file. eval would unquote correctly but would also run command
-# substitution in a string the user can edit in overrides.json, and this runs
-# at save time, not launch time.
+# eval would unquote correctly but would also run command substitution in a
+# string the user can edit in overrides.json.
 unquote_argv_arr() {
   local s="$1" cur="" q="" c i=0 n=${#1} started=0
   local -a out=()
-  # Fast path: nothing to unquote, so plain IFS word splitting is exact and
-  # skips the character loop. That loop is O(length) in bash and runs over
-  # every .desktop Exec during indexing, which was most of a save.
+  # Fast path: with nothing to unquote, IFS word splitting is exact and skips
+  # the character loop, which runs over every .desktop Exec during indexing.
   if [[ "$s" != *[\\\'\"]* ]]; then
     _UARGV=()
     read -r -a _UARGV <<<"$s"
@@ -696,7 +651,7 @@ leaf_command_for_exec() {
 # Print JSON {wrapped, class, exec} from argv. A terminal hosting another
 # command (foot -e herdr, omarchy-launch-terminal nvim) becomes class=that
 # command and exec=xdg-terminal-exec --app-id=<class> -e <command...>, so the
-# next launch has a distinct Hyprland class. No per-app special cases.
+# next launch has a distinct Hyprland class.
 identity_into_globals() {
   local -a argv=("$@")
   local i=0 n=${#argv[@]}
@@ -734,13 +689,11 @@ identity_into_globals() {
     done
   fi
 
-  # The app id goes through quote_argv too, not just the inner argv: boot runs
-# the whole string through bash -c, so an app id containing a space would
-# split into two words and one containing a metacharacter would be executed.
-# -e is kept, not dropped. xdg-terminal-exec accepts it as the explicit end of
-  # options, so an inner command that begins with a dash cannot be reparsed as
-  # one. The rebuilt line then matches what a packaged TUI .desktop already
-  # ships, e.g. Omarchy's Disk Usage.desktop.
+  # The app id goes through quote_argv too: boot runs the whole string through
+  # bash -c, so an app id containing a space would split and one containing a
+  # metacharacter would be executed. -e is kept, not dropped:
+  # xdg-terminal-exec accepts it as the explicit end of options, so an inner
+  # command beginning with a dash cannot be reparsed as one.
   local class="" exec=""
   if [[ -n "$app_id" ]] && ! is_generic_terminal_class "$app_id"; then
     class="$app_id"
@@ -764,9 +717,8 @@ identity_into_globals() {
   fi
 }
 
-# JSON form, for callers and docs that still want it. The hot paths use the
-# globals directly: jq costs ~10ms per spawn and this used to run several
-# times per window.
+# JSON form of identity_into_globals, for callers that want it. The hot paths
+# use the globals directly.
 identity_from_argv() {
   identity_into_globals "$@"
   if [[ "$_ID_WRAPPED" == true ]]; then
@@ -838,23 +790,13 @@ identity_from_pid() {
   fi
 }
 
-# Pure builtins on purpose. This is called once per key per .desktop file --
-# 93 files on a normal machine -- and the previous
-# `printf | tr | tr` forked a subshell and two processes every time, which
-# put `save` at 10-18 seconds with jq accounting for 2% of it. Byte-identical
-# output to the old pipeline; the suite pins the edge cases.
-# Sets _NKEY instead of printing. A $(...) substitution forks a subshell even
-# when the callee is pure builtins, and the index calls this six times per
-# .desktop file, so the fork is the cost, not the work.
+# Sets _NKEY rather than printing: a $(...) substitution forks a subshell even
+# for pure builtins, and the index calls this six times per .desktop file.
 nkey() {
-  # LC_ALL=C is load-bearing, not tidiness. ${v,,} is locale-aware Unicode
-  # case folding, while the tr '[:upper:]' '[:lower:]' this replaced folded
-  # ASCII only: under en_US.UTF-8, "Apps" stayed "Apps" before and would
-  # become "apps" now. Key derivation decides which .desktop a class resolves
-  # to, so a changed key can collapse formerly distinct entries in
-  # DESKTOP_EXEC_BY_* and let the first-indexed launcher win. Byte semantics
-  # keep this a pure performance change. `local` restores the previous value
-  # on return, so nothing else in the script sees C.
+  # LC_ALL=C is load-bearing: ${v,,} is locale-aware Unicode case folding, and
+  # this key decides which .desktop a class resolves to, so locale-dependent
+  # folding could collapse distinct entries in DESKTOP_EXEC_BY_*. `local`
+  # restores the previous value on return.
   local LC_ALL=C
   local v="${1,,}"
   v="${v//[ _.]/-}"
@@ -925,21 +867,20 @@ declare -A DESKTOP_CLASS_BY_EXEC=()
 # Reverse map for display labels only: the leaf command of a terminal-wrapping
 # Exec -> that entry's Name. Omarchy ships Disk Usage.desktop with
 # Exec=xdg-terminal-exec --app-id=TUI.float -e bash -c "dua i /", so `dua`
-# resolves to "Disk Usage". This lookup is acceptable here precisely because a
-# wrong answer is cosmetic; it was rejected for resolving launch commands.
+# resolves to "Disk Usage". Acceptable only because a wrong answer is
+# cosmetic; this is never used to resolve a launch command.
 declare -A DESKTOP_NAME_BY_LEAF=()
-# Omarchy web-app index (github issue #11). Chromium encodes an --app=URL
-# window class as brave-<host>_<path with / as _>-Default, which no
-# StartupWMClass, desktop-file id or Name can match. Identities are compared
-# forward-encoded and never decoded, because / -> _ is lossy.
+# Omarchy web-app index. Chromium encodes an --app=URL window class as
+# brave-<host>_<path with / as _>-Default, which no StartupWMClass,
+# desktop-file id or Name can match. Identities are compared forward-encoded
+# and never decoded, because / -> _ is lossy.
 declare -A WEBAPP_LAUNCH_BY_IDENTITY=()
 declare -A WEBAPP_ID_BY_IDENTITY=()
 declare -A WEBAPP_AMBIGUOUS=()
 # XDG desktop-ID masking, for this index only. The highest-priority file
-# bearing an id claims it -- even when that file is Hidden=true or is not a
-# web app -- so a user override genuinely replaces the system entry instead
-# of colliding with it. The class/id/Name maps keep their existing
-# first-wins-per-key behaviour; general masking is a separate issue.
+# bearing an id claims it, even when Hidden=true or not a web app, so a user
+# override replaces the system entry instead of colliding with it. The
+# class/id/Name maps stay first-wins-per-key.
 declare -A WEBAPP_ID_CLAIMED=()
 _desktop_indexed=0
 # Scratch globals for the fork-free helpers used by the indexing hot path.
@@ -952,14 +893,11 @@ _ID_CLASS=""
 _ID_EXEC=""
 declare -a _UARGV=()
 
-# Chromium identity for a URL: lowercase host, then the path with each / as
-# an underscore. Query and fragment are excluded because Chromium discards
-# them -- verified, https://example.com/?q=1 yields the same class as
-# https://example.com. An empty path and / are identical at the source.
-# RFC 3986 5.2.4 remove_dot_segments, transcribed literally. A segment-stack
-# approximation is not equivalent: it drops empty segments and the trailing
-# slash a final "." or ".." produces, so /a/b/.. would give /a instead of /a/
-# and /a//b would give /a/b. Those are different Chromium identities.
+# Chromium identity for a URL: lowercase host, then the path with each / as an
+# underscore. Query and fragment are excluded because Chromium discards them.
+# RFC 3986 5.2.4 remove_dot_segments, transcribed literally: a segment-stack
+# approximation drops empty segments and the trailing slash a final "." or
+# ".." produces, which are different Chromium identities.
 remove_dot_segments() {
   local input="$1" output="" seg rest
   while [[ -n "$input" ]]; do
@@ -1004,13 +942,11 @@ remove_dot_segments() {
 # Chromium builds the app identity from GURL::host() and GURL::path()
 # (GenerateApplicationNameFromURL). host() excludes userinfo and the port, so
 # https://user@example.com:8443/app and https://example.com/app share one
-# identity -- and therefore one window class. Splitting the raw URL instead
-# would miss that, resolving to the wrong launcher or missing the ambiguity.
+# identity, and therefore one window class.
 chromium_identity_from_url() {
   local url="$1" rest host path
   [[ -n "$url" ]] || return 1
-  # A GURL needs a scheme. The previous guard could never fire: rest == url
-  # only when there is no "://", which the second half then required.
+  # A GURL needs a scheme.
   [[ "$url" == *"://"* ]] || return 1
   rest="${url#*://}"
   rest="${rest%%#*}"
@@ -1065,9 +1001,8 @@ webapp_url_from_exec() {
   return 1
 }
 
-# XDG desktop-file ID: the path relative to the applications/ root with each
-# / replaced by -, case preserved. foo/bar.desktop is the id foo-bar, and
-# Foo.desktop and foo.desktop are distinct ids that must not mask each other.
+# XDG desktop-file ID: the path relative to the applications/ root with each /
+# replaced by -, case preserved. Foo.desktop and foo.desktop are distinct ids.
 dfid_into() {
   local file="$1" root="$2" rel
   rel="${file#"$root"/}"
@@ -1084,18 +1019,14 @@ index_desktop_file() {
   local file="$1" root="${2:-}"
   local section="" raw_exec="" wmclass="" name="" hidden=false
   local line key val id launch
-  # Cheap filter first. A .desktop file is mostly translated keys
-  # (Name[de]=, Comment[fr]=, ...) -- ~600 lines each across 93 files -- and
-  # only four keys matter. Matching the literal prefixes up front skips the
-  # \r trim, the two parameter expansions and the section compare for every
-  # line we do not want. Also stops at the first section after
-  # [Desktop Entry], since nothing after it is read.
+  # Cheap filter first: a .desktop file is mostly translated keys and only
+  # four matter, so matching the literal prefixes skips the trim, the two
+  # expansions and the section compare. Stops at the section after
+  # [Desktop Entry].
   while IFS= read -r line || [[ -n "$line" ]]; do
-    # Strip CR before anything else. The old parser did, and matching the
-    # section header first meant "[Desktop Entry]\r" matched nothing, so a
-    # CRLF file contributed no Exec, Name or StartupWMClass -- and a web app
-    # could still claim its desktop id while registering no launcher, masking
-    # a valid lower-priority file.
+    # Strip CR before the section match: "[Desktop Entry]\r" matches nothing,
+    # so a CRLF file would contribute no Exec, Name or StartupWMClass while
+    # still claiming its desktop id.
     line="${line%$'\r'}"
     case "$line" in
       \[*])
@@ -1119,12 +1050,12 @@ index_desktop_file() {
     esac
   done <"$file"
   # Web-app index: XDG desktop-ID masking, this map only. The claim happens
-  # before the Hidden early-return on purpose -- a Hidden=true user override
-  # must mask the system entry rather than let it register.
+  # before the Hidden early-return, so a Hidden=true override masks the system
+  # entry rather than letting it register.
   local _wid _widkey _wurl _wident
   # Case-sensitive XDG id, not the lowercased basename: normalize_desktop_key
   # collapses case, spaces, underscores and dots, which would let distinct
-  # launchers mask one another or hide a real ambiguity.
+  # launchers mask one another.
   dfid_into "$file" "${root:-${file%/*}}"
   _widkey="$_DFID"
   if [[ -z "${WEBAPP_ID_CLAIMED[$_widkey]:-}" ]]; then
@@ -1172,18 +1103,16 @@ index_desktop_file() {
   if [[ -n "$name" ]]; then
     local leaf
     leaf=""
-    # Only a wrapping Exec can yield a leaf that differs from its first word,
-    # which is the condition below. Checking first avoids tokenizing the
-    # other ninety files.
+    # Only a wrapping Exec yields a leaf that differs from its first word, so
+    # checking that first avoids tokenizing the other ninety files.
     local _first="${raw_exec%% *}"
     if is_terminal_cmd "$_first" || is_wrapper_cmd "$_first" \
       || [[ "${_first##*/}" == bash || "${_first##*/}" == sh \
          || "${_first##*/}" == zsh || "${_first##*/}" == dash ]]; then
       leaf_for_exec_into "$raw_exec" 2>/dev/null && leaf="$_LEAF"
     fi
-    # Only a terminal wrap: a plain Exec=brave would map `brave` -> "Brave",
-    # which tier 1 already covers from the exact file, and which would let any
-    # app claim a bare command name.
+    # Only a terminal wrap: a plain Exec=brave would let any app claim a bare
+    # command name, and tier 1 already covers it from the exact file.
     if [[ -n "$leaf" && "$leaf" != "${raw_exec%% *}" ]]; then
       nkey "$leaf"
       index_set_if_empty DESKTOP_NAME_BY_LEAF "$_NKEY" "$name"
@@ -1241,8 +1170,7 @@ desktop_name_for_leaf() {
 }
 
 # Human-readable name for an entry. Display only -- `class` stays the identity
-# and the only lookup key, so a wrong label is cosmetic and never mis-pins a
-# window. Tiers, in order:
+# and the only lookup key, so a wrong label is cosmetic. Tiers, in order:
 #   1. desktop-file  -> Name= from the exact file the exec already names
 #   2. terminal      -> leaf command, then a .desktop whose terminal-wrap Exec
 #                       runs that leaf, else the leaf itself
@@ -1254,16 +1182,9 @@ display_label_for() {
   local leaf name file
 
   if [[ -n "$exec" ]]; then
-    # `gio launch <file>.desktop`: read Name= from the file the command
-    # already names, whatever execSource says. This was gated on
-    # execSource == desktop-file, so editing the launch command by hand --
-    # which changes the SOURCE and not the command -- turned Signal into
-    # "gio", the leaf of its own launcher.
-    #
-    # Ungating it does not reopen the reverse .desktop lookup that was
-    # rejected for resolving execs: there is no search and no ambiguity, the
-    # exec states which file to read, and only the cosmetic Name= comes back.
-    # A missing or mistyped path simply falls through to the leaf.
+    # `gio launch <file>.desktop`: read Name= from the file the exec names.
+    # No search and no ambiguity -- the exec states which file -- and only the
+    # cosmetic Name= comes back. A missing path falls through to the leaf.
     mapfile -t -d '' argv < <(unquote_argv "$exec")
     if ((${#argv[@]} >= 3)) && [[ "${argv[0]##*/}" == gio && "${argv[1]}" == launch ]]; then
       file="${argv[2]}"
@@ -1295,17 +1216,15 @@ ensure_desktop_index() {
     [[ -d "$dir" ]] || continue
     while IFS= read -r -d '' f; do
       index_desktop_file "$f" "$dir"
-    # -L: distro .desktop files are often symlinks (LibreOffice ships
-    # /usr/share/applications/libreoffice-calc.desktop -> .../xdg/calc.desktop).
-    # find -type f without -L skips those and Calc falls through to cmdline.
+    # -L: distro .desktop files are often symlinks (LibreOffice's are), and
+    # find -type f without it skips them.
     done < <(find -L "$dir" -maxdepth 2 -type f -name '*.desktop' -print0 2>/dev/null)
   done < <(xdg_application_dirs)
 }
 
 # Launch command for a Chromium app-mode window class, or nothing. Only
-# brave-<identity>-Default is supported: that is the one form verified on
-# hardware. A custom profile or another browser stays unresolved and keeps
-# the existing cmdline fallback rather than being guessed at.
+# brave-<identity>-Default is supported, the one form verified on hardware; a
+# custom profile or another browser keeps the cmdline fallback.
 webapp_launch_for_class() {
   local class="$1" ident
   [[ "$class" == brave-*-Default ]] || return 1
@@ -1321,11 +1240,9 @@ desktop_exec_for_class() {
   local k hit
   ensure_desktop_index
   k="$(normalize_desktop_key "$1")"
-  # Window match: StartupWMClass, then desktop-file id, then the Omarchy
-  # web-app identity, then Name. The web-app tier is exact, so it outranks
-  # the last-resort Name key, but it must not pre-empt a real
-  # StartupWMClass. Name stays last so a PWA that reuses a friendly Name
-  # cannot steal the pin class.
+  # Window match order: StartupWMClass, desktop-file id, Omarchy web-app
+  # identity, then Name. The web-app tier is exact so it outranks the
+  # last-resort Name key, but it must not pre-empt a real StartupWMClass.
   hit="${DESKTOP_EXEC_BY_CLASS[$k]:-${DESKTOP_EXEC_BY_ID[$k]:-}}"
   if [[ -z "$hit" ]]; then
     hit="$(webapp_launch_for_class "$1" 2>/dev/null || true)"
@@ -1364,9 +1281,8 @@ cmdline_exec_for_pid() {
     if read_pid_argv "$pid" argv && ((${#argv[@]} > 0)); then
       if ! is_helper_argv "${argv[@]}"; then
         # Not "${argv[*]}": boot runs this through bash -c, so a joined
-        # string re-splits and any space, quote, semicolon, ampersand, glob
-        # or $(...) in an argument changes meaning at launch. Same bug the
-        # hosted-terminal path already fixes with quote_argv.
+        # string re-splits and any space, quote, semicolon, glob or $(...) in
+        # an argument changes meaning at launch.
         printf '%s\n' "$(quote_argv "${argv[@]}")"
         return 0
       fi
@@ -1426,16 +1342,11 @@ ensure_overrides_file() {
 '
 }
 
-# Validate where the table is actually read or written, which is where
-# load_config_json validates config.json, and for the same reason.
-#
-# Deliberately NOT inside ensure_overrides_file: ensure_hooks calls that, and
-# refusing to install or repair over a file the install path never touches
-# would be stricter than config.json, which ensure_hooks does not read at all.
-# It has to run in the CALLER's shell, though -- a `die` inside a $( ) writes
-# its message into the captured output and never reaches the user -- and
-# before the command's first write, or a refusal still leaves a half-applied
-# edit behind.
+# Validates where the table is read or written, like load_config_json for
+# config.json. Not inside ensure_overrides_file: ensure_hooks calls that, and
+# refusing to install over a file the install path never touches would be
+# stricter than config.json. Runs in the CALLER's shell -- a `die` inside a
+# $( ) is captured, not shown -- and before the command's first write.
 require_overrides_parseable() {
   ensure_overrides_file
   jq -e 'type == "object"' "$(overrides_path)" >/dev/null 2>&1 \
@@ -1443,11 +1354,9 @@ require_overrides_parseable() {
 }
 
 load_overrides_json() {
-  # require_overrides_parseable has already refused a file that will not parse, in
-  # the caller's own shell where the message can reach the user. There is
-  # deliberately no {} fallback here: substituting an empty table for a file we
-  # could not read is exactly what let set_override_exec write that empty table
-  # back and discard every override the user had.
+  # require_overrides_parseable has already refused a file that will not
+  # parse. No {} fallback here: an empty table substituted for a file we could
+  # not read would be written back, discarding every override.
   ensure_overrides_file
   jq -e '.' "$(overrides_path)"
 }
@@ -1480,23 +1389,14 @@ unset_override_exec() {
   printf '%s\n' "$json" | atomic_write "$(overrides_path)"
 }
 
-# The program an exec will actually run, into _EXEC_TOKEN.
+# The program an exec will actually run, into _EXEC_TOKEN. Boot runs the exec
+# through `bash -c`, so this splits it the way bash does: unquote_argv_arr
+# handles the quoting and this walks the prefix bash consumes before reaching
+# the program.
 #
-# Boot runs the exec through `bash -c`, so this has to split it the way bash
-# will. Cutting at the first space reported `"/opt/My App/app" --flag` as
-# missing; taking argv[0] afterwards was still wrong in both directions:
-# `FOO=bar /bin/true` judged the assignment (a warning on a row that boots
-# fine), and `env FOO=bar /nope` judged the wrapper, reporting a missing
-# command as present. unquote_argv_arr does the quoting; this walks the
-# prefix bash would consume before reaching the program.
-#
-# Two outcomes are deliberately different:
-#   return 1              nothing to run at all -- an empty or blank exec.
-#   return 0, token ""    a form we decline to judge, so nobody warns about it
-#                         and nobody refuses to launch it. `env -i cmd` is the
-#                         example: the option grammar of a wrapper is not
-#                         something this script is going to reimplement, and
-#                         guessing would put us back to judging the wrong word.
+#   return 1            nothing to run at all -- an empty or blank exec.
+#   return 0, token ""  a form this declines to judge, so nothing warns about
+#                       it and nothing refuses to launch it, e.g. `env -i cmd`.
 _EXEC_TOKEN=""
 exec_command_token() {
   local exec="$1" i=0 n tok mode=shell
@@ -1578,20 +1478,15 @@ annotate_clients() {
   local clients="$1" mode="${2:-full}"
   local addr pid class exec source patches line label
   # One JSON object per window, assembled into the array once at the end.
-  # Re-running jq over the whole accumulator per window was O(n) spawns of an
-  # O(n) document.
   local -a rows=()
   patches='[]'
-  # Warm the index in THIS shell before the loop. resolve_launch runs inside
-  # a $(...) subshell, which gets a copy of _desktop_indexed and of the index
-  # arrays; with a cold parent every window rebuilt the whole index and threw
-  # it away, turning a 170ms scan into 170ms x windows. Display mode must not
-  # index at all, so it is excluded.
+  # Warm the index in THIS shell: resolve_launch runs inside a $(...) subshell,
+  # which gets a copy of the index arrays, so a cold parent rebuilds the whole
+  # index per window. Display mode does not index at all.
   [[ "$mode" == display ]] || ensure_desktop_index
-  # Keyed by window address, not pid. Chromium serves every web app from one
-  # process, so a Google Maps window and the ordinary browser window share a
-  # pid; keying patches by pid collapsed them through from_entries and gave
-  # both windows whichever resolution was processed last.
+  # Keyed by window address, not pid: Chromium serves every web app from one
+  # process, so a Maps window and the browser window share a pid and would
+  # collapse to whichever resolution was processed last.
   while IFS=$'\t' read -r addr pid class; do
     [[ -z "$pid" || "$pid" == null ]] && continue
     [[ -z "$addr" || "$addr" == null ]] && continue
@@ -1720,10 +1615,7 @@ build_rows() {
           }
       ] | sort_by(.workspace, .class) as $fromRelaunch
     # Every startup line is listed, always. There is no correlation with the
-    # relaunch entries: an app that is on both lists appears on both, which
-    # says so more directly than a merged row ever did. The machinery that
-    # used to merge them only existed to attach an action to the merged
-    # state, and Relaunch no longer has one -- it never writes autostart.lua.
+    # relaunch entries: an app on both lists appears on both.
     | [
         $startup[]
         | . as $s
@@ -1906,19 +1798,14 @@ write_last_boot() {
   } | atomic_write "$(last_boot_log_path)"
 }
 
-# Placement has three outcomes, not two. A single immediate sample cannot
-# tell "came back on the wrong workspace" from "has not mapped a window yet":
-# LibreOffice and Chromium web apps take tens of seconds, and both were
-# reported MISPLACED after restoring correctly. Only `misplaced` is a
-# failure.
+# Placement has three outcomes, not two. Only `misplaced` is a failure.
 #
 #   landed    a window of this class is on the expected workspace
 #   misplaced a window exists, on a different workspace
 #   pending   no window of this class yet, within the deadline
 #
-# Bounded re-sampling, not a watcher: this runs at boot. Entries still
-# pending are re-checked until the deadline, and everything that has already
-# resolved is left alone.
+# Bounded re-sampling, not a watcher: pending entries are re-checked until the
+# deadline, and anything already resolved is left alone.
 verify_launches() {
   local launches="$1" clients
   local wait_total="${RELAUNCH_VERIFY_SLEEP:-2}"
@@ -1978,8 +1865,8 @@ verify_sample() {
                 elif $onTarget != null then "landed"
                 else "misplaced" end
               ),
-              # Kept for compatibility: true only when it really landed, so
-              # an unresolved entry no longer reads as a failure.
+              # True only when it really landed, so a pending entry does not
+              # read as a failure.
               placed: ($onTarget != null)
             }
         end
@@ -2001,9 +1888,8 @@ clients_json() {
 }
 
 monitors_raw() {
-  # Lenient on purpose: the snapshot is a nice-to-have, so a save must not
-  # fail because monitors could not be read. Missing data degrades to empty
-  # name/description, not an error.
+  # Lenient on purpose: the snapshot is a nice-to-have, so missing monitors
+  # degrade to empty name/description rather than failing the save.
   local out
   if ! out="$("$HYPRCTL" monitors -j 2>/dev/null)"; then
     printf '%s\n' '[]'
@@ -2035,10 +1921,8 @@ pid_for_running_class() {
     return 0
   fi
   # A hosted terminal reports the terminal class to Hyprland: `foot -e herdr`
-  # is class foot, while list shows the unwrapped identity herdr. Without this
-  # walk, `import --class herdr` finds no pid and stores a bare guess instead
-  # of the xdg-terminal-exec wrap. Only reached when the direct match failed,
-  # so the /proc walk stays off the common path.
+  # is class foot while list shows herdr, so `import --class herdr` needs this
+  # walk to find a pid. Only reached when the direct match failed.
   while IFS= read -r pid; do
     [[ -n "$pid" ]] || continue
     identity_pid_into_globals "$pid"
@@ -2054,9 +1938,8 @@ pid_for_running_class() {
 cmd_save() {
   local cfg clients merged extra
   ensure_hooks
-  # Before anything is loaded, captured or written. emit_state validates too,
-  # but only on the --json path and only after config.json and rules.lua have
-  # already been rewritten -- which is not "before the first write".
+  # Before anything is loaded, captured or written: emit_state validates only
+  # on the --json path, after config.json and rules.lua have been rewritten.
   require_overrides_parseable
   cfg="$(load_config_json)"
   clients="$(clients_json)"
@@ -2168,9 +2051,7 @@ cmd_boot() {
     fi
     pid=""
     err=""
-    # Literally the same check the panel row shows, so the two cannot drift:
-    # a row marked launchable is launched, and a row marked missing is the
-    # one boot skips.
+    # The same check the panel row shows, so the two cannot drift.
     if ! exec_is_ok "$exec"; then
       status="not_found"
       err="command not found: ${_EXEC_TOKEN:-$exec}"
@@ -2198,7 +2079,7 @@ cmd_boot() {
       ' <<<"$launches")"
   # Unit separator, not @tsv: @tsv escapes backslashes, and boot runs this exec
   # through bash -c, so a doubled backslash would break a shell-quoted hosted
-  # command (bash -c dua\ i\ /) right at launch.
+  # command at launch.
   done < <(jq -r "$jq_lib"'
     enabled_entries[]
     | [ .class, (.workspace | tostring), (if .exec != "" then .exec else (.class | guess_exec) end) ]
@@ -2268,9 +2149,8 @@ cmd_snapshot() {
         )
       }
   ')"
-  # Labels are the stored ones, never resolved here. Indexing .desktop files
-  # would be slow and pointless for a diagnostic the user invoked by hand and
-  # is waiting on.
+  # Labels are the stored ones, never resolved here: indexing .desktop files is
+  # slow and pointless for a diagnostic the user is waiting on.
   out="$(jq --argjson cfg "$(load_config_json)" '
     (
       $cfg.entries
@@ -2311,9 +2191,9 @@ cmd_last_session() {
     --argjson before "$(cat "$(last_session_path)")" \
     --argjson after "$(cat "$(last_boot_json_path)")" \
     --argjson now "$(clients_raw)" "$jq_lib"'
-      # Live windows keyed by class, carrying the state we care about, so a
-      # window that came back on the wrong workspace or with the wrong
-      # float/tile state is reported rather than counted as healthy.
+      # Live windows keyed by class with the state that matters, so a window
+      # back on the wrong workspace or float state is reported rather than
+      # counted as healthy.
       (
         $now
         | map({
@@ -2407,9 +2287,8 @@ arg_value() {
   return 1
 }
 
-# Adds a RUNNING window to the relaunch list. There is deliberately no way to
-# import a startup line: importing one meant writing an override for a command
-# Relaunch did not resolve, and the startup list is read-only.
+# Adds a RUNNING window to the relaunch list. There is no way to import a
+# startup line: the startup list is read-only.
 cmd_import() {
   local ws class cfg pid line exec source label
   ws="$(arg_value --workspace "$@" || true)"
@@ -2499,10 +2378,9 @@ cmd_boot_enable() {
   if $json_out; then emit_state; else printf 'Relaunch enabled on boot.\n'; fi
 }
 
-# One-line Hyprland hook. io.open-then-dofile so a missing relaunch.lua
-# (uninstall, first boot before generate) is not a Hyprland config error.
-# An empty XDG_CONFIG_HOME means unset, matching the bash config_dir; Lua
-# would otherwise treat "" as a usable prefix.
+# One-line Hyprland hook. io.open-then-dofile so a missing relaunch.lua is not
+# a Hyprland config error. An empty XDG_CONFIG_HOME means unset, matching the
+# bash config_dir; Lua would otherwise treat "" as a usable prefix.
 hyprland_hook_line() {
   printf '%s\n' 'local _c = os.getenv("XDG_CONFIG_HOME"); if _c == nil or _c == "" then _c = os.getenv("HOME") .. "/.config" end; local _rl = _c .. "/omarchy-relaunch/relaunch.lua"; local _f = io.open(_rl); if _f then _f:close(); dofile(_rl) end'
 }
@@ -2526,9 +2404,8 @@ cmd_uninstall() {
   if [[ -f "$bin" ]] && grep -q 'omarchy-relaunch bar widget' "$bin"; then
     rm -f "$bin"
   fi
-  # Emit the result before unlinking the plugin checkout. The bar panel
-  # loads these QML files; deleting them first makes the popup vanish
-  # with no "removed" message.
+  # Emit the result before unlinking the plugin checkout: the bar panel loads
+  # those QML files, and the popup vanishes with no message if they go first.
   if $json_out; then
     jq -n '{ok: true, uninstalled: true}'
     ( sleep 2; rm -rf "$(plugin_dir)" ) &
@@ -2538,12 +2415,10 @@ cmd_uninstall() {
   fi
 }
 
-# Remove OUR bootstrap from hyprland.lua: the marker comment we write and the
-# hook line itself. Both are fixed strings this script emits verbatim, so the
-# match is exact -- no prefix matching, no examining user Lua, nothing to
-# classify. Clean removal is the one guarantee Relaunch makes, so this has to
-# work; it must also not touch a line we did not write. Routed through
-# rewrite_through_link so a symlinked hyprland.lua keeps its link (issue #2).
+# Removes our bootstrap from hyprland.lua: the marker comment and a hook line,
+# both fixed strings this script emits verbatim, so the match is exact and
+# nothing user-written is classified. An unmarked copy of a hook is still
+# removed. Routed through rewrite_through_link so a symlink keeps its link.
 remove_bootstrap_block() {
   local f="$1"
   [[ -e "$f" ]] || return 0
@@ -2564,10 +2439,8 @@ _is_bootstrap_line() {
 _remove_bootstrap_filter() {
   local input line held="" have_held=false out="" final_nl=true
   local -a hooks=("$@")
-  # Read the whole file with a sentinel byte, because command substitution
-  # eats trailing newlines and the file's EOF state is part of what has to be
-  # restored. Emitting every kept line through printf '%s\n' gave a file whose
-  # last line had no newline one it never had.
+  # Sentinel byte: command substitution eats trailing newlines, and the file's
+  # EOF state is part of what has to be restored.
   input="$(cat; printf X)"
   input="${input%X}"
   [[ -n "$input" ]] || return 0
@@ -2594,11 +2467,9 @@ _remove_bootstrap_filter() {
   return 0
 }
 
-# Installs predating 0600 keep it: atomic_write replaces the file through a
+# Existing files keep their mode otherwise: atomic_write replaces through a
 # temp of its own, so nothing revisits an existing file's bits. One stat over
-# the directory and its contents, and a chmod only for what is actually wrong
-# -- ensure_hooks is on the list/save path and two PRs went into keeping that
-# fast, so the correct case costs a single fork and no writes.
+# the directory and its contents, and a chmod only for what is wrong.
 tighten_config_dir() {
   local dir mode path
   dir="$(config_dir)"
@@ -2624,27 +2495,19 @@ ensure_hooks() {
   remove_legacy_conf
 
   # Order matters: install the loader (which holds the boot registration) and
-  # rules.lua for its dofile to read, and only then point hyprland.lua at the
-  # loader. `list` calls this without regenerating anything, so a bootstrap
-  # that lands before the file it sources would source nothing.
-  #
-  # autostart.lua is not touched here, or anywhere else in this function.
-  # Relaunch owns its own module; the user's file is theirs.
+  # rules.lua for its dofile to read, then point hyprland.lua at the loader.
+  # `list` calls this without regenerating, so a bootstrap landing before the
+  # file it sources would source nothing.
   ensure_file_with "$(rules_path)" '-- Generated by omarchy-relaunch. Do not edit by hand.
 '
   ensure_loader
 
   if [[ -f "$lua" ]] && ! grep -Fq "$hook" "$lua"; then
     remove_bootstrap_block "$lua"
-    # Append EXACTLY the bytes uninstall knows how to take back. There is no
-    # blank separator line: uninstall removed the marker and the hook but not
-    # the blank, so every install/uninstall cycle left one behind, and the
-    # file drifted further from the state Relaunch found it in.
-    #
-    # Our last line carries the file's own EOF state. A hyprland.lua whose
-    # last line had no trailing newline needs one added before we append, and
-    # writing our hook without one puts that state where the remover can read
-    # it back off the file and restore it.
+    # Append exactly the bytes uninstall takes back, with no blank separator:
+    # a blank would survive removal and drift the file. Our last line carries
+    # the file's own EOF state, so a hyprland.lua whose last line had no
+    # trailing newline gets one added and the remover can restore it.
     if [[ -s "$lua" && -n "$(tail -c1 "$lua")" ]]; then
       { printf '\n%s\n' '-- omarchy-relaunch'; printf '%s' "$hook"; } >>"$lua"
     else
@@ -2654,10 +2517,7 @@ ensure_hooks() {
 
   # Plugin-manager installs put a copy of the engine in the plugin folder but
   # nothing on PATH, so that copy -- and only that copy -- installs itself.
-  # The old guard was `RELAUNCH_CONFIG_DIR is unset`, which asks "am I under
-  # test", not "am I an install": every other copy self-installed too, so
-  # running ./relaunch from a checkout silently replaced the user's engine
-  # with the working tree. install.sh writes the PATH copy itself.
+  # install.sh writes the PATH copy itself.
   bin="$(engine_bin_path)"
   if [[ "$SELF" == "$(plugin_dir)/relaunch" ]]; then
     mkdir -p "$(dirname "$bin")"
