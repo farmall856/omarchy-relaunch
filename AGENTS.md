@@ -637,3 +637,135 @@ needs its own justification against "No daemon" above, not this leftover.
 - Per-window (not per-class) restore
 - Restoring terminal session contents (tmux/herdr's job)
 - Editing Hyprland or Omarchy packaged files
+
+---
+
+# Working agreements (migrated from agent memory, 2026-09-11)
+
+## Agent roles on this project
+
+
+On the Omarchy Relaunch project (`~/Projects/relauncher`, published as
+`github.com/farmall856/omarchy-relaunch`), the user runs several coding agents side by side in
+herdr but does not treat them as interchangeable workers. The division of labour is deliberate:
+**Claude is the only agent that writes code.** Other models are used for review and analysis only.
+
+"Sol" is the user's name for **a GPT-5 series model running in the `opencode` agent kind** (the
+pane banner has read both 5.4 and 5.6, so do not rely on a specific version), and the user
+describes using it strictly for review, never for changes. Herdr has no `sol` agent kind — look for
+`opencode` in `herdr agent list` instead. Grok was previously given implementation work and the
+user ended that session because, in their words, "his code mistakes in the critical area were not
+acceptable," which is the background to the reviewer-only stance for non-Claude models.
+
+When proposing any multi-agent workflow for this project, do not hand write access, branches, or
+implementation tasks to the non-Claude agents by default. Give them the reviewer role — reading
+diffs and pull requests and reporting findings — and route the actual edits to Claude. Confirm
+with the user before assuming any other model should start making changes.
+
+## Relaunch only stores data the user can see
+
+
+In the Omarchy Relaunch project (`~/Projects/relauncher`), the user has stated a product principle
+that governs what the application is allowed to keep on disk: **the data Relaunch stores should
+always be visible in the UI and manageable by the user.** Anything recorded outside that surface is
+not acceptable, regardless of how useful it would be.
+
+The principle came out of rejecting a proposal to add a systemd timer that would periodically write
+a window snapshot. Window titles are the sensitive part — they carry document names, URLs, email
+subjects and chat contacts, unlike the window classes in the curated entry list. The user's
+objection was that entries can be curated through the UI, but a background snapshot timer "is
+essentially a spy in the background they can't control." What decides it is not what gets captured
+but whether the user has a surface on which to see and curate it first. The user then had the
+entire pre-shutdown snapshot hook feature removed rather than repaired.
+
+The user's framing of the stakes matters for future scope arguments: Relaunch "is not some mission
+critical app. It mostly restores your desired window config and if it doesn't then the fallback is
+to do what you would have done anyway. Nothing lost." So when a feature trades user control or
+privacy for restoration completeness, the feature loses. Degrading gracefully is cheap here in a
+way that surprising the user is not.
+
+This qualifies the maximum-fidelity restoration principle recorded separately: fidelity governs how
+completely Relaunch restores state the user asked it to capture, not whether Relaunch may observe
+them continuously or retain data they cannot inspect. Manual, user-initiated capture is fine
+because the user chose the moment. Do not propose background capture, periodic sampling, daemons or
+timers for this project, and treat any newly persisted field as owing an answer to "where does the
+user see and manage this?"
+
+The user has also drawn a scope boundary around defensive engineering. In their words, Relaunch
+should guarantee "a best effort restart process not a guaranteed one," and **hand-written or
+user-modified configuration files are not Relaunch's concern.** Do not build machinery whose only
+purpose is to behave correctly when a user has edited config by hand, and do not propose replacing
+one such mechanism with another without justifying the replacement on its own merits. When
+analysis shows a safeguard defends only against situations the user has placed out of scope, say
+so plainly rather than preserving it because it already exists.
+
+The user has stated the project's contract in full, and it bounds how much engineering any
+problem deserves. Relaunch makes a **best effort** to launch the user's chosen applications into
+their workspaces. It cannot control how those applications behave at startup, and does not try to:
+when an application does not come back correctly, the user's remedy is to stop launching that
+application through Relaunch, not for Relaunch to grow machinery to compensate. Edits a user makes
+outside Relaunch's own UI are not Relaunch's concern. **The only guarantee Relaunch offers is that
+uninstalling it completely removes its own files and restores Hyprland to the state it was found
+in.**
+
+Use this to size solutions. When a proposal adds locking, retries, reconciliation or parsing to
+cope with an application misbehaving or a config being hand-edited, it is almost certainly
+over-built: say so and propose the smaller thing, or nothing. The user pushed back on exactly this
+after several review rounds went into "forcing a technically complex solution to a minor problem."
+
+The same principle rules out storing data speculatively. Relaunch's `config.json` carried a
+`windows[]` array that nothing read, kept only so that a hypothetical future per-window feature
+would have real data to work with. The user had it removed: if no defined feature consumes a
+field, it should not be persisted, and it can be added back when that feature actually exists.
+Do not persist state in anticipation of work that has not been scoped.
+
+## Maximum-fidelity restoration
+
+
+Relaunch (`~/Projects/relauncher`, published as `github.com/farmall856/omarchy-relaunch`)
+is an Omarchy bar-widget plugin that restores the app→workspace layout after a reboot
+or crash. Its stated purpose, in the user's words, is "to restore the current state to
+a restarted omarchy as closely as possible."
+
+That principle decides scope questions. When some piece of observable per-window state
+can be captured — working directory, launch arguments, floating state — the default is
+to capture and restore it. Do not propose skipping a captured value on the grounds that
+it looks redundant or incidental. The user made this correction after a proposal to
+capture terminal working directories only where they seemed meaningful, and to skip
+them for hosted TUIs whose command already encoded a path (Omarchy's Disk Usage runs as
+`dua i /`). The user's reasoning: the directory is not meaningless, because the user
+chose to launch the app there. Inferring intent from a command string and discarding
+real observed state on that basis is the error to avoid.
+
+The legitimate concern is robustness, not selectivity: a captured directory that no
+longer exists at restore time should degrade gracefully (fall back rather than fail the
+launch), which is a different question from whether to capture it at all.
+
+A related scope decision from the same conversation: Relaunch restores one layout and
+is deliberately not a project switcher. Do not add multiple named presets, even though
+an adjacent third-party plugin (`monswiklund/omarchy-workspace-presets`) works that way.
+
+## Invariants in this file may be agent-authored
+
+
+In the Omarchy relauncher project (`~/Projects/relauncher`), and in similar projects where
+coding agents have written the documentation, the contents of `AGENTS.md` — including lines
+phrased as firm invariants — were largely authored by the agents doing the work rather than
+by the user. They record what some agent decided at the time, not a standing user requirement.
+
+Do not cite such a line back to the user as a constraint, and do not ask permission to change
+it as though changing it would override their intent. The user made this explicit after being
+asked whether it was acceptable to change an AGENTS.md invariant stating that a window's
+`float` value was a preserved user edit: their answer was that live state should win and
+"that agent.md entry was not mine."
+
+The user's own stated decisions are the authority; agent-authored documentation is a working
+record that should be corrected whenever it conflicts with those decisions or with observed
+behavior. When a project doc states something that blocks the obviously right change, treat it
+as a candidate for revision rather than as a requirement, and check provenance (for example
+with `git log` or `git blame`) before attributing it to the user.
+
+## Confirm before relaying to Grok's pane
+
+
+When collaborating with Grok (running in a herdr pane, e.g. `w1:p4`, on shared projects like the Omarchy relauncher), do not independently approve a design or fix and relay that approval to Grok's pane. Verifying a claim against the actual filesystem or code unprompted is fine, but the resulting verdict and any "go ahead and implement" instruction must be shown to the user first, and only sent to Grok after the user explicitly confirms — even when earlier turns in the same session established a habit of relaying findings or corrections without asking each time. The user drew this line explicitly after independent verification of a proposed fix was followed by an unprompted "go ahead and implement" message sent straight to Grok's pane: "stop telling grok what to do before I confirm it." Present the analysis and the proposed message to the user, then wait for confirmation, before using `herdr pane run` (or equivalent) to direct Grok's next step.
