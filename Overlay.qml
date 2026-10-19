@@ -3,6 +3,7 @@ import Quickshell.Io
 import Quickshell.Wayland
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Fullscreen log overlay. Same contract as omarchy.emojis / omarchy.clipboard:
@@ -21,11 +22,11 @@ Item {
   property bool logMissing: false
   readonly property int maxChars: 65536
 
-  property color background: Color.menu.background
-  property color foreground: Color.menu.text
-  property color border: Color.menu.border
+  property color background: Commons.Color.menu.background
+  property color foreground: Commons.Color.menu.text
+  property color border: Commons.Color.menu.border
   property var borderSpec: Border.surfaceSpec("menu", "border", border, Math.max(1, Style.space(2)))
-  property color scrim: Color.menu.scrim
+  property color scrim: Commons.Color.menu.scrim
   readonly property int cornerRadius: Style.cornerRadius
   property string fontFamily: Style.font.family
   property int contentMargin: Style.spacing.panelPadding
