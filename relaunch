@@ -6,6 +6,47 @@
 set -euo pipefail
 
 HYPRCTL="${HYPRCTL:-hyprctl}"
+
+# Every jq call goes through here, so no value reaches jq's command line.
+# Another local user can read any process's argv in /proc/<pid>/cmdline, and
+# these values include window titles and launch commands. --arg and
+# --argjson are moved into the environment instead (/proc/<pid>/environ is
+# readable by this user only) and bound back to the same $names at the
+# start of the filter. `export` is a builtin, so no other process's argv
+# carries them either.
+jq() {
+  local -a args=() binds=() envs=()
+  local filter_at=-1 bind
+  while (($#)); do
+    case "$1" in
+      --arg | --argjson)
+        envs+=("RELAUNCH_JQ_$2=$3")
+        if [[ "$1" == --arg ]]; then
+          binds+=("\$ENV.RELAUNCH_JQ_$2 as \$$2")
+        else
+          binds+=("(\$ENV.RELAUNCH_JQ_$2 | fromjson) as \$$2")
+        fi
+        shift 3
+        ;;
+      -*) args+=("$1"); shift ;;
+      *)
+        ((filter_at < 0)) && filter_at=${#args[@]}
+        args+=("$1")
+        shift
+        ;;
+    esac
+  done
+  if ((${#binds[@]} && filter_at >= 0)); then
+    for bind in "${binds[@]}"; do
+      args[filter_at]="$bind | ${args[filter_at]}"
+    done
+  fi
+  (
+    for bind in "${envs[@]}"; do export "$bind"; done
+    command jq "${args[@]}"
+  )
+}
+
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # The one engine location: what the loader names and what the self-install
