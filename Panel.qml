@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Relaunch panel. Shells out to `relaunch` for inventory, list edits, and
@@ -14,6 +15,10 @@ Panel {
   manageIpc: false
 
   property var anchorItem: null
+  // The theme's text colour, as the stock panels use it. Panel's barForeground
+  // follows the bar, which turns dark over a light wallpaper while the popup
+  // stays dark.
+  readonly property color ink: bar ? bar.foreground : Commons.Color.foreground
   property var hostWidget: null
 
   property var entries: []
@@ -390,8 +395,8 @@ Panel {
     height: Style.space(22)
     width: chipLabel.implicitWidth + Style.space(12)
     radius: Style.space(4)
-    color: chipMouse.containsMouse ? Style.hoverFillFor(chip.danger ? Color.urgent : root.barForeground, chip.danger ? Color.urgent : Color.accent) : "transparent"
-    border.color: chip.danger ? Color.urgent : root.barForeground
+    color: chipMouse.containsMouse ? Style.hoverFillFor(chip.danger ? Commons.Color.urgent : root.ink, chip.danger ? Commons.Color.urgent : Commons.Color.accent) : "transparent"
+    border.color: chip.danger ? Commons.Color.urgent : root.ink
     border.width: 1
     opacity: root.busy ? 0.45 : 1
     Text {
@@ -399,7 +404,7 @@ Panel {
       id: chipLabel
       anchors.centerIn: parent
       text: chip.label
-      color: chip.danger ? Color.urgent : root.barForeground
+      color: chip.danger ? Commons.Color.urgent : root.ink
       font.family: root.bar ? root.bar.fontFamily : Style.font.family
       font.pixelSize: Style.font.caption
     }
@@ -422,12 +427,12 @@ Panel {
     property bool active: false
     property real glyphSize: Style.font.bodySmall
     signal clicked
-    readonly property color tint: iconChip.danger ? Color.urgent : root.barForeground
+    readonly property color tint: iconChip.danger ? Commons.Color.urgent : root.ink
     height: Style.space(22)
     width: Style.space(26)
     radius: Style.space(4)
     color: iconChipMouse.containsMouse || iconChip.active
-      ? Style.hoverFillFor(iconChip.tint, iconChip.danger ? Color.urgent : Color.accent)
+      ? Style.hoverFillFor(iconChip.tint, iconChip.danger ? Commons.Color.urgent : Commons.Color.accent)
       : "transparent"
     border.color: iconChip.tint
     border.width: 1
@@ -459,13 +464,11 @@ Panel {
   component BorderLegend: Rectangle {
     id: legendChip
     property string title: ""
-    property color tint: root.barForeground
+    property color tint: root.ink
     x: Style.space(10)
     width: legendLabel.implicitWidth + Style.space(8)
     height: legendLabel.implicitHeight
-    // Panel exposes barForeground but no background; the shell's own idiom
-    // for one is bar.background with a Color fallback (see Ui/PanelSlider).
-    color: root.bar ? root.bar.background : Color.background
+    color: root.bar ? root.bar.background : Commons.Color.background
     Text {
       textFormat: Text.PlainText
       id: legendLabel
@@ -529,7 +532,7 @@ Panel {
                 // Identity, not a control: plain Text, no chip border and no
                 // hover state.
                 text: "\uf1da"
-                color: root.barForeground
+                color: root.ink
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.subtitle
               }
@@ -539,7 +542,7 @@ Panel {
                 id: titleText
                 anchors.verticalCenter: parent.verticalCenter
                 text: "relaunch"
-                color: root.barForeground
+                color: root.ink
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.subtitle
                 font.bold: true
@@ -562,15 +565,15 @@ Panel {
             width: parent.width
             height: Style.space(36)
             radius: Style.space(6)
-            color: saveMouse.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent) : "transparent"
-            border.color: root.barForeground
+            color: saveMouse.containsMouse ? Style.hoverFillFor(root.ink, Commons.Color.accent) : "transparent"
+            border.color: root.ink
             border.width: 1
             opacity: root.busy ? 0.5 : 1.0
             Text {
               textFormat: Text.PlainText
               anchors.centerIn: parent
               text: root.busy ? "Working…" : "Save Current Workspaces"
-              color: root.barForeground
+              color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.body
               font.bold: true
@@ -604,14 +607,14 @@ Panel {
               height: errBody.implicitHeight + Style.space(18)
               radius: Style.space(6)
               color: "transparent"
-              border.color: Color.urgent
+              border.color: Commons.Color.urgent
               border.width: 1
             }
 
             BorderLegend {
               id: errLegend
               title: "ERROR"
-              tint: Color.urgent
+              tint: Commons.Color.urgent
             }
 
             Text {
@@ -621,14 +624,14 @@ Panel {
               y: errBox.y + Style.space(9)
               width: parent.width - Style.space(20)
               text: root.statusText
-              color: Color.urgent
+              color: Commons.Color.urgent
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
             }
           }
 
-          Rectangle { width: parent.width; height: 1; color: root.barForeground; opacity: 0.2 }
+          Rectangle { width: parent.width; height: 1; color: root.ink; opacity: 0.2 }
 
           Text {
             textFormat: Text.PlainText
@@ -636,7 +639,7 @@ Panel {
             text: root.relaunchRows.length > 0
               ? "Relaunch list (" + root.relaunchRows.length + ")"
               : "No apps on the relaunch list yet"
-            color: root.barForeground
+            color: root.ink
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.bodySmall
             font.bold: true
@@ -659,7 +662,7 @@ Panel {
                 height: wsBody.implicitHeight + Style.space(18)
                 radius: Style.space(6)
                 color: "transparent"
-                border.color: root.barForeground
+                border.color: root.ink
                 border.width: 1
               }
 
@@ -700,7 +703,7 @@ Panel {
                         text: relaunchRow.modelData.label
                           + (root.rowUnverified(relaunchRow.modelData) ? "  (unverified)" : "")
                         elide: Text.ElideRight
-                        color: root.rowBroken(relaunchRow.modelData) ? Color.urgent : root.barForeground
+                        color: root.rowBroken(relaunchRow.modelData) ? Commons.Color.urgent : root.ink
                         opacity: relaunchRow.modelData.enabled ? 1.0 : 0.4
                         font.family: root.bar ? root.bar.fontFamily : Style.font.family
                         font.pixelSize: Style.font.bodySmall
@@ -741,7 +744,7 @@ Panel {
                       width: parent.width
                       text: "class " + relaunchRow.modelData.class + " — what the workspace pin matches"
                       wrapMode: Text.WordWrap
-                      color: root.barForeground
+                      color: root.ink
                       opacity: 0.6
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.caption
@@ -753,7 +756,7 @@ Panel {
                       width: parent.width
                       text: "Launch command not found. Type the command that starts this app."
                       wrapMode: Text.WordWrap
-                      color: Color.urgent
+                      color: Commons.Color.urgent
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.caption
                     }
@@ -769,7 +772,7 @@ Panel {
                         placeholderText: "launch command"
                         font.family: Style.font.family
                         font.pixelSize: Style.font.bodySmall
-                        foreground: root.barForeground
+                        foreground: root.ink
                         horizontalPadding: Style.spacing.controlGap
                         verticalPadding: Style.spacing.controlPaddingY
                         onActiveFocusChanged: {
@@ -811,7 +814,7 @@ Panel {
               height: winBody.implicitHeight + Style.space(18)
               radius: Style.space(6)
               color: "transparent"
-              border.color: root.barForeground
+              border.color: root.ink
               border.width: 1
             }
 
@@ -843,7 +846,7 @@ Panel {
                     anchors.verticalCenter: parent.verticalCenter
                     text: "ws " + winRow.modelData.workspace + "  ·  " + winRow.modelData.label
                     elide: Text.ElideRight
-                    color: root.barForeground
+                    color: root.ink
                     font.family: root.bar ? root.bar.fontFamily : Style.font.family
                     font.pixelSize: Style.font.bodySmall
                   }
@@ -896,7 +899,7 @@ Panel {
               height: startBody.implicitHeight + Style.space(18)
               radius: Style.space(6)
               color: "transparent"
-              border.color: root.barForeground
+              border.color: root.ink
               border.width: 1
             }
 
@@ -920,7 +923,7 @@ Panel {
                   width: startBody.width
                   text: modelData.label
                   elide: Text.ElideRight
-                  color: root.barForeground
+                  color: root.ink
                   font.family: root.bar ? root.bar.fontFamily : Style.font.family
                   font.pixelSize: Style.font.bodySmall
                 }
@@ -941,7 +944,7 @@ Panel {
               height: bootBody.implicitHeight + Style.space(18)
               radius: Style.space(6)
               color: "transparent"
-              border.color: root.barForeground
+              border.color: root.ink
               border.width: 1
             }
 
@@ -961,7 +964,7 @@ Panel {
                 textFormat: Text.PlainText
                 width: parent.width
                 text: root.bootLabel()
-                color: root.barForeground
+                color: root.ink
                 opacity: 0.75
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.bodySmall
@@ -993,7 +996,7 @@ Panel {
                 width: parent.width
                 visible: root.lastBoot !== null
                 text: root.lastBootLink()
-                color: root.barForeground
+                color: root.ink
                 opacity: 0.7
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.caption
@@ -1012,7 +1015,7 @@ Panel {
             width: parent.width
             visible: root.statusText.length > 0 && !root.statusIsError
             text: root.statusText
-            color: root.barForeground
+            color: root.ink
             opacity: 0.75
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.bodySmall
