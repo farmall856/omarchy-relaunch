@@ -59,7 +59,7 @@ relaunch list [--json]                 # entries + startup inventory + rows + bo
 relaunch reload
 relaunch boot                          # registered by the owned loader
 relaunch import --class CLASS --workspace N
-relaunch set-exec --class CLASS --exec CMD
+relaunch set-exec --class CLASS --exec CMD | --exec-stdin   # the panel uses --exec-stdin
 relaunch drop --class CLASS
 relaunch boot-skip | boot-disable | boot-enable
 relaunch last-boot [--json] [--open]

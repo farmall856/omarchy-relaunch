@@ -6,6 +6,47 @@
 set -euo pipefail
 
 HYPRCTL="${HYPRCTL:-hyprctl}"
+
+# Every jq call goes through here, so no value reaches jq's command line.
+# Another local user can read any process's argv in /proc/<pid>/cmdline, and
+# these values include window titles and launch commands. --arg and
+# --argjson are moved into the environment instead (/proc/<pid>/environ is
+# readable by this user only) and bound back to the same $names at the
+# start of the filter. `export` is a builtin, so no other process's argv
+# carries them either.
+jq() {
+  local -a args=() binds=() envs=()
+  local filter_at=-1 bind
+  while (($#)); do
+    case "$1" in
+      --arg | --argjson)
+        envs+=("RELAUNCH_JQ_$2=$3")
+        if [[ "$1" == --arg ]]; then
+          binds+=("\$ENV.RELAUNCH_JQ_$2 as \$$2")
+        else
+          binds+=("(\$ENV.RELAUNCH_JQ_$2 | fromjson) as \$$2")
+        fi
+        shift 3
+        ;;
+      -*) args+=("$1"); shift ;;
+      *)
+        ((filter_at < 0)) && filter_at=${#args[@]}
+        args+=("$1")
+        shift
+        ;;
+    esac
+  done
+  if ((${#binds[@]} && filter_at >= 0)); then
+    for bind in "${binds[@]}"; do
+      args[filter_at]="$bind | ${args[filter_at]}"
+    done
+  fi
+  (
+    for bind in "${envs[@]}"; do export "$bind"; done
+    command jq "${args[@]}"
+  )
+}
+
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # The one engine location: what the loader names and what the self-install
@@ -2056,7 +2097,9 @@ cmd_boot() {
       status="not_found"
       err="command not found: ${_EXEC_TOKEN:-$exec}"
     else
-      bash -c "$exec" &
+      # The command reaches bash through its environment, not its argv, and
+      # is unset before it runs so the app does not inherit it.
+      RELAUNCH_EXEC="$exec" bash -c 'c=$RELAUNCH_EXEC; unset RELAUNCH_EXEC; eval "$c"' &
       pid=$!
       if kill -0 "$pid" 2>/dev/null; then
         status="started"
@@ -2274,6 +2317,14 @@ cmd_last_session() {
   ' <<<"$report"
 }
 
+has_flag() {
+  local flag="$1"
+  shift
+  local a
+  for a in "$@"; do [[ "$a" == "$flag" ]] && return 0; done
+  return 1
+}
+
 arg_value() {
   local flag="$1"
   shift
@@ -2320,9 +2371,15 @@ cmd_import() {
 cmd_set_exec() {
   local class exec cfg label
   class="$(arg_value --class "$@" || true)"
-  exec="$(arg_value --exec "$@" || true)"
+  # --exec-stdin reads the command from stdin, which is how the panel sends
+  # it: argv is readable by other local users in /proc/<pid>/cmdline.
+  if has_flag --exec-stdin "$@"; then
+    IFS= read -r exec || [[ -n "$exec" ]] || exec=""
+  else
+    exec="$(arg_value --exec "$@" || true)"
+  fi
   [[ -n "$class" ]] || die "set-exec requires --class"
-  [[ -n "$exec" ]] || die "set-exec requires --exec"
+  [[ -n "$exec" ]] || die "set-exec requires --exec CMD or --exec-stdin"
   # Before load_config_json, so a bad overrides.json refuses the whole command
   # instead of aborting after config.json has already been rewritten.
   require_overrides_parseable
@@ -2540,7 +2597,7 @@ relaunch — engine for omarchy-relaunch
   relaunch snapshot                      capture the layout now (diagnostic)
   relaunch last-session [--json] [--diff]   compare that snapshot with the boot
   relaunch import --class CLASS --workspace N
-  relaunch set-exec --class CLASS --exec CMD
+  relaunch set-exec --class CLASS --exec CMD | --exec-stdin
   relaunch drop --class CLASS            remove from relaunch list
   relaunch boot-skip                     skip relaunch on the next boot
   relaunch boot-disable                  disable until re-enabled
