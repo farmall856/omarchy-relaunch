@@ -133,19 +133,21 @@ Panel {
   // Queue instead of refusing: a request either runs now or runs next, and
   // nothing is discarded. FIFO with no coalescing, because deciding which
   // requests are equivalent is how actions get dropped again.
-  function run(args, okText) {
+  // stdinText, when given, goes to the engine on stdin, never argv: another
+  // local user can read any process's argv in /proc/<pid>/cmdline.
+  function run(args, okText, stdinText) {
     root.confirmRemove = false
     // Not `busy`: refresh() sets that BEFORE calling run(), so testing it
     // would queue the ordinary idle open path behind nothing.
     if (actionProc.running || root.startingNext) {
-      root.requestQueue = root.requestQueue.concat([{ args: args, okText: okText || "" }])
+      root.requestQueue = root.requestQueue.concat([{ args: args, okText: okText || "", stdinText: stdinText || "" }])
       root.busy = true
       return
     }
-    root.startRequest(args, okText || "", false)
+    root.startRequest(args, okText || "", false, stdinText || "")
   }
 
-  function startRequest(args, okText, keepStatus) {
+  function startRequest(args, okText, keepStatus, stdinText) {
     root.pendingStatus = okText
     if (!keepStatus) root.statusText = ""
     root.engineReportedError = false
@@ -159,6 +161,8 @@ Panel {
     root.settled = false
     root.startingNext = false
     root.busy = true
+    actionProc.stdinText = stdinText || ""
+    actionProc.stdinEnabled = actionProc.stdinText !== ""
     actionProc.command = [root.enginePath].concat(args)
     actionProc.running = true
   }
@@ -184,7 +188,7 @@ Panel {
       root.startingNext = true
       Qt.callLater(function() {
         root.startingNext = false
-        root.startRequest(next.args, next.okText, true)
+        root.startRequest(next.args, next.okText, true, next.stdinText)
       })
       return
     }
@@ -301,6 +305,11 @@ Panel {
 
   Process {
     id: actionProc
+    property string stdinText: ""
+    onStarted: {
+      if (stdinText !== "") write(stdinText + "\n")
+      stdinText = ""
+    }
     command: [root.enginePath, "list", "--json"]
     // waitForEnd, because without it the collector can report a stream that
     // has not been fully read: on a failing run the engine's JSON error was
@@ -376,7 +385,7 @@ Panel {
     var cmd = String(exec || "").replace(/^\s+|\s+$/g, "")
     if (!className || !cmd) return
     root.execEditClass = ""
-    root.run(["set-exec", "--class", className, "--exec", cmd, "--json"], "Saved launch command.")
+    root.run(["set-exec", "--class", className, "--exec-stdin", "--json"], "Saved launch command.", cmd)
   }
 
   function rowUnverified(row) {
