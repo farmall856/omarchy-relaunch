@@ -17,7 +17,9 @@ pub mod store;
 pub mod txn;
 pub mod users;
 
-pub use engine::{Authenticator, Engine, EngineError, PrepareOk, Proposal, ReduceOp};
-pub use polkit::PolkitAuthenticator;
+pub use engine::{
+    AuthRequest, Authenticator, Engine, EngineError, InvalidateHook, PrepareOk, Proposal, ReduceOp,
+};
+pub use polkit::{PolkitAuthenticator, PolkitCanceller};
 pub use store::{enrollment_id_for, PublicState, Store, StoreError};
 pub use txn::{Clock, Transaction, DEFAULT_TTL_SECS};

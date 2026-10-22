@@ -109,33 +109,49 @@ impl Store {
     }
 
     /// Ensure the uid has a key and a committed public state, creating both on
-    /// first use. Idempotent. Recovers an interrupted key-only enrollment by
-    /// publishing `gen = 0` for the existing key; **never** regenerates a key
-    /// that exists and never lowers a committed `gen`.
+    /// first use. Idempotent.
+    ///
+    /// The generation-reuse rule (spec §7, reviewer I1/M1): only the call that
+    /// *just created* the key (O_EXCL success) may publish `gen = 0`; it does so
+    /// immediately, in this same critical section, so a committed `gen = 0`
+    /// always exists after a successful first enrollment. A key that already
+    /// exists with **no** committed public state is therefore either a crash in
+    /// that microscopic window or a lost `public.json` over a key that has
+    /// already signed — the two are indistinguishable, so we **fail closed**
+    /// rather than republish `gen = 0` and let a historical signature verify
+    /// again. Recovery is an explicit purge + re-adopt (a fresh key).
     pub fn ensure_enrolled(&self, uid: u32, user: &str) -> Result<PublicState, StoreError> {
         fs::create_dir_all(self.user_dir(uid))?;
         set_mode(&self.root, 0o755)?;
         set_mode(&self.user_dir(uid), 0o755)?;
+        // Durability of the just-created directory entry.
+        sync_dir(&self.root)?;
 
-        let key = match self.read_or_create_key(uid)? {
-            Some(k) => k,
-            None => self.signing_key(uid)?,
-        };
-        let pubkey = key.verifying_key().to_bytes();
-
-        if let Some(st) = self.current(uid)? {
-            // Committed state exists; trust its gen. (A pubkey mismatch means a
-            // key was swapped under a stale public.json — corrupt, fail closed.)
-            if st.pubkey != hex::encode(pubkey) {
-                return Err(StoreError::Corrupt(format!(
-                    "key/public.json mismatch for uid {uid}"
-                )));
+        match self.read_or_create_key(uid)? {
+            Some(key) => {
+                // We created the key this call. Commit gen 0 now, so a key is
+                // never left without committed public state except across a
+                // crash in this window.
+                let pubkey = key.verifying_key().to_bytes();
+                self.write_public_durable(uid, user, 0, &pubkey)
             }
-            return Ok(st);
+            None => {
+                // Key already on disk. It MUST have a committed public state.
+                let st = self.current(uid)?.ok_or_else(|| {
+                    StoreError::Corrupt(format!(
+                        "signing.key for uid {uid} present without committed public state; \
+                         purge to re-enroll"
+                    ))
+                })?;
+                let pubkey = self.signing_key(uid)?.verifying_key().to_bytes();
+                if st.pubkey != hex::encode(pubkey) {
+                    return Err(StoreError::Corrupt(format!(
+                        "key/public.json mismatch for uid {uid}"
+                    )));
+                }
+                Ok(st)
+            }
         }
-        // Key exists (fresh or recovered) but no committed public state: publish
-        // gen 0 durably. No signature has escaped, so this is not a rollback.
-        self.write_public_durable(uid, user, 0, &pubkey)
     }
 
     /// Create `signing.key` with O_EXCL if absent and return the new key;
@@ -218,14 +234,28 @@ impl Store {
     }
 
     /// Durably remove all state for a uid (Purge). The caller must already have
-    /// invalidated any pending transaction and cached key.
+    /// invalidated any pending transaction.
+    ///
+    /// Atomic revocation (spec §7, reviewer I2): `rename` the uid directory to a
+    /// tombstone and fsync the state root *first*, so the trust anchor
+    /// (`<uid>/public.json`) is gone the instant we report progress; only then
+    /// delete the tombstone. A crash can leave a `<uid>.purging-*` directory —
+    /// which boot never looks at — but never a half-deleted `<uid>/` that still
+    /// verifies or that feeds a gen-0 recovery.
     pub fn purge(&self, uid: u32) -> Result<(), StoreError> {
         let dir = self.user_dir(uid);
-        match fs::remove_dir_all(&dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e.into()),
+        if !dir.exists() {
+            return Ok(());
         }
+        let mut rnd = [0u8; 8];
+        getrandom::fill(&mut rnd).map_err(|e| StoreError::Corrupt(format!("getrandom: {e}")))?;
+        let tomb = self
+            .root
+            .join(format!("{uid}.purging-{}", hex::encode(rnd)));
+        fs::rename(&dir, &tomb)?;
+        sync_dir(&self.root)?;
+        // The anchor is now unreachable; finish cleanup best-effort-durably.
+        fs::remove_dir_all(&tomb)?;
         sync_dir(&self.root)?;
         Ok(())
     }

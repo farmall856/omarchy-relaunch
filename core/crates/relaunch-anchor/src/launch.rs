@@ -7,14 +7,17 @@
 use relaunch_core::{Entry, ExecSource};
 use sha2::{Digest, Sha256};
 
-use crate::desktop::{canonical_exec_string, parse_exec};
+use crate::desktop::{canonical_exec_string, parse_entry};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Spawn {
     /// Run via `bash -c` with the command passed in `RELAUNCH_EXEC` (no argv).
     Shell(String),
-    /// `execve` this argv directly (desktop-file).
-    Argv(Vec<String>),
+    /// `execve` this argv directly (desktop-file), optionally in `cwd` (Path=).
+    Argv {
+        argv: Vec<String>,
+        cwd: Option<String>,
+    },
 }
 
 /// Decide how to launch `entry`. `launcher_buffer` is the bytes the anchor read
@@ -38,12 +41,23 @@ pub fn decide(entry: &Entry, launcher_buffer: Option<&[u8]>) -> Result<Spawn, St
             }
 
             let text = std::str::from_utf8(buf).map_err(|_| "launcher not UTF-8".to_string())?;
-            let argv = parse_exec(text)?;
+            let de = parse_entry(text)?;
+            // Unsupported launch semantics are refused, not silently ignored
+            // (reviewer M6/I5).
+            if de.dbus_activatable {
+                return Err("dbus-activatable".into());
+            }
+            if de.terminal {
+                return Err("terminal-launcher".into());
+            }
             // The signed exec must be exactly the launcher's Exec as approved.
-            if canonical_exec_string(&argv) != entry.exec {
+            if canonical_exec_string(&de.argv) != entry.exec {
                 return Err("launcher-changed".into());
             }
-            Ok(Spawn::Argv(argv))
+            Ok(Spawn::Argv {
+                argv: de.argv,
+                cwd: de.path,
+            })
         }
         ExecSource::OverridesTable
         | ExecSource::Terminal

@@ -19,5 +19,6 @@ pub use crypto::{
 };
 pub use model::{
     ConfigFile, Entry, ExecSource, Launcher, Provenance, SignedConfig, ValidationError,
-    FILE_FORMAT_VERSION, MAX_ENTRIES, MAX_EXEC_LEN, ROOT_LAUNCHER_PREFIXES, SIGNED_SCHEMA_VERSION,
+    FILE_FORMAT_VERSION, MAX_DOCUMENT_BYTES, MAX_ENTRIES, MAX_EXEC_LEN, ROOT_LAUNCHER_PREFIXES,
+    SIGNED_SCHEMA_VERSION,
 };

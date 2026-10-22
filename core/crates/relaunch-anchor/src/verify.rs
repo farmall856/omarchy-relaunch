@@ -66,7 +66,8 @@ pub fn load_verified(
     trusted_chain(&public_path, trusted_uid, state_root)?;
 
     let st: PublicState = serde_json::from_slice(
-        &fs::read(&public_path).map_err(|e| format!("read public.json: {e}"))?,
+        &crate::fsio::read_regular_capped(&public_path, crate::fsio::MAX_FILE_BYTES)
+            .map_err(|e| format!("read public.json: {e}"))?,
     )
     .map_err(|e| format!("parse public.json: {e}"))?;
     if st.uid != uid {
@@ -82,10 +83,12 @@ pub fn load_verified(
         .map_err(|_| "bad pubkey hex".to_string())?;
     let vk = VerifyingKey::from_bytes(&pk).map_err(|_| "bad pubkey".to_string())?;
 
-    let json = match fs::read(config_path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("no config.json".into()),
-        Err(e) => return Err(format!("read config.json: {e}")),
-    };
+    if !config_path.exists() {
+        return Err("no config.json".into());
+    }
+    // config.json uses the shared document limit the service enforces at sign
+    // time (reviewer #1), so an authorized max-size change is always readable.
+    let json = crate::fsio::read_regular_capped(config_path, relaunch_core::MAX_DOCUMENT_BYTES)
+        .map_err(|e| format!("read config.json: {e}"))?;
     parse_and_verify(&json, &vk, uid, user, st.gen).map_err(|e| format!("{e:?}"))
 }

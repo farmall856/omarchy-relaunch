@@ -24,7 +24,12 @@ pub enum DiffError {
 }
 
 pub struct Diff {
+    /// Changed entries, for the D7 cap.
     pub changed: usize,
+    /// Whether any signed field changed at all, including stagger. A
+    /// stagger-only edit has `changed == 0` but `has_change == true`, so it is
+    /// still committable (reviewer L1).
+    pub has_change: bool,
     pub rendered: String,
 }
 
@@ -39,7 +44,10 @@ pub fn escape(s: &str) -> String {
         let cp = c as u32;
         match c {
             '\\' => out.push_str("\\\\"),
-            ' '..='~' => out.push(c), // printable ASCII except backslash (handled above)
+            // A quote is escaped so it cannot close a quoted field early; this is
+            // what makes a quoted value's bytes unambiguous (reviewer H2).
+            '"' => out.push_str("\\x22"),
+            ' '..='~' => out.push(c),
             _ if cp < 0x100 => {
                 let _ = write!(out, "\\x{cp:02x}");
             }
@@ -51,32 +59,41 @@ pub fn escape(s: &str) -> String {
     out
 }
 
+/// A string field, always quoted and escaped, so two different values can never
+/// render to the same bytes (reviewer H2).
+fn q(s: &str) -> String {
+    format!("\"{}\"", escape(s))
+}
+
 fn fmt_entry(e: &Entry) -> String {
     let launcher = match &e.launcher {
         Some(l) => format!(
             " launcher={}{}",
-            escape(&l.path),
+            q(&l.path),
             l.sha256
                 .as_deref()
-                .map(|h| format!("#{h}"))
+                .map(|h| format!(" sha256={h}"))
                 .unwrap_or_default()
         ),
         None => String::new(),
     };
     let float = match e.float {
-        Some(true) => " float",
-        Some(false) => " tile",
-        None => "",
+        Some(true) => "float",
+        Some(false) => "tile",
+        None => "unknown",
     };
+    // Every string field is quoted (class/label/exec/launcher); the rest are
+    // fixed keywords or numbers. `label` is included (reviewer H2).
     format!(
-        "class={} ws={}{} src={:?} prov={:?} enabled={} exec={}{}",
-        escape(&e.class),
+        "class={} label={} ws={} geom={} src={:?} prov={:?} enabled={} exec={}{}",
+        q(&e.class),
+        q(&e.label),
         e.workspace,
         float,
         e.exec_source,
         e.provenance,
         e.enabled,
-        escape(&e.exec),
+        q(&e.exec),
         launcher,
     )
 }
@@ -86,15 +103,22 @@ fn index(cfg: &SignedConfig) -> BTreeMap<&str, &Entry> {
 }
 
 /// Compute the full escaped diff base -> proposal, enforcing the D7 caps.
-/// `changed == 0` means an empty diff (caller returns "nothing to do").
-pub fn compute(base: &SignedConfig, proposal: &SignedConfig) -> Result<Diff, DiffError> {
+/// `digest_short` is the spec §3.1 header tie between the panel and the signed
+/// bytes (a short hash of the proposal's canonical bytes, supplied by the
+/// engine). `has_change == false` means nothing to authorize.
+pub fn compute(
+    base: &SignedConfig,
+    proposal: &SignedConfig,
+    digest_short: &str,
+) -> Result<Diff, DiffError> {
     let old = index(base);
     let new = index(proposal);
 
     let mut lines: Vec<String> = Vec::new();
 
     // Stagger is security-relevant to scheduling; show it when it changes.
-    if base.stagger_seconds != proposal.stagger_seconds {
+    let stagger_changed = base.stagger_seconds != proposal.stagger_seconds;
+    if stagger_changed {
         lines.push(format!(
             "~ staggerSeconds {} -> {}",
             base.stagger_seconds, proposal.stagger_seconds
@@ -134,10 +158,15 @@ pub fn compute(base: &SignedConfig, proposal: &SignedConfig) -> Result<Diff, Dif
             return Err(DiffError::LineTooLong);
         }
     }
-    let header = format!("Relaunch: {changed} login-start change(s)\n");
+    let has_change = changed > 0 || stagger_changed;
+    let header = format!("Relaunch: {changed} login-start change(s) [{digest_short}]\n");
     let rendered = header + &lines.join("\n");
     if rendered.len() > MAX_DIFF_BYTES {
         return Err(DiffError::DiffTooLong);
     }
-    Ok(Diff { changed, rendered })
+    Ok(Diff {
+        changed,
+        has_change,
+        rendered,
+    })
 }

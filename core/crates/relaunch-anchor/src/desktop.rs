@@ -10,16 +10,42 @@
 //! error (refused, not guessed). `DBusActivatable` is handled by the caller
 //! (refused); this module only parses `Exec`.
 
-/// Parse the first `Exec=` in the `[Desktop Entry]` group into an argv vector.
-pub fn parse_exec(buffer: &str) -> Result<Vec<String>, String> {
-    let raw = exec_value(buffer).ok_or_else(|| "no Exec in [Desktop Entry]".to_string())?;
+/// The parsed, relevant contents of a `[Desktop Entry]` group.
+pub struct DesktopEntry {
+    pub argv: Vec<String>,
+    pub dbus_activatable: bool,
+    pub terminal: bool,
+    pub path: Option<String>,
+}
+
+/// Parse the `[Desktop Entry]` group: `Exec` into argv (with field codes
+/// expanded), plus the keys that change how it must be launched.
+pub fn parse_entry(buffer: &str) -> Result<DesktopEntry, String> {
+    let raw = value_of(buffer, "Exec").ok_or_else(|| "no Exec in [Desktop Entry]".to_string())?;
     let unescaped = unescape_value(&raw)?;
     let tokens = tokenize(&unescaped)?;
-    let argv = strip_field_codes(tokens);
+    let argv = expand_field_codes(tokens)?;
     if argv.is_empty() {
         return Err("Exec expanded to nothing".into());
     }
-    Ok(argv)
+    // Path= is a string value and must be unescaped by the same rules as Exec
+    // before use as a working directory (reviewer #7); an escaped space would
+    // otherwise become the wrong cwd.
+    let path = match value_of(buffer, "Path").filter(|p| !p.is_empty()) {
+        Some(raw) => Some(unescape_value(&raw)?),
+        None => None,
+    };
+    Ok(DesktopEntry {
+        argv,
+        dbus_activatable: value_of(buffer, "DBusActivatable").as_deref() == Some("true"),
+        terminal: value_of(buffer, "Terminal").as_deref() == Some("true"),
+        path,
+    })
+}
+
+/// Parse just the argv (convenience / tests).
+pub fn parse_exec(buffer: &str) -> Result<Vec<String>, String> {
+    Ok(parse_entry(buffer)?.argv)
 }
 
 /// A deterministic, injective rendering of an argv used to compare the live
@@ -33,7 +59,8 @@ pub fn canonical_exec_string(argv: &[String]) -> String {
         .join(" ")
 }
 
-fn exec_value(buffer: &str) -> Option<String> {
+/// The first `<key>=` value in the `[Desktop Entry]` group (raw, pre-unescape).
+fn value_of(buffer: &str, key: &str) -> Option<String> {
     let mut in_group = false;
     for line in buffer.lines() {
         let t = line.trim_start_matches('\u{feff}'); // tolerate a BOM
@@ -44,10 +71,12 @@ fn exec_value(buffer: &str) -> Option<String> {
         if !in_group {
             continue;
         }
-        if let Some(rest) = t.strip_prefix("Exec") {
+        if let Some(rest) = t.strip_prefix(key) {
+            // Only an exact key, optionally with spaces before '=' (no locale
+            // suffix like Name[de]). Reject `ExecFoo=`.
             let rest = rest.trim_start();
             if let Some(val) = rest.strip_prefix('=') {
-                return Some(val.to_string());
+                return Some(val.trim().to_string());
             }
         }
     }
@@ -128,17 +157,43 @@ fn tokenize(s: &str) -> Result<Vec<String>, String> {
     Ok(tokens)
 }
 
-/// Drop field-code tokens and turn `%%` into `%` in the rest.
-fn strip_field_codes(tokens: Vec<String>) -> Vec<String> {
-    let codes = [
-        "%f", "%F", "%u", "%U", "%i", "%c", "%k", "%v", "%m", "%d", "%D", "%n", "%N",
-    ];
+/// Expand field codes within each token (reviewer M6/I5). Relaunch starts apps
+/// at login with no files/URLs, so the argument-producing codes expand to
+/// nothing; `%%` becomes `%`; an unknown `%x` is rejected. A token that was
+/// purely a field code (and so expands to empty) is dropped, but a token with
+/// other literal text — e.g. `--file=%f` → `--file=` — is kept, rather than the
+/// whole token being discarded.
+fn expand_field_codes(tokens: Vec<String>) -> Result<Vec<String>, String> {
     let mut out = Vec::with_capacity(tokens.len());
     for t in tokens {
-        if codes.contains(&t.as_str()) {
+        let mut expanded = String::with_capacity(t.len());
+        let mut had_code = false;
+        let mut chars = t.chars();
+        while let Some(c) = chars.next() {
+            if c != '%' {
+                expanded.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('%') => expanded.push('%'),
+                // File/URL codes (no login file to inject) and the deprecated
+                // codes the spec says to remove expand to nothing.
+                Some('f' | 'F' | 'u' | 'U' | 'd' | 'D' | 'n' | 'N' | 'v' | 'm') => had_code = true,
+                // Informational codes (%c Name, %i Icon, %k location) are not
+                // equivalent to an absent file argument; refuse them rather than
+                // silently change meaning (reviewer #7).
+                Some(c @ ('c' | 'i' | 'k')) => {
+                    return Err(format!("unsupported field code %{c} in Exec"))
+                }
+                Some(other) => return Err(format!("invalid field code %{other} in Exec")),
+                None => return Err("trailing % in Exec".into()),
+            }
+        }
+        // Drop a token that was only a field code; keep anything with literal text.
+        if expanded.is_empty() && had_code {
             continue;
         }
-        out.push(t.replace("%%", "%"));
+        out.push(expanded);
     }
-    out
+    Ok(out)
 }

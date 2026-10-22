@@ -10,17 +10,41 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use relaunch_core::{sign, to_config_file, Entry, SignedConfig, SIGNED_SCHEMA_VERSION};
+use relaunch_core::{
+    sign, to_config_file, Entry, SignedConfig, MAX_DOCUMENT_BYTES, SIGNED_SCHEMA_VERSION,
+};
 
 use crate::store::{Store, StoreError};
 use crate::txn::{digest_of, new_txid, Clock, State, Transaction, DEFAULT_TTL_SECS};
 
-/// Runs the trusted-path check (polkit AUTH_SELF). `sender` is the caller's
-/// unique bus name for subject binding. Returns Ok(true) only on a real
-/// credential success for `uid`.
+/// One trusted-path check. `cancellation_id` identifies this exact check so it,
+/// and only it, can be cancelled on invalidation; `deadline` is the
+/// transaction's *remaining* lease, not a fresh timeout (reviewer M4/#2).
+pub struct AuthRequest<'a> {
+    pub uid: u32,
+    pub sender: &'a str,
+    pub message: &'a str,
+    pub cancellation_id: &'a str,
+    pub deadline: Duration,
+}
+
+/// Runs the trusted-path check (polkit AUTH_SELF). Returns Ok(true) only on a
+/// real credential success for the caller's uid.
 pub trait Authenticator {
-    fn authorize(&self, uid: u32, sender: &str, message: &str) -> Result<bool, String>;
+    fn authorize(&self, req: AuthRequest) -> Result<bool, String>;
+}
+
+/// Hook fired when a uid's pending transaction is invalidated, carrying the
+/// in-flight check's cancellation id (if the challenge had been dispatched), so
+/// the transport can cancel exactly that polkit check.
+pub type InvalidateHook = Arc<dyn Fn(u32, Option<String>) + Send + Sync>;
+
+fn new_check_id() -> String {
+    let mut b = [0u8; 16];
+    let _ = getrandom::fill(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 #[derive(Debug)]
@@ -37,6 +61,15 @@ pub enum EngineError {
     Store(StoreError),
     Verify(String),
     BadOp(String),
+    GenExhausted,
+    DocumentTooLarge(usize),
+}
+
+/// Lock that recovers from poisoning instead of propagating a panic into the
+/// root service (reviewer I12). The guarded state is a small `Option` whose
+/// consistency the post-challenge rechecks re-establish, so continuing is safe.
+fn plock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 impl From<StoreError> for EngineError {
@@ -83,7 +116,12 @@ pub struct Engine<C: Clock, A: Authenticator> {
     clock: C,
     auth: A,
     ttl_secs: u64,
+    doc_limit: usize,
     cells: Mutex<HashMap<u32, Arc<Mutex<Cell>>>>,
+    /// Called when a uid's pending transaction is invalidated (denial,
+    /// disconnect, Purge), with the in-flight check's cancellation id, so the
+    /// transport can cancel exactly that polkit check (reviewer M4). None in tests.
+    on_invalidate: Option<InvalidateHook>,
 }
 
 impl<C: Clock, A: Authenticator> Engine<C, A> {
@@ -93,7 +131,9 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
             clock,
             auth,
             ttl_secs: DEFAULT_TTL_SECS,
+            doc_limit: MAX_DOCUMENT_BYTES,
             cells: Mutex::new(HashMap::new()),
+            on_invalidate: None,
         }
     }
 
@@ -102,8 +142,26 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         self
     }
 
+    /// Test seam: lower the resulting-document size limit so the rejection path
+    /// can be exercised without building a multi-megabyte proposal.
+    pub fn with_doc_limit(mut self, limit: usize) -> Self {
+        self.doc_limit = limit;
+        self
+    }
+
+    pub fn with_invalidate_hook(mut self, hook: InvalidateHook) -> Self {
+        self.on_invalidate = Some(hook);
+        self
+    }
+
+    fn fire_invalidate(&self, uid: u32, check_id: Option<String>) {
+        if let Some(h) = &self.on_invalidate {
+            h(uid, check_id);
+        }
+    }
+
     fn cell(&self, uid: u32) -> Arc<Mutex<Cell>> {
-        let mut map = self.cells.lock().unwrap();
+        let mut map = plock(&self.cells);
         map.entry(uid).or_default().clone()
     }
 
@@ -176,7 +234,7 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         proposal: Proposal,
     ) -> Result<PrepareOk, EngineError> {
         let cell = self.cell(uid);
-        let mut guard = cell.lock().unwrap();
+        let mut guard = plock(&cell);
 
         // Drop an expired lease so it cannot wedge the one-per-uid slot.
         if let Some(t) = &guard.pending {
@@ -188,10 +246,13 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         }
 
         let (base_gen, enrollment_id, _pk) = self.head(uid)?;
+        let next_gen = base_gen.checked_add(1).ok_or(EngineError::GenExhausted)?;
         let base = self.verified_base(uid, user, base_json);
-        let cfg = self.build_proposal(uid, user, base_gen + 1, proposal)?;
-        let diff = crate::diff::compute(&base, &cfg)?;
-        if diff.changed == 0 {
+        let cfg = self.build_proposal(uid, user, next_gen, proposal)?;
+        let digest = digest_of(&cfg);
+        let digest_short = hex::encode(&digest[..4]);
+        let diff = crate::diff::compute(&base, &cfg, &digest_short)?;
+        if !diff.has_change {
             return Ok(PrepareOk {
                 txid: None,
                 code: None,
@@ -208,12 +269,13 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
             enrollment_id,
             sender: sender.to_string(),
             base_gen,
-            digest: digest_of(&cfg),
+            digest,
             proposal: cfg,
             changed: diff.changed,
             created_secs: self.clock.now_secs(),
             ttl_secs: self.ttl_secs,
             state: State::Prepared,
+            check_id: None,
         };
         let code = txn.code();
         guard.pending = Some(txn);
@@ -235,9 +297,13 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
     ) -> Result<Vec<u8>, EngineError> {
         let cell = self.cell(uid);
 
-        // Phase 1: claim the transaction under the lock.
-        let (message, _base_gen) = {
-            let mut guard = cell.lock().unwrap();
+        // Phase 1: claim the transaction under the lock. The check's
+        // cancellation id is recorded in the txn BEFORE the lock is released, so
+        // any invalidation that arrives while the challenge runs can cancel
+        // exactly this check (reviewer M4/#2).
+        let check_id = new_check_id();
+        let (message, deadline) = {
+            let mut guard = plock(&cell);
             let now = self.clock.now_secs();
             let t = guard
                 .pending
@@ -257,18 +323,33 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
                 return Err(EngineError::Busy); // an Authorize is already in flight
             }
             t.state = State::Authorizing;
+            t.check_id = Some(check_id.clone());
+            // The challenge gets the transaction's REMAINING lease, not a fresh
+            // full timeout, so a stuck agent cannot outlive the slot.
+            let elapsed = now.saturating_sub(t.created_secs);
+            let remaining = t.ttl_secs.saturating_sub(elapsed).max(1);
             (
                 format!(
                     "Relaunch: {} login-start change(s). Cancel unless your panel shows code {}.",
                     t.changed,
                     t.code()
                 ),
-                t.base_gen,
+                Duration::from_secs(remaining),
             )
         };
 
         // Phase 2: the human challenge, WITHOUT holding the lock.
-        let ok = self.auth.authorize(uid, sender, &message).map_err(|e| {
+        let req = AuthRequest {
+            uid,
+            sender,
+            message: &message,
+            cancellation_id: &check_id,
+            deadline,
+        };
+        // The check has already returned on these paths, so only free the slot;
+        // do NOT fire a cancellation (the id is retired, cancelling it would
+        // only leak into the pre-dispatch set — reviewer #3).
+        let ok = self.auth.authorize(req).map_err(|e| {
             self.invalidate(&cell, txid);
             EngineError::AuthError(e)
         })?;
@@ -278,7 +359,7 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         }
 
         // Phase 3: re-take the lock and re-validate before signing.
-        let mut guard = cell.lock().unwrap();
+        let mut guard = plock(&cell);
         let now = self.clock.now_secs();
         let txn = match guard.pending.take() {
             Some(t) if &t.txid == txid && t.state == State::Authorizing && !t.expired_at(now) => t,
@@ -295,7 +376,11 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
             return Err(EngineError::Stale);
         }
 
-        self.commit(uid, &txn.user, txn.base_gen + 1, txn.proposal)
+        let new_gen = txn
+            .base_gen
+            .checked_add(1)
+            .ok_or(EngineError::GenExhausted)?;
+        self.commit(uid, &txn.user, new_gen, txn.proposal)
     }
 
     /// Reduce: disable/drop only, on a verified base. No prompt (allow_any).
@@ -308,62 +393,76 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         ops: &[ReduceOp],
     ) -> Result<Vec<u8>, EngineError> {
         let cell = self.cell(uid);
-        let mut guard = cell.lock().unwrap();
-        guard.pending = None; // invalidate any in-flight transaction
+        let mut guard = plock(&cell);
+        // Invalidate any in-flight transaction and cancel its polkit check
+        // (reviewer D3), same as Purge does.
+        let cancelled = guard.pending.take().and_then(|t| t.check_id);
 
-        let (gen, _eid, Some(pk)) = self.head(uid)? else {
-            return Err(EngineError::NotEnrolled);
-        };
-        let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk)
-            .map_err(|_| EngineError::Verify("pubkey".into()))?;
-        let base = relaunch_core::parse_and_verify(base_json, &vk, uid, user, gen)
-            .map_err(|e| EngineError::Verify(format!("{e:?}")))?;
+        let result = (|| {
+            let (gen, _eid, Some(pk)) = self.head(uid)? else {
+                return Err(EngineError::NotEnrolled);
+            };
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk)
+                .map_err(|_| EngineError::Verify("pubkey".into()))?;
+            let base = relaunch_core::parse_and_verify(base_json, &vk, uid, user, gen)
+                .map_err(|e| EngineError::Verify(format!("{e:?}")))?;
 
-        let mut entries = base.entries;
-        for op in ops {
-            match op {
-                ReduceOp::Disable(class) => {
-                    let e = entries
-                        .iter_mut()
-                        .find(|e| &e.class == class)
-                        .ok_or_else(|| EngineError::BadOp(class.clone()))?;
-                    e.enabled = false;
-                }
-                ReduceOp::Drop(class) => {
-                    let before = entries.len();
-                    entries.retain(|e| &e.class != class);
-                    if entries.len() == before {
-                        return Err(EngineError::BadOp(class.clone()));
+            let mut entries = base.entries;
+            for op in ops {
+                match op {
+                    ReduceOp::Disable(class) => {
+                        let e = entries
+                            .iter_mut()
+                            .find(|e| &e.class == class)
+                            .ok_or_else(|| EngineError::BadOp(class.clone()))?;
+                        e.enabled = false;
+                    }
+                    ReduceOp::Drop(class) => {
+                        let before = entries.len();
+                        entries.retain(|e| &e.class != class);
+                        if entries.len() == before {
+                            return Err(EngineError::BadOp(class.clone()));
+                        }
                     }
                 }
             }
-        }
-        let cfg = SignedConfig {
-            v: SIGNED_SCHEMA_VERSION,
-            uid,
-            user: user.to_string(),
-            gen: gen + 1,
-            stagger_seconds: base.stagger_seconds,
-            entries,
-        };
-        self.commit(uid, user, gen + 1, cfg)
+            let new_gen = gen.checked_add(1).ok_or(EngineError::GenExhausted)?;
+            let cfg = SignedConfig {
+                v: SIGNED_SCHEMA_VERSION,
+                uid,
+                user: user.to_string(),
+                gen: new_gen,
+                stagger_seconds: base.stagger_seconds,
+                entries,
+            };
+            self.commit(uid, user, new_gen, cfg)
+        })();
+        drop(guard);
+        self.fire_invalidate(uid, cancelled);
+        result
     }
 
     /// Purge: invalidate any pending transaction, then durably delete the uid's
-    /// key and state.
+    /// key and state. The per-uid guard is held THROUGH `Store::purge` (reviewer
+    /// #4), so a same-uid Prepare/commit cannot interleave with the filesystem
+    /// mutation and leave a pending txn against a just-removed enrollment.
     pub fn purge(&self, uid: u32) -> Result<(), EngineError> {
         let cell = self.cell(uid);
-        let mut guard = cell.lock().unwrap();
-        guard.pending = None;
-        self.store.purge(uid)?;
-        Ok(())
+        let (result, cancelled) = {
+            let mut guard = plock(&cell);
+            let cancelled = guard.pending.take().and_then(|t| t.check_id);
+            let result = self.store.purge(uid).map_err(EngineError::from);
+            (result, cancelled)
+        };
+        self.fire_invalidate(uid, cancelled); // also on the error path
+        result
     }
 
     /// Whether a (non-expired) transaction is open for this uid. Deliberately
     /// returns no code/diff/txid (spec §4: no pending-code leak).
     pub fn has_pending(&self, uid: u32) -> bool {
         let cell = self.cell(uid);
-        let guard = cell.lock().unwrap();
+        let guard = plock(&cell);
         guard
             .pending
             .as_ref()
@@ -374,10 +473,9 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
     /// timer consults this so the service never exits mid-lease/commit.
     pub fn any_pending(&self) -> bool {
         let now = self.clock.now_secs();
-        let map = self.cells.lock().unwrap();
+        let map = plock(&self.cells);
         map.values().any(|c| {
-            c.lock()
-                .unwrap()
+            plock(c)
                 .pending
                 .as_ref()
                 .is_some_and(|t| !t.expired_at(now))
@@ -385,10 +483,34 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
     }
 
     fn invalidate(&self, cell: &Arc<Mutex<Cell>>, txid: &[u8; 16]) {
-        let mut guard = cell.lock().unwrap();
+        let mut guard = plock(cell);
         if let Some(t) = &guard.pending {
             if &t.txid == txid {
                 guard.pending = None;
+            }
+        }
+    }
+
+    /// Invalidate any pending transaction whose Prepare came from `sender`.
+    /// Called when that unique bus connection disappears (reviewer I7): the
+    /// one-per-uid slot is freed at once, and a late auth success can no longer
+    /// find its transaction to sign.
+    pub fn invalidate_sender(&self, sender: &str) {
+        let cells: Vec<Arc<Mutex<Cell>>> = plock(&self.cells).values().cloned().collect();
+        for cell in cells {
+            let hit = {
+                let mut guard = plock(&cell);
+                match &guard.pending {
+                    Some(t) if t.sender == sender => {
+                        let uid = t.uid;
+                        let check_id = guard.pending.take().and_then(|t| t.check_id);
+                        Some((uid, check_id))
+                    }
+                    _ => None,
+                }
+            };
+            if let Some((uid, check_id)) = hit {
+                self.fire_invalidate(uid, check_id);
             }
         }
     }
@@ -411,8 +533,15 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         let key = self.store.signing_key(uid)?;
         let pubkey = key.verifying_key().to_bytes();
         let sig = sign(&key, &cfg);
-        self.store.publish_gen(uid, user, new_gen, &pubkey)?;
         let file = to_config_file(&cfg, &sig, vec![]);
-        serde_json::to_vec(&file).map_err(|e| EngineError::Verify(e.to_string()))
+        let bytes = serde_json::to_vec(&file).map_err(|e| EngineError::Verify(e.to_string()))?;
+        // Refuse to COMMIT a document the anchor would then refuse to read
+        // (reviewer #1). Checked before publish_gen, so a rejected oversize
+        // change does not advance the generation.
+        if bytes.len() > self.doc_limit {
+            return Err(EngineError::DocumentTooLarge(bytes.len()));
+        }
+        self.store.publish_gen(uid, user, new_gen, &pubkey)?;
+        Ok(bytes)
     }
 }

@@ -10,6 +10,7 @@
 //! fixed `/var/lib/omarchy-relaunch` — it reads no `RELAUNCH_*` override.
 
 pub mod desktop;
+pub mod fsio;
 pub mod launch;
 pub mod lua;
 pub mod verify;
@@ -18,11 +19,8 @@ pub use launch::{decide, Spawn};
 pub use lua::{emit, BOOT_REGISTRATION};
 pub use verify::{load_verified, trusted_chain};
 
-/// stdout for `emit-lua`: the pins when the config verified, or a single
-/// comment (no pins, no boot registration) when it did not — fail-closed.
-pub fn emit_lua_output(result: &Result<relaunch_core::SignedConfig, String>) -> String {
-    match result {
-        Ok(cfg) => emit(cfg),
-        Err(reason) => format!("-- relaunch-anchor: not launching ({reason})\n"),
-    }
-}
+/// The constant stdout comment printed when verification fails. The reason goes
+/// to stderr only (reviewer I9), so no verifier error text — which could carry
+/// newlines or shell-ish content — is ever interpolated into Hyprland-bound
+/// stdout.
+pub const NOT_LAUNCHING_COMMENT: &str = "-- relaunch-anchor: not launching\n";

@@ -138,6 +138,32 @@ pub struct ConfigFile {
     pub pending: Vec<serde_json::Value>,
 }
 
+/// Verification view of `config.json`: `pending` is parsed as `IgnoredAny`, so
+/// the verifier never allocates the (potentially large, attacker-sized) pending
+/// array before it checks the signature (reviewer M2/#5). The schema checks on
+/// the authenticated fields are unchanged.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyFile {
+    pub v: u32,
+    pub signed: SignedConfig,
+    pub signature: String,
+    /// A sequence whose elements are consumed as `IgnoredAny`: this still
+    /// requires `pending` to be an array (matching `ConfigFile`), but allocates
+    /// nothing (reviewer #5) — `Vec<IgnoredAny>` is a Vec of a zero-sized type,
+    /// so it never touches the heap no matter how many elements are present.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub pending: Vec<serde::de::IgnoredAny>,
+}
+
+/// One shared upper bound on a serialized `config.json`, used by the service
+/// (it refuses to sign a resulting document larger than this) and by the anchor
+/// reader (reviewer #1). Comfortably above the worst-case valid signed document
+/// (256 entries at the field caps ~= 2.4 MiB), with headroom for the envelope
+/// and client-carried `pending`.
+pub const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ValidationError {
     SchemaVersion(u32),

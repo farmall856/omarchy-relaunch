@@ -62,7 +62,9 @@ pub fn parse_and_verify(
     expected_user: &str,
     expected_gen: u64,
 ) -> Result<SignedConfig, VerifyError> {
-    let file: ConfigFile =
+    // VerifyFile parses `pending` as IgnoredAny, so a large pending array is
+    // walked but never allocated before the signature is checked (reviewer #5).
+    let file: crate::model::VerifyFile =
         serde_json::from_slice(json).map_err(|e| VerifyError::Json(e.to_string()))?;
     if file.v != FILE_FORMAT_VERSION {
         return Err(VerifyError::FileVersion(file.v));
@@ -89,6 +91,11 @@ pub fn parse_and_verify(
         });
     }
 
+    // Reject a wrong-length signature string before decoding, so an oversized
+    // field cannot force a large allocation (reviewer M2). 64 bytes = 128 hex.
+    if file.signature.len() != SIGNATURE_LEN * 2 {
+        return Err(VerifyError::SignatureEncoding);
+    }
     let sig_bytes = hex::decode(&file.signature).map_err(|_| VerifyError::SignatureEncoding)?;
     let sig_arr: [u8; SIGNATURE_LEN] = sig_bytes
         .try_into()

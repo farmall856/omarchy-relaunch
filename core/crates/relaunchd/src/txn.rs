@@ -42,6 +42,10 @@ pub struct Transaction {
     pub created_secs: u64,
     pub ttl_secs: u64,
     pub state: State,
+    /// The cancellation id of the in-flight polkit check, set when the challenge
+    /// is dispatched (phase 2). Used to cancel exactly that check on
+    /// invalidation (reviewer M4/#2), never a newer one.
+    pub check_id: Option<String>,
 }
 
 impl Transaction {

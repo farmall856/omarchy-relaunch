@@ -384,3 +384,19 @@ fn verifying_key_from_public_bytes() {
     let sig = sign(&key, &cfg);
     assert!(verify(&reparsed, &cfg, &sig));
 }
+
+#[test]
+fn pending_is_ignored_during_verify() {
+    // A large `pending` array is present in config.json but must not be parsed
+    // into a Vec before (or after) the signature check (reviewer #5); the signed
+    // entries still verify.
+    let cfg = base_config();
+    let key = signing_key_from_seed(&seed(7));
+    let sig = sign(&key, &cfg);
+    let file = to_config_file(&cfg, &sig, vec![]);
+    let mut v: serde_json::Value = serde_json::to_value(&file).unwrap();
+    v["pending"] = serde_json::json!((0..10_000).collect::<Vec<u32>>());
+    let bytes = serde_json::to_vec(&v).unwrap();
+    let out = parse_and_verify(&bytes, &key.verifying_key(), 1000, "laytonf", 1).unwrap();
+    assert_eq!(out.entries.len(), 1);
+}

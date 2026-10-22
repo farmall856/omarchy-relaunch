@@ -107,7 +107,10 @@ fn decide_desktop_file_matches_and_returns_argv() {
     );
     assert_eq!(
         decide(&entry, Some(buf)).unwrap(),
-        Spawn::Argv(vec!["/usr/bin/brave".into()])
+        Spawn::Argv {
+            argv: vec!["/usr/bin/brave".into()],
+            cwd: None
+        }
     );
 }
 
@@ -149,6 +152,80 @@ fn decide_shell_source_runs_the_signed_string() {
             "xdg-terminal-exec --app-id=term -e nvim".into()
         ))
     );
+}
+
+#[test]
+fn parse_exec_expands_glued_field_code() {
+    // --file=%f keeps the literal prefix; the bare code expands to nothing.
+    let d = "[Desktop Entry]\nExec=app --file=%f --tag\n";
+    assert_eq!(parse_exec(d).unwrap(), vec!["app", "--file=", "--tag"]);
+}
+
+#[test]
+fn parse_exec_rejects_invalid_field_code() {
+    assert!(parse_exec("[Desktop Entry]\nExec=app %z\n").is_err());
+}
+
+#[test]
+fn decide_refuses_dbus_activatable() {
+    let buf = b"[Desktop Entry]\nExec=/usr/bin/x\nDBusActivatable=true\n";
+    let sha = hex::encode(Sha256::digest(buf));
+    let entry = desktop_entry("/usr/bin/x", "/usr/share/applications/x.desktop", Some(sha));
+    assert_eq!(decide(&entry, Some(buf)), Err("dbus-activatable".into()));
+}
+
+#[test]
+fn decide_refuses_terminal_launcher() {
+    let buf = b"[Desktop Entry]\nExec=/usr/bin/x\nTerminal=true\n";
+    let sha = hex::encode(Sha256::digest(buf));
+    let entry = desktop_entry("/usr/bin/x", "/usr/share/applications/x.desktop", Some(sha));
+    assert_eq!(decide(&entry, Some(buf)), Err("terminal-launcher".into()));
+}
+
+#[test]
+fn decide_desktop_file_carries_path_as_cwd() {
+    let buf = b"[Desktop Entry]\nExec=/usr/bin/x\nPath=/opt/work\n";
+    let sha = hex::encode(Sha256::digest(buf));
+    let entry = desktop_entry("/usr/bin/x", "/usr/share/applications/x.desktop", Some(sha));
+    assert_eq!(
+        decide(&entry, Some(buf)),
+        Ok(Spawn::Argv {
+            argv: vec!["/usr/bin/x".into()],
+            cwd: Some("/opt/work".into())
+        })
+    );
+}
+
+// ---- bounded, typed reads ----
+
+#[test]
+fn read_regular_capped_rejects_a_fifo() {
+    use relaunch_anchor::fsio::read_regular_capped;
+    let tmp = Tmp::new("fifo");
+    let fifo = tmp.0.join("f");
+    let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    // O_NONBLOCK means the open returns; the S_ISREG check then rejects it,
+    // rather than login blocking forever on a reader.
+    assert!(read_regular_capped(&fifo, 1024).is_err());
+}
+
+#[test]
+fn read_regular_capped_rejects_oversize() {
+    use relaunch_anchor::fsio::read_regular_capped;
+    let tmp = Tmp::new("big");
+    let f = tmp.0.join("big");
+    std::fs::write(&f, vec![b'x'; 2048]).unwrap();
+    assert!(read_regular_capped(&f, 1024).is_err());
+    assert!(read_regular_capped(&f, 4096).is_ok());
+}
+
+#[test]
+fn anchor_uses_absolute_bash_not_path() {
+    let main_src = include_str!("../src/main.rs");
+    assert!(main_src.contains("/usr/bin/bash"));
+    assert!(!main_src.contains("Command::new(\"bash\")"));
+    assert!(main_src.contains("env_remove(\"BASH_ENV\")"));
 }
 
 // ---- Lua emission ----
@@ -335,4 +412,24 @@ fn binary_reads_no_relaunch_env_override() {
             "anchor must not read {forbidden}"
         );
     }
+}
+
+#[test]
+fn decide_unescapes_path_for_cwd() {
+    let buf = b"[Desktop Entry]\nExec=/usr/bin/x\nPath=/opt/my\\sdir\n";
+    let sha = hex::encode(Sha256::digest(buf));
+    let entry = desktop_entry("/usr/bin/x", "/usr/share/applications/x.desktop", Some(sha));
+    assert_eq!(
+        decide(&entry, Some(buf)),
+        Ok(Spawn::Argv {
+            argv: vec!["/usr/bin/x".into()],
+            cwd: Some("/opt/my dir".into())
+        })
+    );
+}
+
+#[test]
+fn parse_exec_refuses_informational_field_code() {
+    assert!(parse_exec("[Desktop Entry]\nExec=app %c\n").is_err());
+    assert!(parse_exec("[Desktop Entry]\nExec=app %k\n").is_err());
 }

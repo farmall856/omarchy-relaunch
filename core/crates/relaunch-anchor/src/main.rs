@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use relaunch_anchor::{decide, emit_lua_output, load_verified, verify::trusted_chain, Spawn};
+use relaunch_anchor::fsio::{read_regular_capped, MAX_FILE_BYTES};
+use relaunch_anchor::{decide, load_verified, verify::trusted_chain, Spawn};
 use relaunch_core::{Entry, ExecSource, SignedConfig};
 
 const STATE_ROOT: &str = "/var/lib/omarchy-relaunch";
@@ -40,8 +41,15 @@ fn main() {
 
     match arg.as_str() {
         "emit-lua" => {
-            let result = load_verified(state_root, uid, &user, &config_path, TRUSTED_UID);
-            print!("{}", emit_lua_output(&result));
+            match load_verified(state_root, uid, &user, &config_path, TRUSTED_UID) {
+                Ok(cfg) => print!("{}", relaunch_anchor::emit(&cfg)),
+                Err(reason) => {
+                    // Constant comment on stdout; the reason only on stderr, so no
+                    // verifier text reaches the Hyprland-evaluated Lua (reviewer I9).
+                    print!("{}", relaunch_anchor::NOT_LAUNCHING_COMMENT);
+                    eprintln!("relaunch-anchor: not launching ({reason})");
+                }
+            }
         }
         "boot" => {
             let result = load_verified(state_root, uid, &user, &config_path, TRUSTED_UID);
@@ -120,21 +128,28 @@ fn read_launcher(entry: &Entry) -> Result<Vec<u8>, String> {
     if launcher.sha256.is_none() {
         trusted_chain(&resolved, TRUSTED_UID, Path::new("/"))?;
     }
-    fs::read(&resolved).map_err(|e| format!("read launcher: {e}"))
+    // Bounded, regular-file-only read of the resolved target (reviewer I3).
+    read_regular_capped(&resolved, MAX_FILE_BYTES)
 }
 
 fn do_spawn(spawn: &Spawn) -> Result<(), String> {
     let child = match spawn {
         // 1.0.7 contract: the command reaches bash through the environment, not
-        // argv, and is unset before it runs so the app does not inherit it.
-        Spawn::Shell(cmd) => Command::new("bash")
+        // argv, and is unset before it runs so the app does not inherit it. The
+        // shell is an absolute trusted path and BASH_ENV is cleared so a planted
+        // ~/.local/bin/bash or a startup hook cannot intercept it (reviewer H4).
+        Spawn::Shell(cmd) => Command::new("/usr/bin/bash")
             .arg("-c")
             .arg("c=$RELAUNCH_EXEC; unset RELAUNCH_EXEC; eval \"$c\"")
             .env("RELAUNCH_EXEC", cmd)
+            .env_remove("BASH_ENV")
             .spawn(),
-        Spawn::Argv(argv) => {
+        Spawn::Argv { argv, cwd } => {
             let mut c = Command::new(&argv[0]);
             c.args(&argv[1..]);
+            if let Some(dir) = cwd {
+                c.current_dir(dir);
+            }
             c.spawn()
         }
     };
@@ -159,8 +174,52 @@ fn write_last_boot(
         "entries": entries,
     });
     if let Ok(bytes) = serde_json::to_vec_pretty(&doc) {
-        let _ = fs::write(config_dir.join("last-boot.json"), bytes);
+        let _ = write_private(&config_dir.join("last-boot.json"), &bytes);
     }
+}
+
+/// Write `bytes` to `path` without following a symlink at the destination and
+/// without reusing a pre-existing temp object (reviewer H1/I11): create a
+/// private 0600 temp with O_EXCL|O_NOFOLLOW, then rename over `path` (rename
+/// replaces the name itself, never following a symlink there).
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut rnd = [0u8; 8];
+    getrandom_fill(&mut rnd);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("out");
+    let tmp = dir.join(format!(".{name}.tmp.{}", hex8(&rnd)));
+    {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?; // durable temp before the rename (reviewer D4)
+    }
+    fs::rename(&tmp, path)?;
+    // fsync the directory so the rename itself is durable.
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
+}
+
+fn getrandom_fill(buf: &mut [u8]) {
+    // Best-effort randomness for a temp name; failure falls back to the pid+time.
+    if unsafe { libc::getrandom(buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) } < 0 {
+        let seed = (std::process::id() as u64) ^ now();
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = (seed >> (8 * (i % 8))) as u8;
+        }
+    }
+}
+
+fn hex8(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 fn config_dir() -> PathBuf {
