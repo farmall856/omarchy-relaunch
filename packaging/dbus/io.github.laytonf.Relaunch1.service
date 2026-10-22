@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=io.github.laytonf.Relaunch1
+Exec=/usr/lib/omarchy-relaunch/relaunchd
+User=root
+SystemdService=relaunchd.service

@@ -1,0 +1,14 @@
+// Sorts before empower.rules and 50-default.rules by basename (polkit 128
+// processes rules.d in lexical order of basename and the first rule to return a
+// non-undefined Result wins), so a blanket "YES" for the empower group cannot
+// skip the credential on our action. Non-local or inactive callers are denied
+// outright; a local, active caller must authenticate as themselves.
+polkit.addRule(function (action, subject) {
+  if (action.id !== "io.github.laytonf.relaunch.authorize") {
+    return polkit.Result.NOT_HANDLED;
+  }
+  if (!subject.local || !subject.active) {
+    return polkit.Result.NO;
+  }
+  return polkit.Result.AUTH_SELF;
+});

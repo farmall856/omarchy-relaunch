@@ -1,0 +1,23 @@
+[Unit]
+Description=Relaunch authorization service (D-Bus activated)
+Documentation=https://github.com/farmall856/omarchy-relaunch
+
+[Service]
+Type=dbus
+BusName=io.github.laytonf.Relaunch1
+ExecStart=/usr/lib/omarchy-relaunch/relaunchd
+# Owns the per-uid key store; nothing else is writable.
+StateDirectory=omarchy-relaunch
+StateDirectoryMode=0755
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# Exits when idle; the bus reactivates it on the next call.

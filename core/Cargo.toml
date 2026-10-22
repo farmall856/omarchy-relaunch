@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/relaunch-core"]
+members = ["crates/relaunch-core", "crates/relaunchd", "crates/relaunch-anchor"]
 
 [workspace.package]
 version = "0.1.0"

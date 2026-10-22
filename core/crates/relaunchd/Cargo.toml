@@ -1,0 +1,30 @@
+[package]
+name = "relaunchd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "relaunchd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "relaunchd"
+path = "src/main.rs"
+
+[dependencies]
+relaunch-core = { path = "../relaunch-core" }
+serde.workspace = true
+serde_json.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+hex.workspace = true
+getrandom = "=0.3.3"
+# Transport (binary only). Caret + Cargo.lock pin; vendored for the package
+# build. The security core (relaunch-core) stays free of this tree.
+zbus = "5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+libc = "0.2"
+
+[dev-dependencies]
