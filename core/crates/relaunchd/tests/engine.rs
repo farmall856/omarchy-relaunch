@@ -2,14 +2,23 @@
 //! lease/one-per-uid state machine, S1 (a tampered base is never endorsed),
 //! Reduce/Purge invalidation, the base-generation recheck across a concurrent
 //! Reduce, and durable gen monotonicity.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code: a failed unwrap/index is a failed assertion"
+)]
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::VerifyingKey;
-use relaunch_core::{parse_and_verify, Entry, ExecSource, Provenance};
-use relaunchd::{Authenticator, Clock, Engine, EngineError, Proposal, ReduceOp, Store, StoreError};
+use relaunch_core::{parse_and_verify, Entry, ExecSource, Launcher, Provenance};
+use relaunchd::{
+    AuthAction, Authenticator, Clock, Engine, EngineError, Proposal, ReduceOp, Store, StoreError,
+};
 
 // ---- test scaffolding ----
 
@@ -45,6 +54,10 @@ impl Clock for FixedClock {
 
 struct TestAuth {
     result: bool,
+    /// A Purge check's answer, when it differs from `result`.
+    purge_result: Option<bool>,
+    /// Which action each check was for, in order.
+    actions: Arc<Mutex<Vec<AuthAction>>>,
     calls: Arc<Mutex<Vec<String>>>,
     on_challenge: Option<Box<dyn Fn() + Send + Sync>>,
 }
@@ -52,6 +65,8 @@ impl TestAuth {
     fn allow() -> Self {
         TestAuth {
             result: true,
+            purge_result: None,
+            actions: Arc::default(),
             calls: Arc::new(Mutex::new(vec![])),
             on_challenge: None,
         }
@@ -59,24 +74,33 @@ impl TestAuth {
     fn deny() -> Self {
         TestAuth {
             result: false,
+            purge_result: None,
+            actions: Arc::default(),
             calls: Arc::new(Mutex::new(vec![])),
             on_challenge: None,
         }
     }
 }
 impl Authenticator for TestAuth {
-    fn authorize(&self, req: relaunchd::AuthRequest) -> Result<bool, String> {
+    fn authorize(&self, req: relaunchd::AuthRequest<'_>) -> Result<bool, String> {
         self.calls.lock().unwrap().push(req.message.to_string());
+        self.actions.lock().unwrap().push(req.action);
         if let Some(cb) = &self.on_challenge {
             cb();
         }
-        Ok(self.result)
+        match (req.action, self.purge_result) {
+            (AuthAction::Purge, Some(r)) => Ok(r),
+            _ => Ok(self.result),
+        }
     }
 }
 
+/// A late-populated callback (breaks an auth<->engine ownership cycle in tests).
+type Trigger = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
+
 struct NoAuth;
 impl Authenticator for NoAuth {
-    fn authorize(&self, _req: relaunchd::AuthRequest) -> Result<bool, String> {
+    fn authorize(&self, _req: relaunchd::AuthRequest<'_>) -> Result<bool, String> {
         Ok(true)
     }
 }
@@ -84,24 +108,45 @@ impl Authenticator for NoAuth {
 const UID: u32 = 1000;
 const USER: &str = "laytonf";
 
-fn entry(class: &str, ws: u32) -> Entry {
+fn entry(name: &str, ws: u32) -> Entry {
     Entry {
-        class: class.to_string(),
+        class: pin(name),
+        window_class: name.to_string(),
         workspace: ws,
         float: None,
         label: String::new(),
-        exec: format!("run-{class}"),
+        exec: format!("run-{name}"),
         exec_source: ExecSource::OverridesTable,
         provenance: Provenance::None,
-        launcher: None,
+        launcher: launcher(&pin(name)),
+        cwd: None,
         enabled: true,
     }
 }
 
 fn proposal(entries: Vec<Entry>) -> Proposal {
     Proposal {
-        stagger_seconds: 0,
+        pre_launch_ms: 0,
+        post_launch_ms: 500,
         entries,
+    }
+}
+
+/// A deterministic pin id for a readable test name (FNV-1a), so a test names
+/// apps the way a reviewer sees them while the signed key stays a real id.
+fn pin(name: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("relauncher-{h:016x}")
+}
+
+fn launcher(id: &str) -> Launcher {
+    Launcher {
+        path: format!("/home/laytonf/.config/omarchy-relaunch/launchers/{id}.desktop"),
+        sha256: "ab".repeat(32),
     }
 }
 
@@ -265,7 +310,9 @@ fn tampered_base_is_treated_as_empty_so_planted_rows_show_as_additions() {
         p.changed, 1,
         "planted/tampered base must not be carried forward"
     );
-    assert!(p.rendered_diff.contains("+ class=\"a\""));
+    assert!(p
+        .rendered_diff
+        .contains(&format!("+ class=\"{}\"", pin("a"))));
     assert!(!p.rendered_diff.contains("evilcommand1"));
 }
 
@@ -297,7 +344,7 @@ fn reduce_before_authorize_invalidates_the_transaction() {
         .unwrap();
     // A reduce lands first: it invalidates the pending transaction.
     let _ = eng
-        .reduce(UID, USER, &base, &[ReduceOp::Drop("b".into())])
+        .reduce(UID, USER, &base, &[ReduceOp::Drop(pin("b"))])
         .unwrap();
     let r = eng.authorize(UID, ":1.1", &p2.txid.unwrap());
     assert!(matches!(r, Err(EngineError::NoSuchTransaction)));
@@ -336,10 +383,12 @@ fn concurrent_reduce_during_challenge_makes_commit_stale() {
     let eng2_cb = eng2.clone();
     let auth = TestAuth {
         result: true,
+        purge_result: None,
+        actions: Arc::default(),
         calls: Arc::new(Mutex::new(vec![])),
         on_challenge: Some(Box::new(move || {
             eng2_cb
-                .reduce(UID, USER, &base_for_cb, &[ReduceOp::Drop("b".into())])
+                .reduce(UID, USER, &base_for_cb, &[ReduceOp::Drop(pin("b"))])
                 .unwrap();
         })),
     };
@@ -377,7 +426,7 @@ fn reduce_disable_and_drop_sign_a_new_generation() {
         .unwrap();
     let base = eng.authorize(UID, ":1.1", &p.txid.unwrap()).unwrap();
     let reduced = eng
-        .reduce(UID, USER, &base, &[ReduceOp::Drop("a".into())])
+        .reduce(UID, USER, &base, &[ReduceOp::Drop(pin("a"))])
         .unwrap();
     // gen advanced to 2, one entry remains, verifies.
     assert_eq!(verify_returned(&dir, &reduced, 2), 1);
@@ -394,7 +443,7 @@ fn reduce_requires_a_verifying_base() {
     let base = eng.authorize(UID, ":1.1", &p.txid.unwrap()).unwrap();
     let mut s = String::from_utf8(base).unwrap();
     s = s.replace("run-a", "tampered1234");
-    let r = eng.reduce(UID, USER, s.as_bytes(), &[ReduceOp::Drop("a".into())]);
+    let r = eng.reduce(UID, USER, s.as_bytes(), &[ReduceOp::Drop(pin("a"))]);
     assert!(matches!(r, Err(EngineError::Verify(_))));
 }
 
@@ -407,10 +456,93 @@ fn purge_removes_state_and_then_reduce_is_not_enrolled() {
         .prepare(UID, USER, ":1.1", None, proposal(vec![entry("a", 1)]))
         .unwrap();
     let base = eng.authorize(UID, ":1.1", &p.txid.unwrap()).unwrap();
-    eng.purge(UID).unwrap();
+    eng.purge(UID, ":1.1").unwrap();
     assert!(Store::new(dir.0.clone()).current(UID).unwrap().is_none());
-    let r = eng.reduce(UID, USER, &base, &[ReduceOp::Drop("a".into())]);
+    let r = eng.reduce(UID, USER, &base, &[ReduceOp::Drop(pin("a"))]);
     assert!(matches!(r, Err(EngineError::NotEnrolled)));
+}
+
+#[test]
+fn purge_asks_for_its_own_action_and_a_denial_deletes_nothing() {
+    let dir = TmpDir::new("purge-auth");
+    let clock = FixedClock(Arc::new(AtomicU64::new(0)));
+    let actions: Arc<Mutex<Vec<AuthAction>>> = Arc::default();
+    let auth = TestAuth {
+        purge_result: Some(false),
+        actions: actions.clone(),
+        ..TestAuth::allow()
+    };
+    let eng = engine(&dir, &clock, auth);
+    let p = eng
+        .prepare(UID, USER, ":1.1", None, proposal(vec![entry("a", 1)]))
+        .unwrap();
+    let base = eng.authorize(UID, ":1.1", &p.txid.unwrap()).unwrap();
+    let uid_dir = dir.0.join(UID.to_string());
+    let snapshot = |d: &std::path::Path| {
+        let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(e.path()).unwrap_or_default(),
+                )
+            })
+            .collect();
+        files.sort();
+        files
+    };
+    let before = snapshot(&uid_dir);
+    assert!(before.iter().any(|(n, _)| n == "public.json"), "{before:?}");
+
+    assert!(matches!(
+        eng.purge(UID, ":1.1"),
+        Err(EngineError::AuthDenied)
+    ));
+    assert_eq!(
+        snapshot(&uid_dir),
+        before,
+        "a denied purge must leave the key and state"
+    );
+    assert_eq!(
+        *actions.lock().unwrap(),
+        [AuthAction::Authorize, AuthAction::Purge]
+    );
+    // Still enrolled: a reduce on the same base works.
+    eng.reduce(UID, USER, &base, &[ReduceOp::Disable(pin("a"))])
+        .unwrap();
+}
+
+#[test]
+fn reduce_never_asks_for_a_credential() {
+    let dir = TmpDir::new("reduce-promptless");
+    let clock = FixedClock(Arc::new(AtomicU64::new(0)));
+    let actions: Arc<Mutex<Vec<AuthAction>>> = Arc::default();
+    let auth = TestAuth {
+        actions: actions.clone(),
+        ..TestAuth::allow()
+    };
+    let eng = engine(&dir, &clock, auth);
+    let p = eng
+        .prepare(
+            UID,
+            USER,
+            ":1.1",
+            None,
+            proposal(vec![entry("a", 1), entry("b", 1)]),
+        )
+        .unwrap();
+    let base = eng.authorize(UID, ":1.1", &p.txid.unwrap()).unwrap();
+    let base = eng
+        .reduce(UID, USER, &base, &[ReduceOp::Disable(pin("a"))])
+        .unwrap();
+    eng.reduce(UID, USER, &base, &[ReduceOp::Drop(pin("b"))])
+        .unwrap();
+    assert_eq!(
+        *actions.lock().unwrap(),
+        [AuthAction::Authorize],
+        "reduce must not prompt"
+    );
 }
 
 #[test]
@@ -428,12 +560,14 @@ fn store_rejects_generation_regression() {
 }
 
 #[test]
-fn message_carries_the_code_and_no_exec_text() {
+fn message_is_the_fixed_prompt_without_the_code_or_exec_text() {
     let dir = TmpDir::new("msg");
     let clock = FixedClock(Arc::new(AtomicU64::new(0)));
     let calls = Arc::new(Mutex::new(vec![]));
     let auth = TestAuth {
         result: true,
+        purge_result: None,
+        actions: Arc::default(),
         calls: calls.clone(),
         on_challenge: None,
     };
@@ -449,7 +583,12 @@ fn message_carries_the_code_and_no_exec_text() {
         .unwrap();
     eng.authorize(UID, ":1.1", &p.txid.unwrap()).unwrap();
     let msg = calls.lock().unwrap()[0].clone();
-    assert!(msg.contains(&p.code.unwrap()));
+    assert_eq!(msg, relaunchd::diff::APPROVE_PROMPT, "{msg}");
+    assert!(p.summary.contains("secretapp"), "{}", p.summary);
+    assert!(
+        !msg.contains(&p.code.unwrap()),
+        "the pairing code is not shown"
+    );
     assert!(
         !msg.contains("run-secretapp"),
         "exec text must not reach the polkit message"
@@ -534,7 +673,11 @@ fn invalidate_hook_fires_on_disconnect_and_purge_not_denial() {
     let clock = FixedClock(Arc::new(AtomicU64::new(0)));
     let rec = Arc::new(Mutex::new(Vec::<u32>::new()));
     let r2 = rec.clone();
-    let eng = Engine::new(Store::new(dir.0.clone()), clock, TestAuth::deny())
+    let auth = TestAuth {
+        purge_result: Some(true),
+        ..TestAuth::deny()
+    };
+    let eng = Engine::new(Store::new(dir.0.clone()), clock, auth)
         .with_invalidate_hook(Arc::new(move |uid, _id| r2.lock().unwrap().push(uid)));
 
     // Denial does NOT fire the hook.
@@ -553,7 +696,7 @@ fn invalidate_hook_fires_on_disconnect_and_purge_not_denial() {
         .unwrap();
     eng.invalidate_sender(":1.1");
     // Purge fires it.
-    eng.purge(UID).unwrap();
+    eng.purge(UID, ":1.1").unwrap();
 
     assert_eq!(rec.lock().unwrap().iter().filter(|&&u| u == UID).count(), 2);
 }
@@ -624,11 +767,12 @@ fn post_dispatch_invalidation_carries_the_check_id() {
     let r2 = rec.clone();
 
     // Late-populated trigger breaks the auth<->engine ownership cycle.
-    type Trigger = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
     let trigger: Trigger = Arc::new(Mutex::new(None));
     let t2 = trigger.clone();
     let auth = TestAuth {
         result: true,
+        purge_result: None,
+        actions: Arc::default(),
         calls: Arc::new(Mutex::new(vec![])),
         on_challenge: Some(Box::new(move || {
             if let Some(f) = t2.lock().unwrap().as_ref() {

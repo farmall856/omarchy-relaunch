@@ -10,20 +10,47 @@ use crate::canonical::canonical_bytes;
 use crate::model::{ConfigFile, SignedConfig, ValidationError, FILE_FORMAT_VERSION};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
+/// Length in bytes of an Ed25519 private-key seed.
 pub const SEED_LEN: usize = 32;
+/// Length in bytes of an Ed25519 public key.
 pub const PUBLIC_KEY_LEN: usize = 32;
+/// Length in bytes of an Ed25519 signature.
 pub const SIGNATURE_LEN: usize = 64;
 
+/// Why a `config.json` was refused. Every variant is fail-closed: nothing runs.
 #[derive(Debug)]
 pub enum VerifyError {
+    /// The document is not well-formed JSON of the expected shape.
     Json(String),
+    /// The signed document failed structural validation.
     Validation(ValidationError),
+    /// The outer envelope version is not the supported one.
     FileVersion(u32),
+    /// The signature is not 128 lowercase hex characters.
     SignatureEncoding,
+    /// The signature does not verify against the selected public key.
     BadSignature,
-    UidMismatch { expected: u32, found: u32 },
-    UserMismatch { expected: String, found: String },
-    GenMismatch { expected: u64, found: u64 },
+    /// The document is bound to a different uid than the caller's.
+    UidMismatch {
+        /// The uid the trusted state selected.
+        expected: u32,
+        /// The uid the document names.
+        found: u32,
+    },
+    /// The document is bound to a different account name.
+    UserMismatch {
+        /// The current account name for the uid.
+        expected: String,
+        /// The account name the document names.
+        found: String,
+    },
+    /// The document's generation is not the committed one.
+    GenMismatch {
+        /// The committed generation in the root state.
+        expected: u64,
+        /// The generation the document carries.
+        found: u64,
+    },
 }
 
 impl From<ValidationError> for VerifyError {
@@ -33,12 +60,14 @@ impl From<ValidationError> for VerifyError {
 }
 
 /// Build a signing key from a 32-byte seed held by the root service.
+#[must_use]
 pub fn signing_key_from_seed(seed: &[u8; SEED_LEN]) -> SigningKey {
     SigningKey::from_bytes(seed)
 }
 
 /// Sign a *validated* config. Returns the raw 64-byte signature. Callers must
 /// have called `validate` first (debug-asserted) so the bytes are canonical.
+#[must_use]
 pub fn sign(key: &SigningKey, cfg: &SignedConfig) -> [u8; SIGNATURE_LEN] {
     debug_assert!(cfg.validate().is_ok(), "sign() requires a validated config");
     key.sign(&canonical_bytes(cfg)).to_bytes()
@@ -46,6 +75,7 @@ pub fn sign(key: &SigningKey, cfg: &SignedConfig) -> [u8; SIGNATURE_LEN] {
 
 /// Verify a signature over `cfg`'s canonical bytes. Does not itself re-validate
 /// structure; `parse_and_verify` does both.
+#[must_use]
 pub fn verify(key: &VerifyingKey, cfg: &SignedConfig, sig: &[u8; SIGNATURE_LEN]) -> bool {
     let sig = Signature::from_bytes(sig);
     key.verify(&canonical_bytes(cfg), &sig).is_ok()
@@ -55,6 +85,12 @@ pub fn verify(key: &VerifyingKey, cfg: &SignedConfig, sig: &[u8; SIGNATURE_LEN])
 /// `pubkey`, and bind the identity: `uid`, `user` and `gen` must equal the
 /// values the trusted root state selected for this caller. Any failure is
 /// fail-closed; the caller runs nothing.
+///
+/// # Errors
+///
+/// Returns a [`VerifyError`] naming the first check that failed: JSON shape,
+/// envelope version, signature encoding, identity binding, structural
+/// validation, or the signature itself.
 pub fn parse_and_verify(
     json: &[u8],
     pubkey: &VerifyingKey,
@@ -65,7 +101,7 @@ pub fn parse_and_verify(
     // VerifyFile parses `pending` as IgnoredAny, so a large pending array is
     // walked but never allocated before the signature is checked (reviewer #5).
     let file: crate::model::VerifyFile =
-        serde_json::from_slice(json).map_err(|e| VerifyError::Json(e.to_string()))?;
+        serde_json::from_slice(json).map_err(|e| VerifyError::Json(crate::json_error(&e)))?;
     if file.v != FILE_FORMAT_VERSION {
         return Err(VerifyError::FileVersion(file.v));
     }
@@ -108,6 +144,7 @@ pub fn parse_and_verify(
 
 /// Serialize a signed config plus signature into the on-disk `config.json`
 /// envelope. `pending` is carried through opaquely.
+#[must_use]
 pub fn to_config_file(
     cfg: &SignedConfig,
     sig: &[u8; SIGNATURE_LEN],

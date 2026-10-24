@@ -1,0 +1,3001 @@
+#!/usr/bin/env bash
+# relaunch — engine for the omarchy-relaunch bar widget.
+# Inventories running windows and existing Hyprland startup apps, then
+# generates workspace-pin rules. Launches happen from `relaunch boot`,
+# registered by the loader module Relaunch owns.
+set -euo pipefail
+
+HYPRCTL="${HYPRCTL:-hyprctl}"
+
+# Every jq call goes through here, so no value reaches jq's command line.
+# Another local user can read any process's argv in /proc/<pid>/cmdline, and
+# these values include window titles and launch commands. --arg and
+# --argjson are moved into the environment instead (/proc/<pid>/environ is
+# readable by this user only) and bound back to the same $names at the
+# start of the filter. `export` is a builtin, so no other process's argv
+# carries them either.
+jq() {
+  local -a args=() binds=() envs=()
+  local filter_at=-1 bind
+  while (($#)); do
+    case "$1" in
+      --arg | --argjson)
+        envs+=("RELAUNCH_JQ_$2=$3")
+        if [[ "$1" == --arg ]]; then
+          binds+=("\$ENV.RELAUNCH_JQ_$2 as \$$2")
+        else
+          binds+=("(\$ENV.RELAUNCH_JQ_$2 | fromjson) as \$$2")
+        fi
+        shift 3
+        ;;
+      -*) args+=("$1"); shift ;;
+      *)
+        ((filter_at < 0)) && filter_at=${#args[@]}
+        args+=("$1")
+        shift
+        ;;
+    esac
+  done
+  if ((${#binds[@]} && filter_at >= 0)); then
+    for bind in "${binds[@]}"; do
+      args[filter_at]="$bind | ${args[filter_at]}"
+    done
+  fi
+  (
+    for bind in "${envs[@]}"; do export "$bind"; done
+    command jq "${args[@]}"
+  )
+}
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+
+# The one engine location: what the loader names and what the self-install
+# writes. Not $SELF, which is whichever copy is running. install.sh computes
+# the same path from the same PREFIX.
+engine_bin_path() { printf '%s\n' "${PREFIX:-$HOME/.local}/bin/relaunch"; }
+
+config_dir() {
+  if [[ -n "${RELAUNCH_CONFIG_DIR:-}" ]]; then
+    printf '%s\n' "$RELAUNCH_CONFIG_DIR"
+    return
+  fi
+  printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-relaunch"
+}
+
+config_path() { printf '%s\n' "$(config_dir)/config.json"; }
+overrides_path() { printf '%s\n' "$(config_dir)/overrides.json"; }
+snippet_path() { printf '%s\n' "$(config_dir)/relaunch.conf"; }
+# Two owned files. relaunch.lua is a stable loader that registers the boot
+# hook; rules.lua holds the generated o.window declarations. The split is
+# fault isolation: a malformed rules file loses the pins without losing boot.
+lua_path() { printf '%s\n' "$(config_dir)/relaunch.lua"; }
+rules_path() { printf '%s\n' "$(config_dir)/rules.lua"; }
+disabled_path() { printf '%s\n' "$(config_dir)/disabled"; }
+skip_path() { printf '%s\n' "$(config_dir)/skip-once"; }
+last_boot_log_path() { printf '%s\n' "$(config_dir)/last-boot.log"; }
+last_boot_json_path() { printf '%s\n' "$(config_dir)/last-boot.json"; }
+last_session_path() { printf '%s\n' "$(config_dir)/last-session.json"; }
+autostart_path() {
+  printf '%s\n' "${RELAUNCH_AUTOSTART:-$HOME/.config/hypr/autostart.lua}"
+}
+
+hyprland_lua_path() {
+  printf '%s\n' "${RELAUNCH_HYPRLAND_LUA:-$HOME/.config/hypr/hyprland.lua}"
+}
+
+plugin_dir() {
+  printf '%s\n' "${RELAUNCH_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/io.github.laytonf.relaunch}"
+}
+
+json_out=false
+
+has_json_flag() {
+  local a
+  for a in "$@"; do
+    [[ "$a" == --json ]] && return 0
+  done
+  return 1
+}
+
+die() {
+  local msg="$1"
+  if $json_out; then
+    jq -n --arg error "$msg" '{ok: false, error: $error}'
+  else
+    printf 'error: %s\n' "$msg" >&2
+  fi
+  exit 1
+}
+
+need_jq() {
+  command -v jq >/dev/null 2>&1 || die "jq not found (required; ships with Omarchy)"
+}
+
+# Shared jq helpers. Launch commands are resolved in bash (terminal wrap,
+# overrides.json, .desktop, cmdline). guess_exec is the last-resort class fold.
+jq_lib='
+def guess_exec:
+  ascii_downcase;
+
+def known_exec_sources:
+  ["terminal", "overrides-table", "desktop-file", "cmdline", "guess"];
+
+def normalize_exec_source:
+  if (known_exec_sources | index(.)) != null then . else "" end;
+
+def match_class:
+  if ((.initialClass // "") != "") then .initialClass else (.class // "") end;
+
+def regex_escape:
+  gsub("\\\\"; "\\\\")
+  | gsub("\\."; "\\.")
+  | gsub("\\+"; "\\+")
+  | gsub("\\*"; "\\*")
+  | gsub("\\?"; "\\?")
+  | gsub("\\("; "\\(")
+  | gsub("\\)"; "\\)")
+  | gsub("\\["; "\\[")
+  | gsub("\\]"; "\\]")
+  | gsub("\\{"; "\\{")
+  | gsub("\\}"; "\\}")
+  | gsub("\\^"; "\\^")
+  | gsub("\\$"; "\\$")
+  | gsub("\\|"; "\\|");
+
+# Hyprland regex backslashes must be doubled again for Lua "..." strings.
+# Otherwise org.omarchy.agent becomes "org\.omarchy" and Lua errors on \o.
+def lua_regex:
+  regex_escape | gsub("\\\\"; "\\\\") | gsub("\""; "\\\"");
+
+def normalize_entry:
+  {
+    class: (.class // ""),
+    workspace: ((.workspace // 0) | tonumber),
+    exec: (.exec // ""),
+    execSource: ((.execSource // "") | normalize_exec_source),
+    enabled: (.enabled == true),
+    # Display only. class stays the identity and the only lookup key, so a
+    # wrong label is cosmetic and can never mis-pin a window.
+    label: ((.label // "") | tostring)
+  }
+  + (
+      # float is a real boolean: false means "this window was tiled", not
+      # "no value". An absent float means unknown, so no rule is emitted.
+      if (.float | type) == "boolean" then {float: .float} else {} end
+    );
+
+def load_config:
+  {
+    staggerSeconds: ((.staggerSeconds // 0) | tonumber),
+    skipOnce: (.skipOnce == true),
+    entries: ((.entries // []) | map(normalize_entry))
+  };
+
+def dump_config:
+  {
+    staggerSeconds: .staggerSeconds,
+    skipOnce: (.skipOnce == true),
+    entries: ([.entries[] | normalize_entry] | sort_by(.workspace, .class))
+  };
+
+def capture($clients):
+  load_config as $cfg
+  | ($cfg.entries) as $old
+  | ([ $old[] | {key: .class, value: .} ] | from_entries) as $by0
+  | (
+      $clients
+      | map(. + {match: match_class})
+      | map(select(.match != "" and ((.workspace.id // 0) >= 1)))
+      | sort_by(.workspace.id, .match)
+    ) as $cs
+  | reduce $cs[] as $cl (
+      {by: $by0, added: 0, updated: 0, order: [$old[].class], seen: {}};
+      if .seen[$cl.match] then .
+      else
+        .seen[$cl.match] = true
+        | if .by[$cl.match] then
+            # updated counts entries, not fields, so the whole entry is
+            # compared once at the end.
+            (.by[$cl.match]) as $before
+            | .by[$cl.match].workspace = $cl.workspace.id
+            # Live window state is the authority for float, same as for
+            # workspace. Recapture refreshes it rather than preserving it.
+            | .by[$cl.match].float = ($cl.floating == true)
+            # The label is recomputed at save time, so it self-heals when a
+            # .desktop file appears, moves or is renamed. Not for an
+            # overrides-table entry: its exec is text the user typed, so a
+            # live-derived label would misdescribe it.
+            | (if ($cl.relaunchLabel // "") != ""
+                  and ((.by[$cl.match].execSource | normalize_exec_source) != "overrides-table")
+               then
+                 .by[$cl.match].label = $cl.relaunchLabel
+               else . end)
+            | (
+                (.by[$cl.match].execSource | normalize_exec_source) as $src
+                | (($cl.relaunchExecSource // "") | normalize_exec_source) as $nsrc
+                | (($cl.relaunchExec // "") != "")
+                  and ($nsrc == "terminal" or $nsrc == "overrides-table" or $nsrc == "desktop-file")
+                  and (
+                    # A fallback value always yields to a resolved one.
+                    $src == "guess" or $src == "cmdline"
+                    or ($src == "" and .by[$cl.match].exec == ($cl.match | ascii_downcase))
+                    # An engine-derived value re-heals when live resolution
+                    # disagrees. Only "overrides-table" holds text the user
+                    # typed, and it is never overwritten here.
+                    or (($src == "terminal" or $src == "desktop-file")
+                        and .by[$cl.match].exec != $cl.relaunchExec)
+                  )
+              ) as $heal
+            | if $heal then
+                .by[$cl.match].exec = $cl.relaunchExec
+                | .by[$cl.match].execSource = $cl.relaunchExecSource
+              else . end
+            | if .by[$cl.match] != $before then .updated += 1 else . end
+          else
+            .by[$cl.match] = (
+              {
+                class: $cl.match,
+                workspace: $cl.workspace.id,
+                exec: (if ($cl.relaunchExec // "") != "" then $cl.relaunchExec else ($cl.match | guess_exec) end),
+                execSource: (
+                  if ($cl.relaunchExecSource // "") != "" then $cl.relaunchExecSource
+                  elif ($cl.relaunchExec // "") != "" then "guess"
+                  else "guess"
+                  end
+                ),
+                enabled: true,
+                label: (
+                  if ($cl.relaunchLabel // "") != "" then $cl.relaunchLabel
+                  else $cl.match end
+                )
+              }
+              + {float: ($cl.floating == true)}
+            )
+            | .order += [$cl.match]
+            | .added += 1
+          end
+      end
+    )
+  | {
+      staggerSeconds: $cfg.staggerSeconds,
+      skipOnce: $cfg.skipOnce,
+      entries: [ .order[] as $c | .by[$c] ],
+      added, updated
+    };
+
+def enabled_entries:
+  load_config
+  | .entries
+  | map(select(.enabled and .class != "" and .workspace > 0))
+  | sort_by(.workspace, .class);
+
+def lua_rules:
+  enabled_entries
+  | map(
+      # tile = true alone does not beat the Omarchy floating-window tag:
+      # system.lua tags TUI.float +floating-window and floats it by tag, so
+      # the tag has to be removed first. A direct per-class float rule is
+      # beaten by a later tile = true, so only the tag path needs this line.
+      (if .float == false then
+         "o.window({ class = \"^(\(.class | lua_regex))$\" }, { tag = \"-floating-window\" })\n"
+       else "" end)
+      + "o.window({ class = \"^(\(.class | lua_regex))$\" }, { workspace = \"\(.workspace) silent\""
+      + (
+          # Omarchy tags TUI.float and friends +floating-window, so silence
+          # means "float" for those classes; tile = true says otherwise
+          # explicitly. relaunch.lua loads after the Omarchy defaults, so
+          # this rule wins.
+          if .float == true then ", float = true"
+          elif .float == false then ", tile = true"
+          else "" end
+        )
+      + " })\n"
+    )
+  | add // "";
+'
+
+load_config_json() {
+  local path
+  path="$(config_path)"
+  if [[ ! -f "$path" ]]; then
+    printf '%s\n' '{"staggerSeconds":0,"entries":[]}'
+    return
+  fi
+  jq -e "$jq_lib"' load_config' "$path" || die "parse config: $path"
+}
+
+# The path a write should land on. A rename replaces whatever sits at the
+# destination, so renaming onto a symlink would destroy the link and
+# disconnect a dotfiles-managed file. Resolve the chain and rename onto the
+# target, leaving the user-facing symlink alone.
+resolve_write_target_into() {
+  local path="$1" target
+  [[ -L "$path" ]] || { _WTARGET="$path"; return 0; }
+  target="$(readlink -f -- "$path" 2>/dev/null || true)"
+  [[ -n "$target" ]] || target="$(readlink -m -- "$path" 2>/dev/null || true)"
+  [[ -n "$target" ]] || die "cannot resolve symlink, refusing to replace it: $path"
+  _WTARGET="$target"
+}
+
+# Relaunch's own directory, created private: its contents describe what the
+# user runs and, in last-session.json, what their windows were called.
+ensure_config_dir() {
+  local dir
+  dir="$(config_dir)"
+  [[ -d "$dir" ]] && return 0
+  (umask 077; mkdir -p "$dir")
+}
+
+# Creates the parent for one of our own writes. Only Relaunch's own directory
+# is forced private; the bin directory and the parent of hyprland.lua belong
+# to the user.
+mkdir_for_write() {
+  local dir="$1"
+  if [[ "$dir" == "$(config_dir)" ]]; then
+    ensure_config_dir
+  else
+    mkdir -p "$dir"
+  fi
+}
+
+# 0600 from creation, not created-then-tightened. This and atomic_write write
+# only files Relaunch owns, all under the config directory; user files go
+# through rewrite_through_link, which preserves their mode.
+ensure_file_with() {
+  local path="$1" default="$2"
+  resolve_write_target_into "$path"
+  mkdir_for_write "$(dirname "$_WTARGET")"
+  [[ -e "$_WTARGET" ]] && return 0
+  (umask 077; printf '%s' "$default" >"$_WTARGET")
+}
+
+atomic_write() {
+  local dest="$1" real tmp
+  resolve_write_target_into "$dest"
+  real="$_WTARGET"
+  tmp="${real}.tmp"
+  mkdir_for_write "$(dirname "$real")"
+  # The temp file is renamed into place, so its mode becomes the final mode:
+  # it is created private and chmodded before the rename.
+  #
+  # Enforced, not preserved. Mode preservation is for the user's files, and
+  # every caller here is a Relaunch-owned file in the config directory.
+  (umask 077; : >"$tmp")
+  cat >"$tmp"
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$real"
+}
+
+# Rewrite a file in place through any symlink, feeding it to a filter. Symlink
+# preservation, same-directory temp files and mode preservation live here.
+rewrite_through_link() {
+  local path="$1"
+  shift
+  local real tmp
+  [[ -e "$path" ]] || return 0
+  resolve_write_target_into "$path"
+  real="$_WTARGET"
+  [[ -f "$real" ]] || return 0
+  tmp="${real}.rl.tmp"
+  "$@" <"$real" >"$tmp" || { rm -f "$tmp"; die "could not rewrite $real"; }
+  chmod --reference="$real" "$tmp" 2>/dev/null
+  mv -f "$tmp" "$real"
+}
+
+config_skip_once() {
+  local p
+  p="$(config_path)"
+  [[ -f "$p" ]] && jq -e '.skipOnce == true' "$p" >/dev/null 2>&1
+}
+
+boot_gated() {
+  [[ -f "$(disabled_path)" || -f "$(skip_path)" ]] && return 0
+  config_skip_once
+}
+
+set_skip_once() {
+  local on="$1" cfg
+  ensure_config_dir
+  if [[ "$on" == true ]]; then
+    (umask 077; : >"$(skip_path)")
+  else
+    rm -f "$(skip_path)"
+  fi
+  cfg="$(load_config_json)"
+  cfg="$(jq --argjson on "$on" '.skipOnce = $on' <<<"$cfg")"
+  jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
+}
+
+write_config_from_json() {
+  jq "$jq_lib"' dump_config' | atomic_write "$(config_path)"
+}
+
+_strip_legacy_conf_filter() {
+  local snippet="$1"
+  grep -vF "source = $snippet" | grep -vx '# omarchy-relaunch' || true
+}
+
+remove_legacy_conf() {
+  # Older installs sourced a relaunch.conf of windowrulev2 lines from
+  # hyprland.conf. Pins live only in rules.lua, so both are dropped.
+  rm -f "$(snippet_path)" "$(snippet_path).tmp"
+  local hypr_conf="${RELAUNCH_HYPR_CONF:-$HOME/.config/hypr/hyprland.conf}"
+  [[ -f "$hypr_conf" ]] || return 0
+  if grep -qF "source = $(snippet_path)" "$hypr_conf" || grep -qx '# omarchy-relaunch' "$hypr_conf"; then
+    rewrite_through_link "$hypr_conf" _strip_legacy_conf_filter "$(snippet_path)"
+  fi
+}
+
+# The loader. Written whenever its content would change, never parsed.
+#
+# Order is load-bearing: boot registration comes first, before the
+# disable/skip gate, because `relaunch boot` is what consumes skip-once.
+loader_lua_content() {
+  local cmd cmd_lua
+  # TWO layers, both required, in this order.
+  #
+  # 1. Shell-quote: hl.exec_cmd word-splits the string, so a path with a
+  #    space would run the wrong program with stray arguments.
+  # 2. Lua-escape the complete command: it sits in a Lua string literal, so a
+  #    quote or backslash would terminate it early.
+  printf -v cmd '%q boot' "$(engine_bin_path)"
+  cmd_lua="$(printf '%s' "$cmd" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+  cat <<LUA
+-- Generated by omarchy-relaunch. Do not edit by hand.
+-- Loader: registers the boot hook, then loads the generated rules.
+o.exec_on_start("${cmd_lua}")
+
+local cfg = os.getenv("XDG_CONFIG_HOME")
+if cfg == nil or cfg == "" then
+  cfg = os.getenv("HOME") .. "/.config"
+end
+local dir = cfg .. "/omarchy-relaunch"
+local function exists(path)
+  local f = io.open(path, "r")
+  if f ~= nil then f:close(); return true end
+  return false
+end
+
+-- The gate gates the RULES only. Boot is registered above regardless, so a
+-- skipped or disabled session still gets the hook that clears the flag.
+if exists(dir .. "/disabled") or exists(dir .. "/skip-once") then
+  return
+end
+
+local rules = dir .. "/rules.lua"
+if exists(rules) then
+  local ok, err = pcall(dofile, rules)
+  if not ok then
+    -- Report and carry on: a malformed rules file must not take boot with it.
+    print("omarchy-relaunch: rules.lua failed to load: " .. tostring(err))
+  end
+end
+LUA
+}
+
+# Install the loader only when its content would change. ensure_hooks runs on
+# every list and save, and Hyprland reloads on a config file changing.
+ensure_loader() {
+  local want current
+  want="$(loader_lua_content)"
+  current=""
+  [[ -f "$(lua_path)" ]] && current="$(cat "$(lua_path)")"
+  [[ "$want" == "$current" ]] && return 0
+  printf '%s' "$want" | atomic_write "$(lua_path)"
+}
+
+write_generated() {
+  local cfg gated=false
+  cfg="$(cat)"
+  if boot_gated; then gated=true; fi
+  remove_legacy_conf
+  {
+    printf '%s\n' '-- Generated by omarchy-relaunch. Do not edit by hand.'
+    printf '%s\n' '-- Regenerated by: relaunch generate'
+    if $gated; then
+      printf '%s\n' '-- skip/disable armed; relaunch boot restores rules when the flag is cleared'
+    else
+      jq -r "$jq_lib"' lua_rules' <<<"$cfg"
+    fi
+  } | atomic_write "$(rules_path)"
+  ensure_loader
+}
+
+split_exec_words() {
+  # Split an exec string on IFS without pathname expansion.
+  local _s="$1"
+  local -n _out="$2"
+  set -f
+  # shellcheck disable=SC2206
+  _out=($_s)
+  set +f
+}
+
+is_relaunch_exec() {
+  local exec="$1" token base
+  local -a words=()
+  [[ "$exec" == *omarchy-relaunch* ]] && return 0
+  split_exec_words "$exec" words
+  token="${words[0]:-}"
+  token="${token##*/}"
+  [[ "$token" == relaunch ]] && return 0
+  for token in "${words[@]}"; do
+    base="${token##*/}"
+    [[ "$base" == relaunch ]] && return 0
+  done
+  return 1
+}
+
+is_wrapper_cmd() {
+  case "${1##*/}" in
+    setsid | env | command | nice | nohup | uwsm-app) return 0 ;;
+  esac
+  return 1
+}
+
+is_terminal_cmd() {
+  local b="${1##*/}"
+  case "$b" in
+    foot | alacritty | kitty | wezterm | wezterm-gui | ghostty | xdg-terminal-exec)
+      return 0
+      ;;
+  esac
+  [[ "$b" == omarchy-launch-terminal* ]]
+}
+
+is_generic_terminal_class() {
+  case "$1" in
+    foot | alacritty | kitty | wezterm | wezterm-gui | ghostty | xdg-terminal-exec)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# Join argv into one shell-safe line. /proc preserves argument boundaries a
+# plain "${argv[*]}" join throws away: Omarchy's Disk Usage runs
+# `foot --app-id=TUI.float -e bash -c 'dua i /'`, where `dua i /` is one
+# argument that must not re-split at launch.
+quote_argv() {
+  local out="" a q
+  for a in "$@"; do
+    printf -v q '%q' "$a"
+    out+="${out:+ }${q}"
+  done
+  printf '%s' "$out"
+}
+
+# Split a shell-quoted exec back into argv, without eval. The stored exec is
+# printf %q output, so `bash -c dua\ i\ /` holds "dua i /" as ONE argument.
+# eval would unquote correctly but would also run command substitution in a
+# string the user can edit in overrides.json.
+unquote_argv_arr() {
+  local s="$1" cur="" q="" c i=0 n=${#1} started=0
+  local -a out=()
+  # Fast path: with nothing to unquote, IFS word splitting is exact and skips
+  # the character loop, which runs over every .desktop Exec during indexing.
+  if [[ "$s" != *[\\\'\"]* ]]; then
+    _UARGV=()
+    read -r -a _UARGV <<<"$s"
+    return 0
+  fi
+  while ((i < n)); do
+    c="${s:i:1}"
+    if [[ -n "$q" ]]; then
+      if [[ "$c" == "$q" ]]; then
+        q=""
+      elif [[ "$q" == '"' && "$c" == '\' && $((i + 1)) -lt n ]]; then
+        ((i++)) || true
+        cur+="${s:i:1}"
+      else
+        cur+="$c"
+      fi
+      started=1
+    else
+      case "$c" in
+        '\')
+          if ((i + 1 < n)); then
+            ((i++)) || true
+            cur+="${s:i:1}"
+          fi
+          started=1
+          ;;
+        "'" | '"') q="$c"; started=1 ;;
+        ' ' | $'\t')
+          if ((started)); then
+            out+=("$cur")
+            cur=""
+            started=0
+          fi
+          ;;
+        *) cur+="$c"; started=1 ;;
+      esac
+    fi
+    ((i++)) || true
+  done
+  ((started)) && out+=("$cur")
+  _UARGV=(${out[@]+"${out[@]}"})
+  return 0
+}
+
+# NUL-separated form, for callers that still read it through mapfile.
+unquote_argv() {
+  unquote_argv_arr "$1"
+  ((${#_UARGV[@]})) && printf '%s\0' "${_UARGV[@]}"
+  return 0
+}
+
+# The command a launch line actually runs, with wrappers, terminals and a
+# `bash -c` shim walked off. Display only: the label is never a lookup key.
+leaf_command_from_argv() {
+  leaf_from_argv_into "$@" || return 1
+  printf '%s\n' "$_LEAF"
+}
+
+leaf_from_argv_into() {
+  local -a argv=("$@")
+  local i=0 n=${#argv[@]} a
+  local -a inner=()
+
+  while ((i < n)) && { is_wrapper_cmd "${argv[i]}" || [[ "${argv[i]}" == -- ]] \
+    || [[ "${argv[i]}" == [A-Za-z_]*[=]* && "${argv[i]}" != --* ]]; }; do
+    ((i++)) || true
+  done
+
+  if ((i < n)) && is_terminal_cmd "${argv[i]}"; then
+    ((i++)) || true
+    while ((i < n)); do
+      a="${argv[i]}"
+      if [[ "$a" == --app-id || "$a" == --working-directory || "$a" == --dir \
+        || "$a" == -D || "$a" == --title ]]; then
+        i=$((i + 2))
+      elif [[ "$a" == -e || "$a" == --command || "$a" == -- ]]; then
+        inner=("${argv[@]:i+1}")
+        break
+      elif [[ "$a" == -* ]]; then
+        ((i++)) || true
+      else
+        inner=("${argv[@]:i}")
+        break
+      fi
+    done
+  else
+    inner=("${argv[@]:i}")
+  fi
+
+  ((${#inner[@]})) || { _LEAF=""; return 1; }
+
+  # `bash -c "dua i /"` names dua, not bash.
+  case "${inner[0]##*/}" in
+    bash | sh | zsh | dash)
+      if [[ "${inner[1]:-}" == -c && -n "${inner[2]:-}" ]]; then
+        local script="${inner[2]}"
+        script="${script%% *}"
+        [[ -n "$script" ]] && { _LEAF="${script##*/}"; return 0; }
+      fi
+      ;;
+  esac
+  _LEAF="${inner[0]##*/}"
+}
+
+leaf_for_exec_into() {
+  unquote_argv_arr "$1"
+  ((${#_UARGV[@]})) || { _LEAF=""; return 1; }
+  leaf_from_argv_into "${_UARGV[@]}"
+}
+
+leaf_command_for_exec() {
+  leaf_for_exec_into "$1" || return 1
+  printf '%s\n' "$_LEAF"
+}
+
+# Print JSON {wrapped, class, exec} from argv. A terminal hosting another
+# command (foot -e herdr, omarchy-launch-terminal nvim) becomes class=that
+# command and exec=xdg-terminal-exec --app-id=<class> -e <command...>, so the
+# next launch has a distinct Hyprland class.
+identity_into_globals() {
+  local -a argv=("$@")
+  local i=0 n=${#argv[@]}
+  local app_id="" terminal=""
+  local -a inner=()
+
+  while ((i < n)) && { is_wrapper_cmd "${argv[i]}" || [[ "${argv[i]}" == -- ]] || [[ "${argv[i]}" == [A-Za-z_]*[=]* && "${argv[i]}" != --* ]]; }; do
+    ((i++)) || true
+  done
+
+  if ((i < n)) && is_terminal_cmd "${argv[i]}"; then
+    terminal="${argv[i]##*/}"
+    ((i++)) || true
+    while ((i < n)); do
+      local a="${argv[i]}"
+      if [[ "$a" == --app-id=* ]]; then
+        app_id="${a#--app-id=}"
+        ((i++)) || true
+      elif [[ "$a" == --app-id && $((i + 1)) -lt $n ]]; then
+        app_id="${argv[i + 1]}"
+        i=$((i + 2))
+      elif [[ "$a" == -e || "$a" == --command || "$a" == -- ]]; then
+        inner=("${argv[@]:i+1}")
+        break
+      elif [[ "$a" == --working-directory || "$a" == --dir || "$a" == -D || "$a" == --title ]]; then
+        i=$((i + 2))
+      elif [[ "$a" == --working-directory=* || "$a" == --dir=* || "$a" == --title=* ]]; then
+        ((i++)) || true
+      elif [[ "$a" == -* ]]; then
+        ((i++)) || true
+      else
+        inner=("${argv[@]:i}")
+        break
+      fi
+    done
+  fi
+
+  # The app id goes through quote_argv too: boot runs the whole string through
+  # bash -c, so an app id containing a space would split and one containing a
+  # metacharacter would be executed. -e is kept, not dropped:
+  # xdg-terminal-exec accepts it as the explicit end of options, so an inner
+  # command beginning with a dash cannot be reparsed as one.
+  local class="" exec=""
+  if [[ -n "$app_id" ]] && ! is_generic_terminal_class "$app_id"; then
+    class="$app_id"
+    if ((${#inner[@]} > 0)); then
+      exec="xdg-terminal-exec $(quote_argv "--app-id=${class}") -e $(quote_argv "${inner[@]}")"
+    else
+      exec="xdg-terminal-exec $(quote_argv "--app-id=${class}")"
+    fi
+  elif ((${#inner[@]} > 0)); then
+    class="${inner[0]##*/}"
+    exec="xdg-terminal-exec $(quote_argv "--app-id=${class}") -e $(quote_argv "${inner[@]}")"
+  fi
+
+  _ID_WRAPPED=false
+  _ID_CLASS=""
+  _ID_EXEC=""
+  if [[ -n "$class" ]]; then
+    _ID_WRAPPED=true
+    _ID_CLASS="$class"
+    _ID_EXEC="$exec"
+  fi
+}
+
+# JSON form of identity_into_globals, for callers that want it. The hot paths
+# use the globals directly.
+identity_from_argv() {
+  identity_into_globals "$@"
+  if [[ "$_ID_WRAPPED" == true ]]; then
+    jq -n --arg class "$_ID_CLASS" --arg exec "$_ID_EXEC" '{wrapped: true, class: $class, exec: $exec}'
+  else
+    jq -n '{wrapped: false}'
+  fi
+}
+
+read_pid_argv() {
+  local pid="$1" file arg
+  local -n _argv="$2"
+  _argv=()
+  if [[ -n "${RELAUNCH_CMDLINE_DIR:-}" ]]; then
+    file="${RELAUNCH_CMDLINE_DIR}/${pid}"
+  else
+    file="/proc/${pid}/cmdline"
+  fi
+  [[ -r "$file" ]] || return 1
+  while IFS= read -r -d '' arg; do
+    _argv+=("$arg")
+  done <"$file"
+  ((${#_argv[@]} > 0))
+}
+
+ppid_of() {
+  local pid="$1" file
+  if [[ -n "${RELAUNCH_CMDLINE_DIR:-}" ]]; then
+    file="${RELAUNCH_CMDLINE_DIR}/${pid}.ppid"
+    if [[ -r "$file" ]]; then
+      tr -d '[:space:]' <"$file"
+      return
+    fi
+    printf '0\n'
+    return
+  fi
+  awk '/^PPid:/{print $2; exit}' "/proc/${pid}/status" 2>/dev/null || printf '0\n'
+}
+
+# Namespace host check (spec §9). Prints nothing; exit 0 iff <pid> shares our
+# mnt, user and pid namespaces, so the process is on the host rather than inside
+# a sandbox/container. Any unreadable namespace link => exit 1 (fail closed).
+#
+# Under RELAUNCH_CMDLINE_DIR a "<pid>.ns" fixture stands in for the namespace
+# links so the gate is testable without real namespaces: the file's content
+# decides (only "host" is host; "foreign"/anything else is not), and an ABSENT
+# fixture defaults to host so the pre-gate argv fixtures stay valid. That env
+# var is never set in production, where the real /proc check always runs, so the
+# fixture default cannot weaken the live gate.
+pid_is_host() {
+  local pid="$1" ns a b f
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [[ -n "${RELAUNCH_CMDLINE_DIR:-}" ]]; then
+    f="${RELAUNCH_CMDLINE_DIR}/${pid}.ns"
+    [[ -r "$f" ]] || return 0
+    [[ "$(tr -d '[:space:]' <"$f")" == host ]]
+    return
+  fi
+  for ns in mnt user pid; do
+    a="$(readlink "/proc/${pid}/ns/${ns}" 2>/dev/null)" || return 1
+    b="$(readlink "/proc/self/ns/${ns}" 2>/dev/null)" || return 1
+    [[ -n "$a" && "$a" == "$b" ]] || return 1
+  done
+  return 0
+}
+
+# Window trust gate (spec §9): a window is trusted only if it is a native
+# Wayland surface (not XWayland) AND its process is on the host. $1 is the
+# client's "xwayland" value exactly as hyprctl reports it (the string "true" or
+# "false", or empty when the field is absent); $2 is the pid. A missing field
+# is treated as XWayland (fail closed) in production; under RELAUNCH_CMDLINE_DIR
+# a missing field defaults to native so fixtures that predate this field, and
+# the test hyprctl stub, do not all have to carry it.
+window_trusted() {
+  local xw="$1" pid="$2"
+  case "$xw" in
+    true | True | TRUE) return 1 ;;
+    false | False | FALSE) ;;
+    *) [[ -n "${RELAUNCH_CMDLINE_DIR:-}" ]] || return 1 ;;
+  esac
+  pid_is_host "$pid"
+}
+
+identity_pid_into_globals() {
+  local pid="$1" hops=0 next
+  local -a argv=()
+  _ID_WRAPPED=false
+  _ID_CLASS=""
+  _ID_EXEC=""
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+  while [[ "$pid" =~ ^[1-9][0-9]*$ ]] && ((hops < 8)); do
+    # Walk only across host-namespace ancestors (spec §9): a non-host pid is
+    # inside a sandbox/container, so its argv is not ours to read or trust.
+    # Stop at the first non-host pid — including the window pid itself, which
+    # yields no wrapped identity (the untrusted-window behaviour).
+    pid_is_host "$pid" || break
+    if read_pid_argv "$pid" argv; then
+      identity_into_globals "${argv[@]}"
+      [[ "$_ID_WRAPPED" == true ]] && return 0
+    fi
+    next="$(ppid_of "$pid")"
+    [[ "$next" == "$pid" || "$next" == 0 ]] && break
+    pid="$next"
+    hops=$((hops + 1))
+  done
+  _ID_WRAPPED=false
+  _ID_CLASS=""
+  _ID_EXEC=""
+  return 0
+}
+
+identity_from_pid() {
+  identity_pid_into_globals "$1"
+  if [[ "$_ID_WRAPPED" == true ]]; then
+    jq -n --arg class "$_ID_CLASS" --arg exec "$_ID_EXEC" '{wrapped: true, class: $class, exec: $exec}'
+  else
+    jq -n '{wrapped: false}'
+  fi
+}
+
+# Sets _NKEY rather than printing: a $(...) substitution forks a subshell even
+# for pure builtins, and the index calls this six times per .desktop file.
+nkey() {
+  # LC_ALL=C is load-bearing: ${v,,} is locale-aware Unicode case folding, and
+  # this key decides which .desktop a class resolves to, so locale-dependent
+  # folding could collapse distinct entries in DESKTOP_EXEC_BY_*. `local`
+  # restores the previous value on return.
+  local LC_ALL=C
+  local v="${1,,}"
+  v="${v//[ _.]/-}"
+  # tr -s squeezed runs of the replaced characters into one dash.
+  while [[ "$v" == *--* ]]; do
+    v="${v//--/-}"
+  done
+  _NKEY="$v"
+}
+
+normalize_desktop_key() {
+  nkey "$1"
+  printf '%s' "$_NKEY"
+}
+
+dlaunch_into() {
+  local file="$1" id
+  if command -v gio >/dev/null 2>&1; then
+    printf -v _DLAUNCH 'gio launch %q' "$file"
+    return 0
+  fi
+  if command -v gtk-launch >/dev/null 2>&1; then
+    id="${file##*/}"
+    id="${id%.desktop}"
+    printf -v _DLAUNCH 'gtk-launch %q' "$id"
+    return 0
+  fi
+  _DLAUNCH=""
+  return 1
+}
+
+desktop_launch_cmd() {
+  dlaunch_into "$1" || return 1
+  printf '%s\n' "$_DLAUNCH"
+}
+
+index_set_if_empty() {
+  local -n _map="$1"
+  local key="$2" val="$3"
+  [[ -n "$key" && -n "$val" ]] || return 0
+  [[ -n "${_map[$key]:-}" ]] && return 0
+  _map["$key"]="$val"
+}
+
+xdg_application_dirs() {
+  local d xdg
+  local -a dirs=()
+  if [[ -n "${RELAUNCH_DATA_DIRS:-}" ]]; then
+    IFS=: read -r -a dirs <<<"$RELAUNCH_DATA_DIRS"
+    for d in "${dirs[@]}"; do
+      [[ -d "$d/applications" ]] && printf '%s\n' "$d/applications"
+      [[ -d "$d" && "${d##*/}" == applications ]] && printf '%s\n' "$d"
+    done
+    return
+  fi
+  printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  xdg="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  IFS=: read -r -a dirs <<<"$xdg"
+  for d in "${dirs[@]}"; do
+    [[ -d "$d/applications" ]] && printf '%s\n' "$d/applications"
+  done
+}
+
+declare -A DESKTOP_EXEC_BY_CLASS=()
+declare -A DESKTOP_EXEC_BY_ID=()
+declare -A DESKTOP_EXEC_BY_NAME=()
+declare -A DESKTOP_CLASS_BY_EXEC=()
+# Parallel to DESKTOP_EXEC_BY_*: the source .desktop file path for each key, so
+# a desktop-file proposal entry can carry launcher.path (spec §8). Set in the
+# same first-wins order as the exec maps, from the same keys.
+declare -A DESKTOP_PATH_BY_CLASS=()
+declare -A DESKTOP_PATH_BY_ID=()
+declare -A DESKTOP_PATH_BY_NAME=()
+# Reverse map for display labels only: the leaf command of a terminal-wrapping
+# Exec -> that entry's Name. Omarchy ships Disk Usage.desktop with
+# Exec=xdg-terminal-exec --app-id=TUI.float -e bash -c "dua i /", so `dua`
+# resolves to "Disk Usage". Acceptable only because a wrong answer is
+# cosmetic; this is never used to resolve a launch command.
+declare -A DESKTOP_NAME_BY_LEAF=()
+# Omarchy web-app index. Chromium encodes an --app=URL window class as
+# brave-<host>_<path with / as _>-Default, which no StartupWMClass,
+# desktop-file id or Name can match. Identities are compared forward-encoded
+# and never decoded, because / -> _ is lossy.
+declare -A WEBAPP_LAUNCH_BY_IDENTITY=()
+declare -A WEBAPP_PATH_BY_IDENTITY=()
+declare -A WEBAPP_ID_BY_IDENTITY=()
+declare -A WEBAPP_AMBIGUOUS=()
+# XDG desktop-ID masking, for this index only. The highest-priority file
+# bearing an id claims it, even when Hidden=true or not a web app, so a user
+# override replaces the system entry instead of colliding with it. The
+# class/id/Name maps stay first-wins-per-key.
+declare -A WEBAPP_ID_CLAIMED=()
+_desktop_indexed=0
+# Scratch globals for the fork-free helpers used by the indexing hot path.
+_NKEY=""
+_DLAUNCH=""
+_DFID=""
+_LEAF=""
+_ID_WRAPPED=false
+_ID_CLASS=""
+_ID_EXEC=""
+declare -a _UARGV=()
+
+# Chromium identity for a URL: lowercase host, then the path with each / as an
+# underscore. Query and fragment are excluded because Chromium discards them.
+# RFC 3986 5.2.4 remove_dot_segments, transcribed literally: a segment-stack
+# approximation drops empty segments and the trailing slash a final "." or
+# ".." produces, which are different Chromium identities.
+remove_dot_segments() {
+  local input="$1" output="" seg rest
+  while [[ -n "$input" ]]; do
+    if [[ "$input" == ../* ]]; then
+      input="${input#../}"
+    elif [[ "$input" == ./* ]]; then
+      input="${input#./}"
+    elif [[ "$input" == /./* ]]; then
+      input="/${input#/./}"
+    elif [[ "$input" == "/." ]]; then
+      input="/"
+    elif [[ "$input" == /../* ]]; then
+      input="/${input#/../}"
+      output="${output%/*}"
+    elif [[ "$input" == "/.." ]]; then
+      input="/"
+      output="${output%/*}"
+    elif [[ "$input" == "." || "$input" == ".." ]]; then
+      input=""
+    else
+      if [[ "$input" == /* ]]; then
+        rest="${input:1}"
+        if [[ "$rest" == */* ]]; then
+          seg="/${rest%%/*}"
+        else
+          seg="/$rest"
+        fi
+      else
+        if [[ "$input" == */* ]]; then
+          seg="${input%%/*}"
+        else
+          seg="$input"
+        fi
+      fi
+      output+="$seg"
+      input="${input#"$seg"}"
+    fi
+  done
+  printf '%s' "$output"
+}
+
+# Chromium builds the app identity from GURL::host() and GURL::path()
+# (GenerateApplicationNameFromURL). host() excludes userinfo and the port, so
+# https://user@example.com:8443/app and https://example.com/app share one
+# identity, and therefore one window class.
+chromium_identity_from_url() {
+  local url="$1" rest host path
+  [[ -n "$url" ]] || return 1
+  # A GURL needs a scheme.
+  [[ "$url" == *"://"* ]] || return 1
+  rest="${url#*://}"
+  rest="${rest%%#*}"
+  rest="${rest%%\?*}"
+  host="${rest%%/*}"
+  if [[ "$rest" == */* ]]; then
+    path="/${rest#*/}"
+  else
+    path="/"
+  fi
+  # userinfo: everything up to the last @ is credentials, not host.
+  host="${host##*@}"
+  # port: not part of GURL::host(). Keep a bracketed IPv6 literal intact.
+  if [[ "$host" == \[*\]* ]]; then
+    host="${host%%\]*}]"
+  else
+    host="${host%%:*}"
+  fi
+  [[ -n "$host" ]] || return 1
+  path="$(remove_dot_segments "$path")"
+  printf '%s_%s\n' "${host,,}" "${path//\//_}"
+}
+
+# URL argument of an Exec=omarchy-launch-webapp line, or nothing.
+webapp_url_from_exec() {
+  local raw="$1" i n a
+  local -a argv=()
+  # Cheap reject before tokenizing: only an omarchy-launch-webapp line can
+  # produce a web-app identity, and that is one file out of ninety-odd.
+  [[ "$raw" == *omarchy-launch-webapp* ]] || return 1
+  unquote_argv_arr "$raw"
+  argv=(${_UARGV[@]+"${_UARGV[@]}"})
+  n=${#argv[@]}
+  ((n)) || return 1
+  i=0
+  while ((i < n)) && { is_wrapper_cmd "${argv[i]}" || [[ "${argv[i]}" == -- ]] \
+    || [[ "${argv[i]}" == [A-Za-z_]*[=]* && "${argv[i]}" != --* ]]; }; do
+    ((i++)) || true
+  done
+  ((i < n)) || return 1
+  [[ "${argv[i]##*/}" == omarchy-launch-webapp ]] || return 1
+  ((i++)) || true
+  while ((i < n)); do
+    a="${argv[i]}"
+    # Skip flags and .desktop field codes (%u, %U, %f...).
+    if [[ "$a" != -* && "$a" != %? ]]; then
+      printf '%s\n' "$a"
+      return 0
+    fi
+    ((i++)) || true
+  done
+  return 1
+}
+
+# XDG desktop-file ID: the path relative to the applications/ root with each /
+# replaced by -, case preserved. Foo.desktop and foo.desktop are distinct ids.
+dfid_into() {
+  local file="$1" root="$2" rel
+  rel="${file#"$root"/}"
+  rel="${rel%.desktop}"
+  _DFID="${rel//\//-}"
+}
+
+desktop_file_id() {
+  dfid_into "$1" "$2"
+  printf '%s\n' "$_DFID"
+}
+
+index_desktop_file() {
+  local file="$1" root="${2:-}"
+  local section="" raw_exec="" wmclass="" name="" hidden=false
+  local line key val id launch
+  # Cheap filter first: a .desktop file is mostly translated keys and only
+  # four matter, so matching the literal prefixes skips the trim, the two
+  # expansions and the section compare. Stops at the section after
+  # [Desktop Entry].
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Strip CR before the section match: "[Desktop Entry]\r" matches nothing,
+    # so a CRLF file would contribute no Exec, Name or StartupWMClass while
+    # still claiming its desktop id.
+    line="${line%$'\r'}"
+    case "$line" in
+      \[*])
+        if [[ "$section" == "[Desktop Entry]" ]]; then
+          break
+        fi
+        section="$line"
+        continue
+        ;;
+      Exec=* | Name=* | StartupWMClass=* | Hidden=* | hidden=*) ;;
+      *) continue ;;
+    esac
+    [[ "$section" == "[Desktop Entry]" ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    case "$key" in
+      Hidden|hidden) [[ "${val,,}" == true ]] && hidden=true ;;
+      Exec) [[ -z "$raw_exec" ]] && raw_exec="$val" ;;
+      StartupWMClass) wmclass="$val" ;;
+      Name) [[ -z "$name" ]] && name="$val" ;;
+    esac
+  done <"$file"
+  # Web-app index: XDG desktop-ID masking, this map only. The claim happens
+  # before the Hidden early-return, so a Hidden=true override masks the system
+  # entry rather than letting it register.
+  local _wid _widkey _wurl _wident
+  # Case-sensitive XDG id, not the lowercased basename: normalize_desktop_key
+  # collapses case, spaces, underscores and dots, which would let distinct
+  # launchers mask one another.
+  dfid_into "$file" "${root:-${file%/*}}"
+  _widkey="$_DFID"
+  if [[ -z "${WEBAPP_ID_CLAIMED[$_widkey]:-}" ]]; then
+    WEBAPP_ID_CLAIMED[$_widkey]=1
+    if ! $hidden && [[ -n "$raw_exec" ]]; then
+      _wurl="$(webapp_url_from_exec "$raw_exec" 2>/dev/null || true)"
+      # (one fork, only for entries that actually name a web app)
+      if [[ -n "$_wurl" ]]; then
+        _wident="$(chromium_identity_from_url "$_wurl" 2>/dev/null || true)"
+        if [[ -n "$_wident" ]]; then
+          if [[ -n "${WEBAPP_ID_BY_IDENTITY[$_wident]:-}" \
+            && "${WEBAPP_ID_BY_IDENTITY[$_wident]}" != "$_widkey" ]]; then
+            # Two surviving distinct ids, one identity: refuse to guess.
+            WEBAPP_AMBIGUOUS[$_wident]=1
+          else
+            WEBAPP_ID_BY_IDENTITY[$_wident]="$_widkey"
+            if dlaunch_into "$file"; then
+              WEBAPP_LAUNCH_BY_IDENTITY[$_wident]="$_DLAUNCH"
+              WEBAPP_PATH_BY_IDENTITY[$_wident]="$file"
+            fi
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  $hidden && return 0
+  [[ -n "$raw_exec" ]] || return 0
+  dlaunch_into "$file" || return 0
+  launch="$_DLAUNCH"
+  id="${file##*/}"
+  id="${id%.desktop}"
+  nkey "$wmclass"; local wmkey="$_NKEY"
+  nkey "$id"; local idkey="$_NKEY"
+  nkey "$name"; local namekey="$_NKEY"
+  index_set_if_empty DESKTOP_EXEC_BY_CLASS "$wmkey" "$launch"
+  index_set_if_empty DESKTOP_EXEC_BY_ID "$idkey" "$launch"
+  index_set_if_empty DESKTOP_PATH_BY_CLASS "$wmkey" "$file"
+  index_set_if_empty DESKTOP_PATH_BY_ID "$idkey" "$file"
+  # Name is a last-resort fallback. A Brave PWA named "Proton Mail" has
+  # StartupWMClass=crx_… — do not let that Name steal the official app class.
+  if [[ -z "$wmclass" || "$wmkey" == "$namekey" ]]; then
+    index_set_if_empty DESKTOP_EXEC_BY_NAME "$namekey" "$launch"
+    index_set_if_empty DESKTOP_PATH_BY_NAME "$namekey" "$file"
+  fi
+  # Reverse map uses the raw Exec token so startup-line matching still works.
+  nkey "$raw_exec"
+  index_set_if_empty DESKTOP_CLASS_BY_EXEC "$_NKEY" "${wmclass:-$id}"
+  nkey "${raw_exec%% *}"
+  index_set_if_empty DESKTOP_CLASS_BY_EXEC "$_NKEY" "${wmclass:-$id}"
+  if [[ -n "$name" ]]; then
+    local leaf
+    leaf=""
+    # Only a wrapping Exec yields a leaf that differs from its first word, so
+    # checking that first avoids tokenizing the other ninety files.
+    local _first="${raw_exec%% *}"
+    if is_terminal_cmd "$_first" || is_wrapper_cmd "$_first" \
+      || [[ "${_first##*/}" == bash || "${_first##*/}" == sh \
+         || "${_first##*/}" == zsh || "${_first##*/}" == dash ]]; then
+      leaf_for_exec_into "$raw_exec" 2>/dev/null && leaf="$_LEAF"
+    fi
+    # Only a terminal wrap: a plain Exec=brave would let any app claim a bare
+    # command name, and tier 1 already covers it from the exact file.
+    if [[ -n "$leaf" && "$leaf" != "${raw_exec%% *}" ]]; then
+      nkey "$leaf"
+      index_set_if_empty DESKTOP_NAME_BY_LEAF "$_NKEY" "$name"
+    fi
+  fi
+}
+
+# Name= straight out of one known file. Tier 1: the exec already names it.
+desktop_name_from_file() {
+  local file="$1" section="" line key val name=""
+  [[ -r "$file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    if [[ "$line" == \[*] ]]; then
+      section="$line"
+      continue
+    fi
+    [[ "$section" == "[Desktop Entry]" ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    if [[ "$key" == Name && -z "$name" ]]; then
+      name="$val"
+      break
+    fi
+  done <"$file"
+  [[ -n "$name" ]] || return 1
+  printf '%s\n' "$name"
+}
+
+desktop_exec_line_from_file() {
+  local file="$1" section="" line key val
+  [[ -r "$file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    if [[ "$line" == \[*] ]]; then
+      section="$line"
+      continue
+    fi
+    [[ "$section" == "[Desktop Entry]" ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    if [[ "$key" == Exec ]]; then
+      printf '%s\n' "$val"
+      return 0
+    fi
+  done <"$file"
+  return 1
+}
+
+desktop_name_for_leaf() {
+  local k
+  ensure_desktop_index
+  k="$(normalize_desktop_key "$1")"
+  printf '%s\n' "${DESKTOP_NAME_BY_LEAF[$k]:-}"
+}
+
+# Human-readable name for an entry. Display only -- `class` stays the identity
+# and the only lookup key, so a wrong label is cosmetic. Tiers, in order:
+#   1. desktop-file  -> Name= from the exact file the exec already names
+#   2. terminal      -> leaf command, then a .desktop whose terminal-wrap Exec
+#                       runs that leaf, else the leaf itself
+#   3. anything else -> leaf of the exec
+#   4. fallback      -> class
+display_label_for() {
+  local class="$1" exec="$2" source="$3"
+  local -a argv=()
+  local leaf name file
+
+  if [[ -n "$exec" ]]; then
+    # `gio launch <file>.desktop`: read Name= from the file the exec names.
+    # No search and no ambiguity -- the exec states which file -- and only the
+    # cosmetic Name= comes back. A missing path falls through to the leaf.
+    mapfile -t -d '' argv < <(unquote_argv "$exec")
+    if ((${#argv[@]} >= 3)) && [[ "${argv[0]##*/}" == gio && "${argv[1]}" == launch ]]; then
+      file="${argv[2]}"
+      name="$(desktop_name_from_file "$file" 2>/dev/null || true)"
+      [[ -n "$name" ]] && { printf '%s\n' "$name"; return 0; }
+    fi
+    case "$source" in
+      terminal)
+        leaf="$(leaf_command_for_exec "$exec" 2>/dev/null || true)"
+        if [[ -n "$leaf" ]]; then
+          name="$(desktop_name_for_leaf "$leaf")"
+          [[ -n "$name" ]] && { printf '%s\n' "$name"; return 0; }
+          printf '%s\n' "$leaf"
+          return 0
+        fi
+        ;;
+    esac
+    leaf="$(leaf_command_for_exec "$exec" 2>/dev/null || true)"
+    [[ -n "$leaf" ]] && { printf '%s\n' "$leaf"; return 0; }
+  fi
+  printf '%s\n' "$class"
+}
+
+ensure_desktop_index() {
+  local dir f
+  ((_desktop_indexed)) && return 0
+  _desktop_indexed=1
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r -d '' f; do
+      index_desktop_file "$f" "$dir"
+    # -L: distro .desktop files are often symlinks (LibreOffice's are), and
+    # find -type f without it skips them.
+    done < <(find -L "$dir" -maxdepth 2 -type f -name '*.desktop' -print0 2>/dev/null)
+  done < <(xdg_application_dirs)
+}
+
+# Launch command for a Chromium app-mode window class, or nothing. Only
+# brave-<identity>-Default is supported, the one form verified on hardware; a
+# custom profile or another browser keeps the cmdline fallback.
+webapp_launch_for_class() {
+  local class="$1" ident
+  [[ "$class" == brave-*-Default ]] || return 1
+  ident="${class#brave-}"
+  ident="${ident%-Default}"
+  [[ -n "$ident" ]] || return 1
+  [[ -n "${WEBAPP_AMBIGUOUS[$ident]:-}" ]] && return 1
+  [[ -n "${WEBAPP_LAUNCH_BY_IDENTITY[$ident]:-}" ]] || return 1
+  printf '%s\n' "${WEBAPP_LAUNCH_BY_IDENTITY[$ident]}"
+}
+
+desktop_exec_for_class() {
+  local k hit
+  ensure_desktop_index
+  k="$(normalize_desktop_key "$1")"
+  # Window match order: StartupWMClass, desktop-file id, Omarchy web-app
+  # identity, then Name. The web-app tier is exact so it outranks the
+  # last-resort Name key, but it must not pre-empt a real StartupWMClass.
+  hit="${DESKTOP_EXEC_BY_CLASS[$k]:-${DESKTOP_EXEC_BY_ID[$k]:-}}"
+  if [[ -z "$hit" ]]; then
+    hit="$(webapp_launch_for_class "$1" 2>/dev/null || true)"
+  fi
+  if [[ -z "$hit" ]]; then
+    hit="${DESKTOP_EXEC_BY_NAME[$k]:-}"
+  fi
+  printf '%s\n' "$hit"
+}
+
+# The source .desktop path a class resolves to, in the SAME tier order as
+# desktop_exec_for_class (StartupWMClass/id, then web-app identity, then Name).
+# This is launcher.path for a desktop-file proposal entry (spec §8). Empty if
+# the class does not resolve to a .desktop.
+desktop_launcher_for_class() {
+  local k hit ident
+  ensure_desktop_index
+  k="$(normalize_desktop_key "$1")"
+  hit="${DESKTOP_PATH_BY_CLASS[$k]:-${DESKTOP_PATH_BY_ID[$k]:-}}"
+  if [[ -z "$hit" && "$1" == brave-*-Default ]]; then
+    ident="${1#brave-}"; ident="${ident%-Default}"
+    if [[ -n "$ident" && -z "${WEBAPP_AMBIGUOUS[$ident]:-}" ]]; then
+      hit="${WEBAPP_PATH_BY_IDENTITY[$ident]:-}"
+    fi
+  fi
+  if [[ -z "$hit" ]]; then
+    hit="${DESKTOP_PATH_BY_NAME[$k]:-}"
+  fi
+  printf '%s\n' "$hit"
+}
+
+desktop_class_for_exec() {
+  local k
+  ensure_desktop_index
+  k="$(normalize_desktop_key "$1")"
+  printf '%s\n' "${DESKTOP_CLASS_BY_EXEC[$k]:-${DESKTOP_CLASS_BY_EXEC[$(normalize_desktop_key "${1%% *}")]:-}}"
+}
+
+is_helper_argv() {
+  local a
+  [[ "${1##*/}" == *crashpad* || "${1##*/}" == oosplash ]] && return 0
+  for a in "$@"; do
+    case "$a" in
+      --type=renderer|--type=zygote|--type=gpu-process|--type=utility|--type=plugin)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+cmdline_exec_for_pid() {
+  local pid="$1" hops=0 next
+  local -a argv=()
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  while [[ "$pid" =~ ^[1-9][0-9]*$ ]] && ((hops < 8)); do
+    if read_pid_argv "$pid" argv && ((${#argv[@]} > 0)); then
+      if ! is_helper_argv "${argv[@]}"; then
+        # Not "${argv[*]}": boot runs this through bash -c, so a joined
+        # string re-splits and any space, quote, semicolon, glob or $(...) in
+        # an argument changes meaning at launch.
+        printf '%s\n' "$(quote_argv "${argv[@]}")"
+        return 0
+      fi
+    fi
+    next="$(ppid_of "$pid")"
+    [[ "$next" == "$pid" || "$next" == 0 ]] && break
+    pid="$next"
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
+class_for_startup_exec() {
+  # --cheap skips the .desktop index. Display/list must use that so opening
+  # the panel does not walk every application dir.
+  local cheap=0
+  if [[ "${1:-}" == --cheap ]]; then
+    cheap=1
+    shift
+  fi
+  local exec="$1" ident class mapped first="" token base
+  local -a argv=()
+  split_exec_words "$exec" argv
+  ident="$(identity_from_argv "${argv[@]}")"
+  class="$(jq -r 'if .wrapped then .class else empty end' <<<"$ident")"
+  if [[ -n "$class" ]]; then
+    printf '%s\n' "$class"
+    return
+  fi
+  if ! ((cheap)); then
+    mapped="$(desktop_class_for_exec "$exec")"
+    if [[ -n "$mapped" ]]; then
+      printf '%s\n' "$mapped"
+      return
+    fi
+  fi
+  for token in "${argv[@]}"; do
+    [[ "$token" == -* || "$token" == -- ]] && continue
+    [[ "$token" == *=* ]] && continue
+    base="${token##*/}"
+    is_wrapper_cmd "$base" && continue
+    [[ -z "$first" ]] && first="$base"
+    if ! ((cheap)); then
+      mapped="$(desktop_class_for_exec "$base")"
+      if [[ -n "$mapped" && "$mapped" != "$base" ]]; then
+        printf '%s\n' "$mapped"
+        return
+      fi
+    fi
+  done
+  printf '%s\n' "${first:-${argv[0]:-}}"
+}
+
+ensure_overrides_file() {
+  ensure_config_dir
+  ensure_file_with "$(overrides_path)" '{}
+'
+}
+
+# Validates where the table is read or written, like load_config_json for
+# config.json. Not inside ensure_overrides_file: ensure_hooks calls that, and
+# refusing to install over a file the install path never touches would be
+# stricter than config.json. Runs in the CALLER's shell -- a `die` inside a
+# $( ) is captured, not shown -- and before the command's first write.
+require_overrides_parseable() {
+  ensure_overrides_file
+  jq -e 'type == "object"' "$(overrides_path)" >/dev/null 2>&1 \
+    || die "parse overrides: $(overrides_path)"
+}
+
+load_overrides_json() {
+  # require_overrides_parseable has already refused a file that will not
+  # parse. No {} fallback here: an empty table substituted for a file we could
+  # not read would be written back, discarding every override.
+  ensure_overrides_file
+  jq -e '.' "$(overrides_path)"
+}
+
+override_exec_for_class() {
+  local class="$1"
+  load_overrides_json | jq -r --arg c "$class" '
+    to_entries
+    | map(select((.key | ascii_downcase) == ($c | ascii_downcase)))
+    | .[0].value // empty
+  '
+}
+
+set_override_exec() {
+  local class="$1" exec="$2" json
+  ensure_overrides_file
+  json="$(load_overrides_json | jq --arg c "$class" --arg e "$exec" '
+    with_entries(select((.key | ascii_downcase) != ($c | ascii_downcase)))
+    + {($c): $e}
+  ')"
+  printf '%s\n' "$json" | atomic_write "$(overrides_path)"
+}
+
+unset_override_exec() {
+  local class="$1" json
+  ensure_overrides_file
+  json="$(load_overrides_json | jq --arg c "$class" '
+    with_entries(select((.key | ascii_downcase) != ($c | ascii_downcase)))
+  ')"
+  printf '%s\n' "$json" | atomic_write "$(overrides_path)"
+}
+
+# The program an exec will actually run, into _EXEC_TOKEN. Boot runs the exec
+# through `bash -c`, so this splits it the way bash does: unquote_argv_arr
+# handles the quoting and this walks the prefix bash consumes before reaching
+# the program.
+#
+#   return 1            nothing to run at all -- an empty or blank exec.
+#   return 0, token ""  a form this declines to judge, so nothing warns about
+#                       it and nothing refuses to launch it, e.g. `env -i cmd`.
+_EXEC_TOKEN=""
+exec_command_token() {
+  local exec="$1" i=0 n tok mode=shell
+  _EXEC_TOKEN=""
+  unquote_argv_arr "$exec"
+  n=${#_UARGV[@]}
+  ((n > 0)) || return 1
+  # `mode` is whose argument list is being read, and it decides what a
+  # VAR=value word means.
+  while ((i < n)); do
+    tok="${_UARGV[i]}"
+    # An option we would have to understand to know which word is the
+    # program. Decline rather than judge the wrong one.
+    if [[ "$mode" != shell && "$tok" == -* ]]; then
+      return 0
+    fi
+    # An assignment only where something consumes one: bash while it is still
+    # choosing the command word, and env.
+    if [[ "$mode" == shell || "$mode" == env ]] \
+      && [[ "$tok" =~ ^[A-Za-z_][A-Za-z_0-9]*= ]]; then
+      ((i++))
+      continue
+    fi
+    # Wrappers run the command that follows them, so the program is further
+    # along. env is the one that also consumes assignment operands.
+    if is_wrapper_cmd "$tok"; then
+      if [[ "${tok##*/}" == env ]]; then mode=env; else mode=wrapper; fi
+      ((i++))
+      continue
+    fi
+    _EXEC_TOKEN="$tok"
+    return 0
+  done
+  # All prefix and no program: `FOO=bar` on its own, or a bare `env`.
+  return 0
+}
+
+# Boot and the panel reach the same verdict by calling one function.
+exec_is_ok() {
+  exec_command_token "$1" || return 1
+  # A form we do not judge is not a form we warn about.
+  [[ -n "$_EXEC_TOKEN" ]] || return 0
+  command -v "$_EXEC_TOKEN" >/dev/null 2>&1 && return 0
+  [[ -x "$_EXEC_TOKEN" ]]
+}
+
+resolve_launch() {
+  # Prints: exec<TAB>source
+  local class="$1" pid="$2"
+  local exec
+  identity_pid_into_globals "$pid"
+  if [[ "$_ID_WRAPPED" == true ]]; then
+    # Not @tsv: it escapes backslashes, and a shell-quoted hosted command
+    # legitimately contains them (bash -c dua\ i\ /).
+    printf '%s\t%s\n' "$_ID_EXEC" "terminal"
+    return
+  fi
+  exec="$(override_exec_for_class "$class")"
+  if [[ -n "$exec" ]]; then
+    printf '%s\t%s\n' "$exec" "overrides-table"
+    return
+  fi
+  exec="$(desktop_exec_for_class "$class")"
+  if [[ -n "$exec" ]]; then
+    printf '%s\t%s\n' "$exec" "desktop-file"
+    return
+  fi
+  exec="$(cmdline_exec_for_pid "$pid" || true)"
+  if [[ -n "$exec" ]]; then
+    printf '%s\t%s\n' "$exec" "cmdline"
+    return
+  fi
+  printf '%s\t%s\n' "${class,,}" "guess"
+}
+
+# --- Authorization-gated capture (spec §8/§9/§12) ---------------------------
+# A parallel capture path that produces NEW-shape rows (execSource + provenance
+# + launcher) for the proposal handed to relaunchd via `relaunchctl commit`.
+# The legacy annotate_clients/resolve_launch path below is untouched and still
+# drives legacy display and the legacy rules.lua boot (kept until chunk 6).
+
+# The launcher root prefixes, byte-identical to relaunch_core::ROOT_LAUNCHER_PREFIXES.
+# A launcher under one of these is trusted by ownership at the anchor and needs
+# no client sha256 (spec §8); anything else must carry one.
+is_root_prefix_path() {
+  case "$1" in
+    /usr/share/applications/* | \
+    /usr/local/share/applications/* | \
+    /var/lib/flatpak/exports/share/applications/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The anchor binary bash calls for the single-parser `canonical-exec`. The
+# subcommand takes a path argument and reads no RELAUNCH_* of its own, so this
+# override only chooses WHICH binary runs and cannot redirect the anchor's
+# trusted state/config paths.
+anchor_bin() {
+  printf '%s\n' "${RELAUNCH_ANCHOR_BIN:-/usr/lib/omarchy-relaunch/relaunch-anchor}"
+}
+
+# canonical-exec of a launcher .desktop via the one Exec parser. Prints the
+# canonical string and returns 0, or returns non-zero (DBusActivatable,
+# Terminal=true, unreadable, no Exec) so the caller falls through.
+launcher_canonical_exec() {
+  local path="$1" bin
+  bin="$(anchor_bin)"
+  [[ -x "$bin" ]] || return 1
+  "$bin" canonical-exec "$path" 2>/dev/null
+}
+
+# Resolve one captured window to a NEW-shape JSON row (spec §8/§9). Fields:
+#   {class, exec, execSource, provenance, launcher?: {path, sha256?},
+#    eligible: bool, reason?}
+# An eligible row is a valid proposal entry; an ineligible row becomes a
+# `pending` row (never a signed entry). Trust is the §9 gate.
+#   trusted:   terminal(host) -> desktop-file(none) -> cmdline(host) -> guess(host)
+#   untrusted: root-prefix desktop-file(none) only, else pending(unverified)
+capture_resolve() {
+  local class="$1" pid="$2" xw="$3"
+  local path ce sha launcher
+  if window_trusted "$xw" "$pid"; then
+    # 1. Terminal host: the real class is the wrapper's app-id (§9 trusted walk).
+    identity_pid_into_globals "$pid"
+    if [[ "$_ID_WRAPPED" == true ]]; then
+      jq -nc --arg class "$_ID_CLASS" --arg exec "$_ID_EXEC" \
+        '{class: $class, exec: $exec, execSource: "terminal", provenance: "host", eligible: true}'
+      return
+    fi
+    # 2. Desktop-file via the one parser; fall through if it refuses.
+    path="$(desktop_launcher_for_class "$class")"
+    if [[ -n "$path" ]] && ce="$(launcher_canonical_exec "$path")" && [[ -n "$ce" ]]; then
+      if is_root_prefix_path "$path"; then
+        launcher="$(jq -nc --arg p "$path" '{path: $p}')"
+      else
+        sha="$(sha256sum -- "$path" 2>/dev/null | cut -d' ' -f1)"
+        [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || sha=""
+        launcher="$(jq -nc --arg p "$path" --arg s "$sha" '{path: $p, sha256: $s}')"
+      fi
+      if [[ -n "$launcher" ]]; then
+        jq -nc --arg class "$class" --arg exec "$ce" --argjson l "$launcher" \
+          '{class: $class, exec: $exec, execSource: "desktop-file", provenance: "none", launcher: $l, eligible: true}'
+        return
+      fi
+    fi
+    # 3. cmdline argv (host).
+    if ce="$(cmdline_exec_for_pid "$pid")" && [[ -n "$ce" ]]; then
+      jq -nc --arg class "$class" --arg exec "$ce" \
+        '{class: $class, exec: $exec, execSource: "cmdline", provenance: "host", eligible: true}'
+      return
+    fi
+    # 4. Guess: one quoted word, host.
+    jq -nc --arg class "$class" --arg exec "${class,,}" \
+      '{class: $class, exec: $exec, execSource: "guess", provenance: "host", eligible: true}'
+    return
+  fi
+
+  # Untrusted (XWayland or non-host): only a root-prefix desktop-file; else pending.
+  path="$(desktop_launcher_for_class "$class")"
+  if [[ -n "$path" ]] && is_root_prefix_path "$path" \
+    && ce="$(launcher_canonical_exec "$path")" && [[ -n "$ce" ]]; then
+    launcher="$(jq -nc --arg p "$path" '{path: $p}')"
+    jq -nc --arg class "$class" --arg exec "$ce" --argjson l "$launcher" \
+      '{class: $class, exec: $exec, execSource: "desktop-file", provenance: "none", launcher: $l, eligible: true}'
+    return
+  fi
+  jq -nc --arg class "$class" --arg exec "${class,,}" \
+    '{class: $class, exec: $exec, execSource: "unverified", provenance: "none", eligible: false, reason: "untrusted-window"}'
+}
+
+annotate_clients() {
+  # mode=display: only unwrap terminal hosts (cheap /proc walk). Do not
+  # index .desktop files or read cmdline launchers — that is save/import.
+  local clients="$1" mode="${2:-full}"
+  local addr pid class exec source patches line label
+  # One JSON object per window, assembled into the array once at the end.
+  local -a rows=()
+  patches='[]'
+  # Warm the index in THIS shell: resolve_launch runs inside a $(...) subshell,
+  # which gets a copy of the index arrays, so a cold parent rebuilds the whole
+  # index per window. Display mode does not index at all.
+  [[ "$mode" == display ]] || ensure_desktop_index
+  # Keyed by window address, not pid: Chromium serves every web app from one
+  # process, so a Maps window and the browser window share a pid and would
+  # collapse to whichever resolution was processed last.
+  while IFS=$'\t' read -r addr pid class; do
+    [[ -z "$pid" || "$pid" == null ]] && continue
+    [[ -z "$addr" || "$addr" == null ]] && continue
+    if [[ "$mode" == display ]]; then
+      identity_pid_into_globals "$pid"
+      if [[ "$_ID_WRAPPED" == true ]]; then
+        rows+=("$(jq -nc --arg addr "$addr" --arg class "$_ID_CLASS" --arg exec "$_ID_EXEC" \
+          '{addr: $addr, wrapped: true, class: $class, exec: $exec, execSource: "terminal"}')")
+      fi
+      continue
+    fi
+    line="$(resolve_launch "$class" "$pid")"
+    exec="${line%%$'\t'*}"
+    source="${line#*$'\t'}"
+    if [[ "$source" == terminal ]]; then
+      identity_pid_into_globals "$pid"
+      label="$(display_label_for "$_ID_CLASS" "$exec" "$source")"
+      rows+=("$(jq -nc --arg addr "$addr" --arg class "$_ID_CLASS" --arg exec "$exec" --arg label "$label" \
+        '{addr: $addr, wrapped: true, class: $class, exec: $exec, execSource: "terminal", label: $label}')")
+      continue
+    fi
+    label="$(display_label_for "$class" "$exec" "$source")"
+    rows+=("$(jq -nc --arg addr "$addr" --arg class "$class" --arg exec "$exec" --arg src "$source" --arg label "$label" \
+      '{addr: $addr, wrapped: false, class: $class, exec: $exec, execSource: $src, label: $label}')")
+  done < <(jq -r '
+    .[] | select(.pid != null)
+    | [
+        # Real hyprctl always reports an address; fall back to the pid so a
+        # fixture or an odd payload without one still resolves.
+        (if (.address // "") != "" then .address else "pid:" + (.pid | tostring) end),
+        (.pid | tostring),
+        (if (.initialClass // "") != "" then .initialClass else (.class // "") end)
+      ] | @tsv
+  ' <<<"$clients")
+  if ((${#rows[@]} == 0)); then
+    printf '%s\n' "$clients"
+    return
+  fi
+  patches="$(printf '%s\n' "${rows[@]}" | jq -sc .)"
+  jq --argjson patches "$patches" '
+    ($patches | map({key: .addr, value: .}) | from_entries) as $by
+    | map(
+        (
+          (if (.address // "") != "" then .address else "pid:" + (.pid | tostring) end)
+        ) as $akey
+        | (($by[$akey]) // null) as $p
+        | if $p == null then .
+          elif $p.wrapped == true then
+            .class = $p.class
+            | .initialClass = $p.class
+            | .relaunchExec = $p.exec
+            | .relaunchExecSource = $p.execSource
+            | .relaunchLabel = ($p.label // "")
+          else
+            .relaunchExec = $p.exec
+            | .relaunchExecSource = $p.execSource
+            | .relaunchLabel = ($p.label // "")
+          end
+      )
+  ' <<<"$clients"
+}
+
+scan_startup() {
+  local file line kind exec id class n=0
+  file="$(autostart_path)"
+  if [[ ! -f "$file" ]]; then
+    printf '[]\n'
+    return
+  fi
+  local items='[]'
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    n=$((n + 1))
+    [[ "$line" =~ ^[[:space:]]*-- ]] && continue
+    kind=""
+    exec=""
+    if [[ "$line" =~ o\.launch_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
+      kind="launch_on_start"
+      exec="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ o\.exec_on_start\([[:space:]]*\"([^\"]+)\" ]]; then
+      kind="exec_on_start"
+      exec="${BASH_REMATCH[1]}"
+    else
+      continue
+    fi
+    is_relaunch_exec "$exec" && continue
+    id="lua:${kind}:${exec}"
+    class="$(class_for_startup_exec --cheap "$exec")"
+    items="$(jq --arg id "$id" --arg source "$(basename "$file")" --arg kind "$kind" \
+      --arg exec "$exec" --arg class "$class" --argjson line "$n" \
+      '. + [{id: $id, source: $source, kind: $kind, exec: $exec, class: $class, line: $line}]' \
+      <<<"$items")"
+  done <"$file"
+  printf '%s\n' "$items"
+}
+
+boot_state_json() {
+  local disabled=false skip=false
+  [[ -f "$(disabled_path)" ]] && disabled=true
+  [[ -f "$(skip_path)" ]] && skip=true
+  config_skip_once && skip=true
+  jq -n --argjson disabled "$disabled" --argjson skip "$skip" \
+    '{disabled: $disabled, skipOnce: $skip, active: (($disabled or $skip) | not)}'
+}
+
+build_rows() {
+  local cfg startup clients
+  cfg="$1"
+  startup="$2"
+  clients="${3:-[]}"
+  jq --argjson startup "$startup" --argjson clients "$clients" "$jq_lib"'
+    load_config as $cfg
+    | ([ $cfg.entries[] | {key: (.class | ascii_downcase), value: .} ] | from_entries) as $byClass
+    | [
+        $cfg.entries[]
+        | . as $e
+        | {
+            id: ("relaunch:" + $e.class),
+            kind: "relaunch",
+            class: $e.class,
+            label: (if ($e.label // "") != "" then $e.label else $e.class end),
+            exec: (if $e.exec != "" then $e.exec else ($e.class | guess_exec) end),
+            execSource: ($e.execSource // ""),
+            workspace: $e.workspace,
+            enabled: $e.enabled,
+            inRelaunch: true
+          }
+      ] | sort_by(.workspace, .class) as $fromRelaunch
+    # Every startup line is listed, always. There is no correlation with the
+    # relaunch entries: an app on both lists appears on both.
+    | [
+        $startup[]
+        | . as $s
+        | {
+            id: $s.id,
+            kind: "startup",
+            class: $s.class,
+            label: (if $s.class != "" then $s.class else $s.exec end),
+            exec: $s.exec,
+            workspace: 0,
+            enabled: false,
+            inRelaunch: false
+          }
+      ] as $fromStartup
+    | (
+        $clients
+        | map(. + {match: (if (.initialClass // "") != "" then .initialClass else (.class // "") end)})
+        | map(select(.match != "" and ((.workspace.id // 0) >= 1)))
+        | sort_by(.workspace.id, .match)
+        | unique_by(.match)
+      ) as $running
+    | [
+        $running[]
+        | . as $c
+        | select($byClass[($c.match | ascii_downcase)] == null)
+        | {
+            id: ("running:" + $c.match),
+            kind: "running",
+            class: $c.match,
+            label: $c.match,
+            exec: (if ($c.relaunchExec // "") != "" then $c.relaunchExec else ($c.match | guess_exec) end),
+            execSource: (if ($c.relaunchExecSource // "") != "" then $c.relaunchExecSource else "guess" end),
+            workspace: $c.workspace.id,
+            enabled: false,
+            inRelaunch: false
+          }
+      ] as $fromRunning
+    | ($fromRunning + $fromRelaunch + $fromStartup)
+  ' <<<"$cfg"
+}
+
+# Metadata is paired with items by position: a startup row and a relaunch row
+# can share a class, so `_meta` carries one entry per item, class or not.
+decorate_items() {
+  local _items="$1"
+  local _meta='[]'
+  local _class _exec _src _ok _unverified
+  # Unit separator between fields, NUL between records: @tsv escapes
+  # backslashes, and a shell-quoted hosted command contains them.
+  while IFS=$'\037' read -r -d '' _class _exec _src; do
+    if [[ -n "$_class" ]]; then
+      if [[ -z "$_src" ]]; then
+        if [[ -n "$(override_exec_for_class "$_class")" ]]; then
+          _src="overrides-table"
+        elif [[ "$_exec" == "${_class,,}" ]]; then
+          _src="guess"
+        fi
+      fi
+      if exec_is_ok "$_exec"; then _ok=true; else _ok=false; fi
+      if [[ "$_src" == guess || "$_src" == cmdline ]]; then _unverified=true; else _unverified=false; fi
+    else
+      _ok=true
+      _unverified=false
+    fi
+    _meta="$(jq --arg src "$_src" --argjson ok "$_ok" --argjson unverified "$_unverified" '
+        . + [{execSource: $src, execOk: $ok, unverified: $unverified}]
+      ' <<<"$_meta")"
+  done < <(jq -j '.[] | [(.class // ""), (.exec // ""), (.execSource // "")] | join("\u001f"), "\u0000"' <<<"$_items")
+  jq --argjson meta "$_meta" '
+    [ to_entries[]
+      | .value as $it
+      | ($meta[.key]) as $m
+      | $it + {
+          execSource: $m.execSource,
+          execOk: $m.execOk,
+          unverified: $m.unverified
+        }
+    ]
+  ' <<<"$_items"
+}
+
+emit_state() {
+  local cfg startup rows extra clients entries warnings
+  require_overrides_parseable
+  cfg="$(load_config_json)"
+  startup="$(scan_startup)"
+  clients="$(clients_display)"
+  rows="$(build_rows "$cfg" "$startup" "$clients")"
+  local _entf _rowf
+  _entf="$(mktemp)"
+  _rowf="$(mktemp)"
+  decorate_items "$(jq -c '.entries' <<<"$cfg")" >"$_entf"
+  decorate_items "$rows" >"$_rowf"
+  entries="$(cat "$_entf")"
+  rows="$(cat "$_rowf")"
+  rm -f "$_entf" "$_rowf"
+  if ! jq -e . >/dev/null 2>&1 <<<"$entries"; then
+    entries="$(jq -c '.entries' <<<"$cfg")"
+  fi
+  if ! jq -e . >/dev/null 2>&1 <<<"$rows"; then
+    rows='[]'
+  fi
+  cfg="$(jq --argjson entries "$entries" '.entries = $entries' <<<"$cfg")"
+  warnings="$(jq '[.[] | select(.execOk == false) | {
+    class, exec, execSource, execOk,
+    message: ("command not found: " + ((.exec | split(" "))[0] // .exec))
+  }]' <<<"$entries")"
+  extra='{}'
+  if [[ -n "${1:-}" ]]; then extra="$1"; fi
+  extra="$(jq --argjson warnings "$warnings" '. + {warnings: $warnings}' <<<"$extra")"
+  jq -n --argjson cfg "$cfg" --argjson startup "$startup" --argjson rows "$rows" \
+    --argjson boot "$(boot_state_json)" --argjson lastBoot "$(last_boot_state_json)" \
+    --argjson extra "$extra" \
+    --arg snippet "$(rules_path)" --arg config "$(config_path)" \
+    '{
+      ok: true,
+      staggerSeconds: $cfg.staggerSeconds,
+      entries: $cfg.entries,
+      startup: $startup,
+      rows: $rows,
+      boot: $boot,
+      lastBoot: $lastBoot,
+      snippetPath: $snippet,
+      configPath: $config,
+      warnings: $extra.warnings
+    } + $extra'
+}
+
+last_boot_state_json() {
+  local p text
+  p="$(last_boot_json_path)"
+  if [[ ! -f "$p" ]]; then
+    printf 'null\n'
+    return
+  fi
+  text=""
+  [[ -f "$(last_boot_log_path)" ]] && text="$(cat "$(last_boot_log_path)")"
+  jq --arg text "$text" --arg logPath "$(last_boot_log_path)" \
+    '. + {text: $text, logPath: $logPath}' "$p"
+}
+
+write_last_boot() {
+  local started="$1" outcome="$2" reason="$3" launches="${4:-[]}" stagger="${5:-0}"
+  local json
+  ensure_config_dir
+  json="$(jq -n \
+    --arg startedAt "$started" \
+    --arg outcome "$outcome" \
+    --arg reason "$reason" \
+    --argjson launches "$launches" \
+    --argjson stagger "$stagger" \
+    '{
+      startedAt: $startedAt,
+      outcome: $outcome,
+      reason: $reason,
+      staggerSeconds: $stagger,
+      launches: $launches
+    }')"
+  printf '%s\n' "$json" | atomic_write "$(last_boot_json_path)"
+  {
+    printf 'relaunch boot  %s\n' "$started"
+    printf 'outcome: %s\n' "$outcome"
+    [[ -n "$reason" ]] && printf 'reason:  %s\n' "$reason"
+    printf 'stagger: %ss\n' "$stagger"
+    if [[ "$launches" != "[]" ]]; then
+      printf '\nlaunches:\n'
+      jq -r '
+        .[] |
+        "  ws \(.workspace)  \(.class)  \(.status)  pid=\(.pid // "-")"
+        + (if .actualWorkspace != null then "  landed=ws \(.actualWorkspace) class=\(.actualClass // "?")" else "" end)
+        + (
+            if (.outcome // "") == "misplaced" then "  MISPLACED"
+            elif (.outcome // "") == "pending" then "  PENDING (no window yet)"
+            else "" end
+          )
+        + "  \(.exec)"
+        + (if .error then "  (\(.error))" else "" end)
+      ' <<<"$launches"
+    fi
+  } | atomic_write "$(last_boot_log_path)"
+}
+
+# Placement has three outcomes, not two. Only `misplaced` is a failure.
+#
+#   landed    a window of this class is on the expected workspace
+#   misplaced a window exists, on a different workspace
+#   pending   no window of this class yet, within the deadline
+#
+# Bounded re-sampling, not a watcher: pending entries are re-checked until the
+# deadline, and anything already resolved is left alone.
+verify_launches() {
+  local launches="$1" clients
+  local wait_total="${RELAUNCH_VERIFY_SLEEP:-2}"
+  local deadline="${RELAUNCH_VERIFY_DEADLINE:-20}"
+  local interval="${RELAUNCH_VERIFY_INTERVAL:-2}"
+  local elapsed=0
+
+  if [[ "$wait_total" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($wait_total > 0)}"; then
+    sleep "$wait_total"
+  fi
+  if ! clients="$(clients_raw)"; then
+    printf '%s\n' "$launches"
+    return
+  fi
+  launches="$(verify_sample "$launches" "$clients")"
+
+  # Re-sample only while something is still pending and the deadline allows.
+  while [[ "$deadline" =~ ^[0-9]+$ ]] && ((deadline > 0)) \
+    && [[ "$interval" =~ ^[0-9]+$ ]] && ((interval > 0)) \
+    && ((elapsed < deadline)); do
+    jq -e 'any(.[]; .outcome == "pending")' >/dev/null <<<"$launches" || break
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+    clients="$(clients_raw)" || break
+    launches="$(verify_sample "$launches" "$clients")"
+  done
+  printf '%s\n' "$launches"
+}
+
+verify_sample() {
+  local launches="$1" clients="$2"
+  jq --argjson clients "$clients" '
+    map(
+      . as $l
+      # Already resolved: do not re-open a decision a later sample cannot
+      # improve. Only pending entries are re-examined.
+      | if (.outcome // "pending") != "pending" then .
+        else
+          (
+            $clients
+            | map(select(
+                (.pid == $l.pid)
+                or ((.initialClass // .class // "") == $l.class)
+              ))
+          ) as $all
+          | (
+              $all
+              | map(select(.workspace.id == $l.workspace))
+              | .[0]
+            ) as $onTarget
+          | ($onTarget // ($all | .[0]) // null) as $w
+          | . + {
+              actualClass: (if $w == null then null else ($w.initialClass // $w.class) end),
+              actualWorkspace: (if $w == null then null else $w.workspace.id end),
+              outcome: (
+                if $w == null then "pending"
+                elif $onTarget != null then "landed"
+                else "misplaced" end
+              ),
+              # True only when it really landed, so a pending entry does not
+              # read as a failure.
+              placed: ($onTarget != null)
+            }
+        end
+    )
+  ' <<<"$launches"
+}
+
+clients_raw() {
+  local out
+  if ! out="$("$HYPRCTL" clients -j)"; then
+    die "hyprctl clients: command failed"
+  fi
+  jq -e 'type == "array"' >/dev/null <<<"$out" || die "hyprctl clients: expected a JSON array"
+  printf '%s\n' "$out"
+}
+
+clients_json() {
+  annotate_clients "$(clients_raw)" full
+}
+
+monitors_raw() {
+  # Lenient on purpose: the snapshot is a nice-to-have, so missing monitors
+  # degrade to empty name/description rather than failing the save.
+  local out
+  if ! out="$("$HYPRCTL" monitors -j 2>/dev/null)"; then
+    printf '%s\n' '[]'
+    return
+  fi
+  if ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$out"; then
+    printf '%s\n' '[]'
+    return
+  fi
+  printf '%s\n' "$out"
+}
+
+clients_display() {
+  annotate_clients "$(clients_raw)" display
+}
+
+pid_for_running_class() {
+  local class="$1" clients pid hit
+  clients="$(clients_raw)" || return 1
+  hit="$(jq -r --arg c "$class" '
+    map(select(
+      ((.initialClass // .class // "") | ascii_downcase) == ($c | ascii_downcase)
+      and (.pid != null)
+    ) | .pid)
+    | .[0] // empty
+  ' <<<"$clients")"
+  if [[ -n "$hit" ]]; then
+    printf '%s\n' "$hit"
+    return 0
+  fi
+  # A hosted terminal reports the terminal class to Hyprland: `foot -e herdr`
+  # is class foot while list shows herdr, so `import --class herdr` needs this
+  # walk to find a pid. Only reached when the direct match failed.
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    identity_pid_into_globals "$pid"
+    [[ "$_ID_WRAPPED" == true ]] || continue
+    if [[ "${_ID_CLASS,,}" == "${class,,}" ]]; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+  done < <(jq -r '.[] | select(.pid != null) | .pid' <<<"$clients")
+  return 1
+}
+
+cmd_save() {
+  local cfg clients merged extra
+  ensure_hooks
+  # Before anything is loaded, captured or written: emit_state validates only
+  # on the --json path, after config.json and rules.lua have been rewritten.
+  require_overrides_parseable
+  cfg="$(load_config_json)"
+  clients="$(clients_json)"
+  merged="$(jq --argjson clients "$clients" "$jq_lib"' capture($clients)' <<<"$cfg")"
+  jq "$jq_lib"' del(.added, .updated) | dump_config' <<<"$merged" | atomic_write "$(config_path)"
+  jq "$jq_lib"' del(.added, .updated)' <<<"$merged" | write_generated
+  extra="$(jq '{added: .added, updated: .updated}' <<<"$merged")"
+  if $json_out; then
+    emit_state "$extra"
+  else
+    jq -r '"Captured: \(.added) new, \(.updated) updated."' <<<"$merged"
+    printf 'Rules: %s\n' "$(rules_path)"
+    printf 'Run `relaunch reload` or reboot to apply.\n'
+  fi
+}
+
+cmd_generate() {
+  ensure_hooks
+  load_config_json | write_generated
+  if $json_out; then
+    emit_state
+  else
+    printf 'Wrote %s\n' "$(rules_path)"
+  fi
+}
+
+# The current config.json ONLY if it is a signed ConfigFile (has signed +
+# signature) — the valid base for a relaunchd Prepare/Reduce. A legacy unsigned
+# config is NOT a base; relaunchd then starts from empty (first-run adopt, §11).
+current_signed_base() {
+  local p
+  p="$(config_path)"
+  [[ -f "$p" ]] || return 0
+  if jq -e 'has("signed") and has("signature")' "$p" >/dev/null 2>&1; then
+    cat "$p"
+  fi
+}
+
+# `relaunch propose [--json]`: capture the running windows through the §9 trust
+# gate and emit, for the panel, the current signed base plus one classified
+# candidate per window (new-shape: execSource/provenance/launcher). The panel
+# assembles the proposal it submits to `relaunchctl commit`; this command signs
+# nothing and writes nothing (§12 — bash does capture + panel JSON only).
+cmd_propose() {
+  ensure_desktop_index
+  local clients base stagger entries
+  clients="$(clients_raw)"
+  base="$(current_signed_base)"
+  # The already-signed entries, decoded from the base for the panel to show and
+  # carry forward into the proposal (the panel cannot read the opaque base). A
+  # read for display only; relaunchd re-verifies the base at Prepare regardless.
+  if [[ -n "$base" ]]; then
+    entries="$(jq -c '.signed.entries // []' <<<"$base" 2>/dev/null || printf '[]')"
+    stagger="$(jq -r '.signed.staggerSeconds // 0' <<<"$base" 2>/dev/null || printf '0')"
+  else
+    entries='[]'
+    stagger="$(load_config_json | jq -r '.staggerSeconds // 0')"
+  fi
+  [[ "$stagger" =~ ^[0-9]+$ ]] || stagger=0
+  local -a cand=()
+  local addr pid class ws xw rr row
+  while IFS=$'\t' read -r addr pid class ws xw; do
+    [[ -z "$pid" || "$pid" == null ]] && continue
+    [[ -z "$class" || "$class" == null ]] && continue
+    rr="$(capture_resolve "$class" "$pid" "$xw")"
+    # Attach the panel-editable fields; the live workspace, enabled off by
+    # default, label defaults to the class. Address is kept so the panel can
+    # tie a candidate back to its window.
+    row="$(jq -nc --arg addr "$addr" --argjson rr "$rr" --argjson ws "${ws:-0}" '
+      $rr + {addr: $addr, workspace: (if ($ws // 0) >= 1 then $ws else 1 end),
+             enabled: false, label: $rr.class}')"
+    cand+=("$row")
+  done < <(jq -r '
+    .[] | select(.pid != null)
+    | [
+        (if (.address // "") != "" then .address else "pid:" + (.pid | tostring) end),
+        (.pid | tostring),
+        (if (.initialClass // "") != "" then .initialClass else (.class // "") end),
+        ((.workspace.id) // 0 | tostring),
+        (.xwayland | tostring)
+      ] | @tsv
+  ' <<<"$clients")
+  local candidates='[]'
+  ((${#cand[@]})) && candidates="$(printf '%s\n' "${cand[@]}" | jq -sc .)"
+  jq -nc --argjson stagger "${stagger:-0}" --arg base "$base" \
+    --argjson entries "$entries" --argjson candidates "$candidates" '
+    {staggerSeconds: $stagger, base: $base, entries: $entries, candidates: $candidates}'
+}
+
+# `relaunch install-signed`: persist a signed config.json produced by relaunchd
+# and relayed by the panel over relaunchctl (§12 relay-to-bash: one atomic
+# writer). Bash does NOT verify the signature — relaunchd did — but it refuses
+# anything that is not a signed-config envelope so a truncated/empty relay can
+# never clobber the live config. Reads the document on stdin.
+cmd_install_signed() {
+  local input
+  input="$(cat)"
+  jq -e 'has("v") and has("signed") and has("signature") and (.signature | type == "string")' \
+    >/dev/null 2>&1 <<<"$input" || die "install-signed: input is not a signed config document"
+  ensure_config_dir
+  printf '%s' "$input" | atomic_write "$(config_path)"
+  if $json_out; then
+    printf '%s\n' '{"ok":true}'
+  else
+    printf 'Installed signed config: %s\n' "$(config_path)"
+  fi
+}
+
+cmd_list() {
+  ensure_hooks
+  # Both output paths, not just --json: a corrupt overrides table is worth
+  # saying out loud whoever is reading.
+  require_overrides_parseable
+  if $json_out; then
+    emit_state
+    return
+  fi
+  local cfg
+  cfg="$(load_config_json)"
+  printf 'boot: %s\n' "$(boot_state_json | jq -r 'if .disabled then "disabled" elif .skipOnce then "skip-next" else "on" end')"
+  if jq -e '.entries | length == 0' >/dev/null <<<"$cfg"; then
+    printf 'No relaunch entries. Run `relaunch save`.\n'
+  else
+    # Label first because it is what a human recognises, but class stays on
+    # the line: it is what the generated pin actually matches.
+    printf '%-4s %-3s %-22s %-22s %s\n' ws on name class exec
+    jq -r "$jq_lib"'
+      .entries[]
+      | [
+          (.workspace | tostring),
+          (if .enabled then "x" else " " end),
+          (if (.label // "") != "" then .label else .class end),
+          .class,
+          (if .exec != "" then .exec else (.class | guess_exec) + " *" end)
+        ]
+      | join("\u001f")
+    ' <<<"$cfg" | while IFS=$'\037' read -r ws on label class exec; do
+      printf '%-4s [%s] %-22s %-22s %s\n' "$ws" "$on" "$label" "$class" "$exec"
+    done
+  fi
+  local startup
+  startup="$(scan_startup)"
+  if jq -e 'length > 0' >/dev/null <<<"$startup"; then
+    printf '\nstartup apps (autostart.lua):\n'
+    jq -r '.[] | "  [\(.kind)] \(.exec)  class=\(.class)"' <<<"$startup"
+  fi
+}
+
+cmd_reload() {
+  "$HYPRCTL" reload || die "hyprctl reload failed"
+  if $json_out; then
+    emit_state
+  else
+    printf 'Hyprland reloaded.\n'
+  fi
+}
+
+cmd_boot() {
+  # Registered by the owned loader module, not by a hook in the user config.
+  # Never listed as a startup app.
+  local started cfg stagger line class ws exec status pid err launches first_launch
+  started="$(date -Iseconds)"
+  ensure_config_dir
+  if [[ -f "$(disabled_path)" ]]; then
+    write_last_boot "$started" disabled "disabled flag present" "[]" 0
+    exit 0
+  fi
+  if [[ -f "$(skip_path)" ]] || config_skip_once; then
+    set_skip_once false
+    load_config_json | write_generated
+    write_last_boot "$started" skipped "skip-once consumed; rules restored for the next boot" "[]" 0
+    exit 0
+  fi
+  cfg="$(load_config_json)"
+  stagger="$(jq -r '.staggerSeconds' <<<"$cfg")"
+  launches='[]'
+  first_launch=true
+  while IFS=$'\037' read -r class ws exec; do
+    [[ -z "$exec" ]] && continue
+    is_relaunch_exec "$exec" && continue
+    if [[ "$stagger" =~ ^[1-9][0-9]*$ ]]; then
+      if $first_launch; then
+        first_launch=false
+      else
+        if [[ -n "${RELAUNCH_SLEEP:-}" ]]; then
+          "$RELAUNCH_SLEEP" "$stagger"
+        else
+          sleep "$stagger"
+        fi
+      fi
+    fi
+    pid=""
+    err=""
+    # The same check the panel row shows, so the two cannot drift.
+    if ! exec_is_ok "$exec"; then
+      status="not_found"
+      err="command not found: ${_EXEC_TOKEN:-$exec}"
+    else
+      # The command reaches bash through its environment, not its argv, and
+      # is unset before it runs so the app does not inherit it.
+      RELAUNCH_EXEC="$exec" bash -c 'c=$RELAUNCH_EXEC; unset RELAUNCH_EXEC; eval "$c"' &
+      pid=$!
+      if kill -0 "$pid" 2>/dev/null; then
+        status="started"
+      else
+        status="failed"
+        err="process exited immediately"
+        pid=""
+      fi
+    fi
+    launches="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" \
+      --arg status "$status" --arg pid "$pid" --arg error "$err" '
+        . + [{
+          class: $class,
+          workspace: $ws,
+          exec: $exec,
+          status: $status,
+          pid: (if $pid == "" then null else ($pid | tonumber) end),
+          error: (if $error == "" then null else $error end)
+        }]
+      ' <<<"$launches")"
+  # Unit separator, not @tsv: @tsv escapes backslashes, and boot runs this exec
+  # through bash -c, so a doubled backslash would break a shell-quoted hosted
+  # command at launch.
+  done < <(jq -r "$jq_lib"'
+    enabled_entries[]
+    | [ .class, (.workspace | tostring), (if .exec != "" then .exec else (.class | guess_exec) end) ]
+    | join("\u001f")
+  ' <<<"$cfg")
+  launches="$(verify_launches "$launches")"
+  write_last_boot "$started" launched "" "$launches" "$stagger"
+}
+
+cmd_last_boot() {
+  local open=false a
+  for a in "$@"; do
+    [[ "$a" == --open ]] && open=true
+  done
+  if [[ ! -f "$(last_boot_log_path)" ]]; then
+    die "no last-boot log yet (reboot or run: relaunch boot)"
+  fi
+  if $open; then
+    command -v omarchy-launch-editor >/dev/null 2>&1 || die "omarchy-launch-editor not found"
+    omarchy-launch-editor "$(last_boot_log_path)" &
+    if $json_out; then
+      emit_state
+    else
+      printf 'Opened %s\n' "$(last_boot_log_path)"
+    fi
+    return
+  fi
+  if $json_out; then
+    last_boot_state_json
+    return
+  fi
+  cat "$(last_boot_log_path)"
+}
+
+# Snapshot of the real layout, for diffing against what came back. Opt-in and
+# purely diagnostic: nothing in save, generate or boot reads it.
+cmd_snapshot() {
+  local clients monitors out
+  clients="$(clients_raw)"
+  monitors="$(monitors_raw)"
+  out="$(jq -n --argjson clients "$clients" --argjson monitors "$monitors" \
+    --arg at "$(date -Iseconds)" "$jq_lib"'
+    (
+      $monitors
+      | map({key: ((.id // -1) | tostring), value: {name: (.name // ""), description: (.description // "")}})
+      | from_entries
+    ) as $mon
+    | {
+        capturedAt: $at,
+        windows: (
+          $clients
+          | map(
+              ((.monitor // -1) | tostring) as $mid
+              | {
+                  class: match_class,
+                  label: "",
+                  workspace: ((.workspace.id // 0) | tonumber),
+                  floating: (.floating == true),
+                  monitor: ((.monitor // -1) | tonumber),
+                  monitorName: ($mon[$mid].name // ""),
+                  monitorDescription: ($mon[$mid].description // ""),
+                  pid: (.pid // 0),
+                  title: (.title // "")
+                }
+            )
+          | sort_by(.workspace, .class)
+        )
+      }
+  ')"
+  # Labels are the stored ones, never resolved here: indexing .desktop files is
+  # slow and pointless for a diagnostic the user is waiting on.
+  out="$(jq --argjson cfg "$(load_config_json)" '
+    (
+      $cfg.entries
+      | map(select((.label // "") != ""))
+      | map({key: .class, value: .label})
+      | from_entries
+    ) as $byClass
+    # An empty label is not a label: jq only treats null and false as falsy,
+    # so // would happily hand back "".
+    | .windows |= map(.label = ($byClass[.class] // .class))
+  ' <<<"$out")"
+  printf '%s\n' "$out" | atomic_write "$(last_session_path)"
+  if $json_out; then
+    printf '%s\n' "$out" | jq '{ok: true, capturedAt: .capturedAt, windows: .windows}'
+  else
+    printf 'Wrote %s (%s windows)\n' "$(last_session_path)" "$(jq '.windows | length' <<<"$out")"
+  fi
+}
+
+# Diff the manual snapshot against what the last boot actually produced.
+cmd_last_session() {
+  local diff_mode=false a
+  for a in "$@"; do
+    [[ "$a" == --diff ]] && diff_mode=true
+  done
+  [[ -f "$(last_session_path)" ]] \
+    || die "no session snapshot yet (take one with: relaunch snapshot)"
+  if ! $diff_mode; then
+    if $json_out; then cat "$(last_session_path)"; else
+      jq -r '"session snapshot \(.capturedAt)\n", (.windows[] | "  ws \(.workspace)  \(.label)  class=\(.class)")' \
+        "$(last_session_path)"
+    fi
+    return
+  fi
+  [[ -f "$(last_boot_json_path)" ]] || die "no last-boot log to diff against"
+  local report
+  report="$(jq -n \
+    --argjson before "$(cat "$(last_session_path)")" \
+    --argjson after "$(cat "$(last_boot_json_path)")" \
+    --argjson now "$(clients_raw)" "$jq_lib"'
+      # Live windows keyed by class with the state that matters, so a window
+      # back on the wrong workspace or float state is reported rather than
+      # counted as healthy.
+      (
+        $now
+        | map({
+            class: match_class,
+            workspace: ((.workspace.id // 0) | tonumber),
+            floating: (.floating == true)
+          })
+        | map(select(.class != ""))
+      ) as $live
+      | [
+          $before.windows
+          | group_by(.class)[]
+          | . as $group
+          | ($group[0].class) as $cls
+          | ($live | map(select(.class == $cls))) as $back
+          | {
+              class: $cls,
+              label: $group[0].label,
+              want: ($group | length),
+              live: ($back | length),
+              missing: (($group | length) - ($back | length)),
+              # A placement is honoured when some returned window of this
+              # class sits on the saved workspace with the saved float state.
+              placements: [
+                $group[]
+                | . as $w
+                | {
+                    wasWorkspace: $w.workspace,
+                    wasFloating: $w.floating,
+                    matched: (
+                      ($back | map(select(
+                        .workspace == $w.workspace and .floating == $w.floating
+                      )) | length) > 0
+                    ),
+                    workspaceMatched: (
+                      ($back | map(select(.workspace == $w.workspace)) | length) > 0
+                    )
+                  }
+              ]
+            }
+          | . + {mismatched: ([.placements[] | select(.matched | not)] | length)}
+        ]
+      | {
+          capturedAt: $before.capturedAt,
+          bootedAt: ($after.startedAt // ""),
+          outcome: ($after.outcome // ""),
+          classes: .
+        }
+    ')"
+  if $json_out; then
+    printf '%s\n' "$report"
+    return
+  fi
+  jq -r '
+    "session before: \(.capturedAt)",
+    "last boot:      \(.bootedAt)  outcome: \(.outcome)",
+    "",
+    (.classes[]
+      | . as $c
+      | if .missing > 0 then
+          "  MISSING  \(.label)  class=\(.class)  had \(.want), back \(.live)"
+        elif .mismatched > 0 then
+          (
+            [.placements[] | select(.matched | not)]
+            | map(
+                if .workspaceMatched then
+                  "float \(.wasFloating)"
+                else
+                  "ws \(.wasWorkspace)"
+                end
+              )
+            | join(", ")
+          ) as $detail
+          | "  MOVED    \($c.label)  class=\($c.class)  expected \($detail)"
+        else
+          "  ok       \(.label)  class=\(.class)  \(.live)/\(.want)"
+        end)
+  ' <<<"$report"
+}
+
+has_flag() {
+  local flag="$1"
+  shift
+  local a
+  for a in "$@"; do [[ "$a" == "$flag" ]] && return 0; done
+  return 1
+}
+
+arg_value() {
+  local flag="$1"
+  shift
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "$flag" ]]; then
+      printf '%s\n' "${2:-}"
+      return 0
+    fi
+    shift
+  done
+  return 1
+}
+
+# Adds a RUNNING window to the relaunch list. There is no way to import a
+# startup line: the startup list is read-only.
+cmd_import() {
+  local ws class cfg pid line exec source label
+  ws="$(arg_value --workspace "$@" || true)"
+  class="$(arg_value --class "$@" || true)"
+  [[ "$ws" =~ ^[1-9][0-9]*$ ]] || die "import requires --workspace N (N>=1)"
+  [[ -n "$class" ]] || die "import requires --class"
+  require_overrides_parseable
+  pid="$(pid_for_running_class "$class" || true)"
+  line="$(resolve_launch "$class" "${pid:-}")"
+  exec="${line%%$'\t'*}"
+  source="${line#*$'\t'}"
+  [[ -n "$exec" ]] || die "import could not resolve a launch command for ${class}"
+  label="$(display_label_for "$class" "$exec" "$source")"
+  cfg="$(load_config_json)"
+  if jq -e --arg class "$class" '.entries[] | select(.class == $class)' >/dev/null <<<"$cfg"; then
+    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" --arg label "$label" '
+      .entries |= map(if .class == $class then .workspace = $ws | .exec = $exec | .execSource = $src | .label = $label | .enabled = true else . end)
+    ' <<<"$cfg")"
+  else
+    cfg="$(jq --arg class "$class" --argjson ws "$ws" --arg exec "$exec" --arg src "$source" --arg label "$label" '
+      .entries += [{class: $class, workspace: $ws, exec: $exec, execSource: $src, label: $label, enabled: true}]
+    ' <<<"$cfg")"
+  fi
+  jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
+  jq "$jq_lib"' load_config' <<<"$cfg" | write_generated
+  if $json_out; then emit_state; else printf 'Imported %s -> workspace %s\n' "$class" "$ws"; fi
+}
+
+cmd_set_exec() {
+  local class exec cfg label
+  class="$(arg_value --class "$@" || true)"
+  # --exec-stdin reads the command from stdin, which is how the panel sends
+  # it: argv is readable by other local users in /proc/<pid>/cmdline.
+  if has_flag --exec-stdin "$@"; then
+    IFS= read -r exec || [[ -n "$exec" ]] || exec=""
+  else
+    exec="$(arg_value --exec "$@" || true)"
+  fi
+  [[ -n "$class" ]] || die "set-exec requires --class"
+  [[ -n "$exec" ]] || die "set-exec requires --exec CMD or --exec-stdin"
+  # Before load_config_json, so a bad overrides.json refuses the whole command
+  # instead of aborting after config.json has already been rewritten.
+  require_overrides_parseable
+  cfg="$(load_config_json)"
+  if ! jq -e --arg class "$class" '.entries[] | select(.class == $class)' >/dev/null <<<"$cfg"; then
+    die "no relaunch entry for class: $class"
+  fi
+  label="$(display_label_for "$class" "$exec" "overrides-table")"
+  cfg="$(jq --arg class "$class" --arg exec "$exec" --arg label "$label" '
+    .entries |= map(if .class == $class then .exec = $exec | .execSource = "overrides-table" | .label = $label else . end)
+  ' <<<"$cfg")"
+  jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
+  set_override_exec "$class" "$exec"
+  jq "$jq_lib"' load_config' <<<"$cfg" | write_generated
+  if $json_out; then
+    emit_state
+  else
+    printf 'Set %s exec to %s\n' "$class" "$exec"
+  fi
+}
+
+cmd_drop() {
+  local class cfg
+  class="$(arg_value --class "$@" || true)"
+  [[ -n "$class" ]] || die "drop requires --class"
+  require_overrides_parseable
+  cfg="$(load_config_json)"
+  cfg="$(jq --arg class "$class" '.entries |= map(select(.class != $class))' <<<"$cfg")"
+  jq "$jq_lib"' dump_config' <<<"$cfg" | atomic_write "$(config_path)"
+  unset_override_exec "$class"
+  jq "$jq_lib"' load_config' <<<"$cfg" | write_generated
+  if $json_out; then emit_state; else printf 'Removed %s from relaunch\n' "$class"; fi
+}
+
+cmd_boot_skip() {
+  set_skip_once true
+  load_config_json | write_generated
+  if $json_out; then emit_state; else printf 'Relaunch will skip the next boot.\n'; fi
+}
+
+cmd_boot_disable() {
+  ensure_config_dir
+  (umask 077; : >"$(disabled_path)")
+  set_skip_once false
+  load_config_json | write_generated
+  if $json_out; then emit_state; else printf 'Relaunch disabled until re-enabled.\n'; fi
+}
+
+cmd_boot_enable() {
+  rm -f "$(disabled_path)"
+  set_skip_once false
+  load_config_json | write_generated
+  if $json_out; then emit_state; else printf 'Relaunch enabled on boot.\n'; fi
+}
+
+# One-line Hyprland hook. io.open-then-dofile so a missing relaunch.lua is not
+# a Hyprland config error. An empty XDG_CONFIG_HOME means unset, matching the
+# bash config_dir; Lua would otherwise treat "" as a usable prefix.
+hyprland_hook_line() {
+  printf '%s\n' 'local _c = os.getenv("XDG_CONFIG_HOME"); if _c == nil or _c == "" then _c = os.getenv("HOME") .. "/.config" end; local _rl = _c .. "/omarchy-relaunch/relaunch.lua"; local _f = io.open(_rl); if _f then _f:close(); dofile(_rl) end'
+}
+
+# Hook lines released versions wrote. ensure_hooks replaces one instead of
+# appending beside it, and uninstall still takes it back.
+hyprland_hook_lines_superseded() {
+  printf '%s\n' 'local _rl = (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/omarchy-relaunch/relaunch.lua"; local _f = io.open(_rl); if _f then _f:close(); dofile(_rl) end'
+}
+
+cmd_uninstall() {
+  local yes=false a
+  for a in "$@"; do
+    [[ "$a" == --yes ]] && yes=true
+  done
+  $yes || die "uninstall requires --yes"
+  remove_bootstrap_block "$(hyprland_lua_path)"
+  remove_legacy_conf
+  rm -rf "$(config_dir)"
+  local bin="${PREFIX:-$HOME/.local}/bin/relaunch"
+  if [[ -f "$bin" ]] && grep -q 'omarchy-relaunch bar widget' "$bin"; then
+    rm -f "$bin"
+  fi
+  # Emit the result before unlinking the plugin checkout: the bar panel loads
+  # those QML files, and the popup vanishes with no message if they go first.
+  if $json_out; then
+    jq -n '{ok: true, uninstalled: true}'
+    ( sleep 2; rm -rf "$(plugin_dir)" ) &
+  else
+    rm -rf "$(plugin_dir)"
+    printf 'Relaunch removed.\n'
+  fi
+}
+
+# Removes our bootstrap from hyprland.lua: the marker comment and a hook line,
+# both fixed strings this script emits verbatim, so the match is exact and
+# nothing user-written is classified. An unmarked copy of a hook is still
+# removed. Routed through rewrite_through_link so a symlink keeps its link.
+remove_bootstrap_block() {
+  local f="$1"
+  [[ -e "$f" ]] || return 0
+  local -a hooks=()
+  mapfile -t hooks < <(hyprland_hook_line; hyprland_hook_lines_superseded)
+  rewrite_through_link "$f" _remove_bootstrap_filter "${hooks[@]}"
+}
+
+_is_bootstrap_line() {
+  local line="$1" h
+  shift
+  for h in "$@"; do
+    [[ "$line" == "$h" ]] && return 0
+  done
+  return 1
+}
+
+_remove_bootstrap_filter() {
+  local input line held="" have_held=false out="" final_nl=true
+  local -a hooks=("$@")
+  # Sentinel byte: command substitution eats trailing newlines, and the file's
+  # EOF state is part of what has to be restored.
+  input="$(cat; printf X)"
+  input="${input%X}"
+  [[ -n "$input" ]] || return 0
+  [[ "${input: -1}" == $'\n' ]] || final_nl=false
+  while IFS= read -r line; do
+    if $have_held; then
+      have_held=false
+      # Marker immediately above one of our hooks: both lines are ours.
+      _is_bootstrap_line "$line" "${hooks[@]}" && continue
+      out+="$held"$'\n'
+    fi
+    if [[ "$line" == '-- omarchy-relaunch' ]]; then
+      held="$line"
+      have_held=true
+      continue
+    fi
+    # An unmarked copy of a hook is still ours, byte for byte.
+    _is_bootstrap_line "$line" "${hooks[@]}" && continue
+    out+="$line"$'\n'
+  done <<<"${input%$'\n'}"
+  $have_held && out+="$held"$'\n'
+  $final_nl || out="${out%$'\n'}"
+  printf '%s' "$out"
+  return 0
+}
+
+# Existing files keep their mode otherwise: atomic_write replaces through a
+# temp of its own, so nothing revisits an existing file's bits. One stat over
+# the directory and its contents, and a chmod only for what is wrong.
+tighten_config_dir() {
+  local dir mode path
+  dir="$(config_dir)"
+  [[ -d "$dir" ]] || return 0
+  while read -r mode path; do
+    [[ -n "$mode" ]] || continue
+    if [[ "$path" == "$dir" ]]; then
+      [[ "$mode" == 700 ]] || chmod 700 "$dir" 2>/dev/null || true
+    else
+      [[ "$mode" == 600 ]] || chmod 600 "$path" 2>/dev/null || true
+    fi
+  done < <(stat -c '%a %n' "$dir" "$dir"/* 2>/dev/null || true)
+}
+
+ensure_hooks() {
+  local lua bin hook
+  lua="$(hyprland_lua_path)"
+  hook="$(hyprland_hook_line)"
+  mkdir -p "$(dirname "$lua")"
+  ensure_config_dir
+  tighten_config_dir
+  ensure_overrides_file
+  remove_legacy_conf
+
+  # Order matters: install the loader (which holds the boot registration) and
+  # rules.lua for its dofile to read, then point hyprland.lua at the loader.
+  # `list` calls this without regenerating, so a bootstrap landing before the
+  # file it sources would source nothing.
+  ensure_file_with "$(rules_path)" '-- Generated by omarchy-relaunch. Do not edit by hand.
+'
+  ensure_loader
+
+  if [[ -f "$lua" ]] && ! grep -Fq "$hook" "$lua"; then
+    remove_bootstrap_block "$lua"
+    # Append exactly the bytes uninstall takes back, with no blank separator:
+    # a blank would survive removal and drift the file. Our last line carries
+    # the file's own EOF state, so a hyprland.lua whose last line had no
+    # trailing newline gets one added and the remover can restore it.
+    if [[ -s "$lua" && -n "$(tail -c1 "$lua")" ]]; then
+      { printf '\n%s\n' '-- omarchy-relaunch'; printf '%s' "$hook"; } >>"$lua"
+    else
+      printf '%s\n%s\n' '-- omarchy-relaunch' "$hook" >>"$lua"
+    fi
+  fi
+
+  # Plugin-manager installs put a copy of the engine in the plugin folder but
+  # nothing on PATH, so that copy -- and only that copy -- installs itself.
+  # install.sh writes the PATH copy itself.
+  bin="$(engine_bin_path)"
+  if [[ "$SELF" == "$(plugin_dir)/relaunch" ]]; then
+    mkdir -p "$(dirname "$bin")"
+    if [[ ! -e "$bin" ]] || ! cmp -s "$SELF" "$bin"; then
+      install -m 0755 "$SELF" "$bin"
+    fi
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+relaunch — engine for omarchy-relaunch
+
+  relaunch save [--json]                 capture running layout
+  relaunch generate [--json]             rebuild rules from config
+  relaunch list [--json]                 relaunch list + startup inventory
+  relaunch reload                        hyprctl reload
+  relaunch boot                          run by the owned loader module
+  relaunch last-boot [--json] [--open]
+  relaunch snapshot                      capture the layout now (diagnostic)
+  relaunch last-session [--json] [--diff]   compare that snapshot with the boot
+  relaunch import --class CLASS --workspace N
+  relaunch set-exec --class CLASS --exec CMD | --exec-stdin
+  relaunch drop --class CLASS            remove from relaunch list
+  relaunch boot-skip                     skip relaunch on the next boot
+  relaunch boot-disable                  disable until re-enabled
+  relaunch boot-enable
+  relaunch uninstall --yes               remove relaunch permanently
+
+config:  ~/.config/omarchy-relaunch/config.json
+rules:   ~/.config/omarchy-relaunch/rules.lua (loader: relaunch.lua)
+EOF
+}
+
+# --- Differential-oracle probes (read-only) -----------------------------------
+# Hidden `__*` commands expose engine internals so the Rust port can be diffed
+# against this engine (tests/differential.sh). They read state and print one
+# JSON value; they never write. They go away with the bash engine at cutover.
+PROBE_INDEX_MAPS=(
+  DESKTOP_EXEC_BY_CLASS DESKTOP_EXEC_BY_ID DESKTOP_EXEC_BY_NAME DESKTOP_CLASS_BY_EXEC
+  DESKTOP_PATH_BY_CLASS DESKTOP_PATH_BY_ID DESKTOP_PATH_BY_NAME DESKTOP_NAME_BY_LEAF
+  WEBAPP_LAUNCH_BY_IDENTITY WEBAPP_PATH_BY_IDENTITY WEBAPP_ID_BY_IDENTITY
+  WEBAPP_AMBIGUOUS WEBAPP_ID_CLAIMED
+)
+
+# Every index map, every key: {"MAP": {"key": "value", ...}, ...}, keys sorted.
+probe_index_dump() {
+  ensure_desktop_index
+  local map k
+  {
+    for map in "${PROBE_INDEX_MAPS[@]}"; do
+      declare -n _pm="$map"
+      for k in "${!_pm[@]}"; do
+        printf '%s\0%s\0%s\0' "$map" "$k" "${_pm[$k]}"
+      done
+      unset -n _pm
+    done
+  } | command jq -RsSc --args '
+      ($ARGS.positional | map({key: ., value: {}}) | from_entries) as $empty
+      | split("\u0000") | .[:-1]
+      | [range(0; length; 3) as $i | {m: .[$i], k: .[$i + 1], v: .[$i + 2]}]
+      | group_by(.m)
+      | map({key: .[0].m, value: (map({key: .k, value: .v}) | from_entries)})
+      | $empty + from_entries
+    ' "${PROBE_INDEX_MAPS[@]}"
+}
+
+probe_main() {
+  local probe="$1"
+  shift
+  case "$probe" in
+    __index-dump) probe_index_dump ;;
+    __resolve)
+      ensure_desktop_index
+      local line
+      line="$(resolve_launch "$1" "${2:-}")"
+      jq -nc --arg exec "${line%$'\t'*}" --arg source "${line##*$'\t'}" '{exec: $exec, source: $source}'
+      ;;
+    __identity) identity_from_pid "$1" | command jq -c . ;;
+    __label)
+      ensure_desktop_index
+      jq -nc --arg label "$(display_label_for "$1" "$2" "$3")" '{label: $label}'
+      ;;
+    __capture)
+      ensure_desktop_index
+      capture_resolve "$1" "$2" "${3:-}"
+      ;;
+    __trust)
+      if window_trusted "$1" "$2"; then printf '{"trusted":true}\n'; else printf '{"trusted":false}\n'; fi
+      ;;
+    __quote) jq -nc --arg exec "$(quote_argv "$@")" '{exec: $exec}' ;;
+    __split)
+      unquote_argv_arr "$1"
+      # printf with no arguments still prints its format once, so an empty
+      # argv must print nothing rather than one empty word.
+      { ((${#_UARGV[@]} == 0)) || printf '%s\0' "${_UARGV[@]}"; } | command jq -Rsc 'split("\u0000") | .[:-1]'
+      ;;
+    __split-ifs)
+      local -a _w=()
+      split_exec_words "$1" _w
+      { ((${#_w[@]} == 0)) || printf '%s\0' "${_w[@]}"; } | command jq -Rsc 'split("\u0000") | .[:-1]'
+      ;;
+    __nkey) jq -nc --arg key "$(normalize_desktop_key "$1")" '{key: $key}' ;;
+    __webapp-url)
+      local _u
+      if _u="$(webapp_url_from_exec "$1")"; then jq -nc --arg url "$_u" '{url: $url}'; else printf '{"url":null}\n'; fi
+      ;;
+    __webapp-ident)
+      local _i
+      if _i="$(chromium_identity_from_url "$1")"; then jq -nc --arg ident "$_i" '{ident: $ident}'; else printf '{"ident":null}\n'; fi
+      ;;
+    __leaf)
+      if leaf_for_exec_into "$1" 2>/dev/null; then jq -nc --arg leaf "$_LEAF" '{leaf: $leaf}'; else printf '{"leaf":null}\n'; fi
+      ;;
+    __lookup)
+      ensure_desktop_index
+      jq -nc --arg exec "$(desktop_exec_for_class "$1")" --arg launcher "$(desktop_launcher_for_class "$1")" \
+        --arg classForExec "$(desktop_class_for_exec "$1")" --arg nameForLeaf "$(desktop_name_for_leaf "$1")" \
+        '{exec: $exec, launcher: $launcher, classForExec: $classForExec, nameForLeaf: $nameForLeaf}'
+      ;;
+    *) die "unknown probe: $probe" ;;
+  esac
+}
+
+main() {
+  need_jq
+  if [[ $# -lt 1 ]]; then
+    usage
+    exit 1
+  fi
+  local cmd="$1"
+  shift
+  if has_json_flag "$@"; then
+    json_out=true
+  fi
+  case "$cmd" in
+    save) cmd_save ;;
+    propose) cmd_propose ;;
+    install-signed) cmd_install_signed ;;
+    generate) cmd_generate ;;
+    list) cmd_list ;;
+    reload) cmd_reload ;;
+    boot) cmd_boot ;;
+    last-boot) cmd_last_boot "$@" ;;
+    snapshot) cmd_snapshot ;;
+    last-session) cmd_last_session "$@" ;;
+    import) cmd_import "$@" ;;
+    set-exec) cmd_set_exec "$@" ;;
+    drop) cmd_drop "$@" ;;
+    boot-skip) cmd_boot_skip ;;
+    boot-disable) cmd_boot_disable ;;
+    boot-enable) cmd_boot_enable ;;
+    uninstall) cmd_uninstall "$@" ;;
+    ensure-hooks) ensure_hooks ;;
+    __*) probe_main "$cmd" "$@" ;;
+    -h | --help | help) usage ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

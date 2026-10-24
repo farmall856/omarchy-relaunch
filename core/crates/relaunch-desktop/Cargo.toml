@@ -1,0 +1,18 @@
+[package]
+name = "relaunch-desktop"
+description = "The one Desktop Entry parser shared by the Relaunch engine and login anchor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+freedesktop-desktop-entry.workspace = true
+relaunch-sys = { path = "../relaunch-sys" }
+
+[lints]
+workspace = true

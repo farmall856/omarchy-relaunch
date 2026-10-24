@@ -1,0 +1,20 @@
+[package]
+name = "relaunch-sys"
+description = "Safe OS identity primitives (uid, account name) shared by the Relaunch binaries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+xdg.workspace = true
+# `fs`: access(2) for the executable check.
+nix = { workspace = true, features = ["fs"] }
+getrandom.workspace = true
+
+[lints]
+workspace = true

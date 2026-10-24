@@ -1,0 +1,20 @@
+{"in": "xdg-terminal-exec --app-id=TUI.float -e bash -c \"dua i /\"", "out": "dua"}
+{"in": "foot -e herdr", "out": "herdr"}
+{"in": "foot --app-id herdr -e herdr", "out": "herdr"}
+{"in": "alacritty --working-directory /tmp -e btop", "out": "btop"}
+{"in": "kitty --title X htop", "out": "htop"}
+{"in": "ghostty -- nvim file", "out": "nvim"}
+{"in": "uwsm-app -- foot -e lazygit", "out": "lazygit"}
+{"in": "env A=1 B=2 kitty -e top", "out": "top"}
+{"in": "bash -c 'dua i /'", "out": "dua"}
+{"in": "sh -c ' leading'", "out": "sh"}
+{"in": "zsh -c", "out": "zsh"}
+{"in": "brave", "out": "brave"}
+{"in": "/usr/bin/brave --app=x", "out": "brave"}
+{"in": "omarchy-launch-terminal-x -e cmd", "out": "cmd"}
+{"in": "setsid -f foot -e x", "out": "-f"}
+{"in": "foot", "out": null}
+{"in": "foot -e", "out": null}
+{"in": "", "out": null}
+{"in": "wezterm-gui start -- vim", "out": "start"}
+{"in": "foot -D /tmp mc", "out": "mc"}

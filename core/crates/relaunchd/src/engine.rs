@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use relaunch_core::{
-    sign, to_config_file, Entry, SignedConfig, MAX_DOCUMENT_BYTES, SIGNED_SCHEMA_VERSION,
+    sign, to_config_file, SignedConfig, MAX_DOCUMENT_BYTES, SIGNED_SCHEMA_VERSION,
 };
 
 use crate::store::{Store, StoreError};
@@ -23,17 +23,46 @@ use crate::txn::{digest_of, new_txid, Clock, State, Transaction, DEFAULT_TTL_SEC
 /// and only it, can be cancelled on invalidation; `deadline` is the
 /// transaction's *remaining* lease, not a fresh timeout (reviewer M4/#2).
 pub struct AuthRequest<'a> {
+    /// What the human is asked to allow; each is its own polkit action.
+    pub action: AuthAction,
+    /// The caller's uid, from bus credentials.
     pub uid: u32,
+    /// The caller's unique bus name, the polkit subject.
     pub sender: &'a str,
+    /// The short `polkit.message`: the plain-language summary, bounded; never
+    /// exec text.
     pub message: &'a str,
+    /// Identifies this check, so exactly it can be cancelled.
     pub cancellation_id: &'a str,
+    /// The transaction's remaining lease.
     pub deadline: Duration,
 }
 
-/// Runs the trusted-path check (polkit AUTH_SELF). Returns Ok(true) only on a
+/// The privileged operations a credential check guards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthAction {
+    /// Commit a change that can make something new start at login.
+    Authorize,
+    /// Delete the caller's signing key and state.
+    Purge,
+}
+
+/// The `polkit.message` of a Purge check.
+pub const PURGE_MESSAGE: &str = "Relaunch: remove your login-launch signing key and saved list?";
+/// How long a Purge check may wait for the human; Purge has no transaction
+/// lease to inherit.
+pub const PURGE_DEADLINE: Duration = Duration::from_secs(120);
+
+/// Runs the trusted-path check (polkit `AUTH_SELF`). Returns Ok(true) only on a
 /// real credential success for the caller's uid.
 pub trait Authenticator {
-    fn authorize(&self, req: AuthRequest) -> Result<bool, String>;
+    /// Run the check.
+    ///
+    /// # Errors
+    ///
+    /// A transport failure, timeout, or cancellation; never a credential
+    /// denial, which is `Ok(false)`.
+    fn authorize(&self, req: AuthRequest<'_>) -> Result<bool, String>;
 }
 
 /// Hook fired when a uid's pending transaction is invalidated, carrying the
@@ -41,27 +70,36 @@ pub trait Authenticator {
 /// the transport can cancel exactly that polkit check.
 pub type InvalidateHook = Arc<dyn Fn(u32, Option<String>) + Send + Sync>;
 
-fn new_check_id() -> String {
-    let mut b = [0u8; 16];
-    let _ = getrandom::fill(&mut b);
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
+/// Why an engine operation was refused. Nothing is signed on any of these.
 #[derive(Debug)]
 pub enum EngineError {
+    /// A transaction for this uid is already open or authorizing.
     Busy,
+    /// The uid has no committed key.
     NotEnrolled,
+    /// The credential check failed.
     AuthDenied,
+    /// The credential check could not run (or entropy was unavailable).
     AuthError(String),
+    /// The lease expired, or the base generation or enrollment moved.
     Stale,
+    /// No open transaction matches the txid.
     NoSuchTransaction,
+    /// Authorize came from a different connection than Prepare.
     WrongSender,
+    /// The resulting document failed structural validation.
     Validation(relaunch_core::ValidationError),
+    /// The review diff exceeded a D7 cap.
     Diff(crate::diff::DiffError),
+    /// The key store failed.
     Store(StoreError),
+    /// The supplied base failed verification.
     Verify(String),
+    /// A reduce op named a class not in the verified base.
     BadOp(String),
+    /// The generation counter cannot advance.
     GenExhausted,
+    /// The resulting document exceeds the size limit (its size).
     DocumentTooLarge(usize),
 }
 
@@ -69,7 +107,7 @@ pub enum EngineError {
 /// root service (reviewer I12). The guarded state is a small `Option` whose
 /// consistency the post-challenge rechecks re-establish, so continuing is safe.
 fn plock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|p| p.into_inner())
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl From<StoreError> for EngineError {
@@ -88,21 +126,30 @@ impl From<crate::diff::DiffError> for EngineError {
     }
 }
 
-pub struct Proposal {
-    pub stagger_seconds: u32,
-    pub entries: Vec<Entry>,
-}
+/// A client's proposed launch set, before identity binding.
+pub use relaunch_core::Proposal;
 
+/// A reducing operation on a verified base.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReduceOp {
+    /// Set the class's entry to disabled.
     Disable(String),
+    /// Remove the class's entry.
     Drop(String),
 }
 
+/// What Prepare returns to the preparing connection only (§4).
 pub struct PrepareOk {
     /// None when the diff is empty (nothing to authorize).
     pub txid: Option<[u8; 16]>,
+    /// The pairing code; `None` when the diff is empty. Carried to the
+    /// preparing connection only; no review surface shows it.
     pub code: Option<String>,
+    /// What the change means, in plain language (the review's headline).
+    pub summary: String,
+    /// The escaped review diff (the review's Details).
     pub rendered_diff: String,
+    /// How many entries changed.
     pub changed: usize,
 }
 
@@ -111,6 +158,7 @@ struct Cell {
     pending: Option<Transaction>,
 }
 
+/// The single serialization point for every per-uid operation (spec §5.2).
 pub struct Engine<C: Clock, A: Authenticator> {
     store: Store,
     clock: C,
@@ -125,6 +173,7 @@ pub struct Engine<C: Clock, A: Authenticator> {
 }
 
 impl<C: Clock, A: Authenticator> Engine<C, A> {
+    /// An engine over `store` with the default lease and document limit.
     pub fn new(store: Store, clock: C, auth: A) -> Self {
         Engine {
             store,
@@ -137,6 +186,8 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         }
     }
 
+    /// Use a different transaction lease length.
+    #[must_use]
     pub fn with_ttl(mut self, ttl_secs: u64) -> Self {
         self.ttl_secs = ttl_secs;
         self
@@ -144,11 +195,14 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
 
     /// Test seam: lower the resulting-document size limit so the rejection path
     /// can be exercised without building a multi-megabyte proposal.
+    #[must_use]
     pub fn with_doc_limit(mut self, limit: usize) -> Self {
         self.doc_limit = limit;
         self
     }
 
+    /// Run `hook` when a pending transaction is invalidated.
+    #[must_use]
     pub fn with_invalidate_hook(mut self, hook: InvalidateHook) -> Self {
         self.on_invalidate = Some(hook);
         self
@@ -188,7 +242,8 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
             uid,
             user: user.to_string(),
             gen: 0,
-            stagger_seconds: 0,
+            pre_launch_ms: 0,
+            post_launch_ms: 0,
             entries: vec![],
         };
         let Some(json) = base_json else { return empty };
@@ -205,26 +260,21 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
     }
 
     fn build_proposal(
-        &self,
         uid: u32,
         user: &str,
         gen: u64,
         p: Proposal,
     ) -> Result<SignedConfig, EngineError> {
-        let mut cfg = SignedConfig {
-            v: SIGNED_SCHEMA_VERSION,
-            uid,
-            user: user.to_string(),
-            gen,
-            stagger_seconds: p.stagger_seconds,
-            entries: p.entries,
-        };
-        cfg.sort_entries();
-        cfg.validate()?;
-        Ok(cfg)
+        Ok(SignedConfig::from_proposal(uid, user, gen, p)?)
     }
 
     /// Freeze a transaction for `proposal` relative to the verified base.
+    ///
+    /// # Errors
+    ///
+    /// An [`EngineError`] if a transaction is already open, the proposal or
+    /// resulting document is invalid or too large, the diff exceeds a cap, or the key
+    /// store fails.
     pub fn prepare(
         &self,
         uid: u32,
@@ -248,7 +298,7 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         let (base_gen, enrollment_id, _pk) = self.head(uid)?;
         let next_gen = base_gen.checked_add(1).ok_or(EngineError::GenExhausted)?;
         let base = self.verified_base(uid, user, base_json);
-        let cfg = self.build_proposal(uid, user, next_gen, proposal)?;
+        let cfg = Self::build_proposal(uid, user, next_gen, proposal)?;
         let digest = digest_of(&cfg);
         let digest_short = hex::encode(&digest[..4]);
         let diff = crate::diff::compute(&base, &cfg, &digest_short)?;
@@ -256,6 +306,7 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
             return Ok(PrepareOk {
                 txid: None,
                 code: None,
+                summary: diff.summary,
                 rendered_diff: diff.rendered,
                 changed: 0,
             });
@@ -271,7 +322,7 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
             base_gen,
             digest,
             proposal: cfg,
-            changed: diff.changed,
+            prompt: diff.prompt,
             created_secs: self.clock.now_secs(),
             ttl_secs: self.ttl_secs,
             state: State::Prepared,
@@ -282,6 +333,7 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         Ok(PrepareOk {
             txid: Some(txid),
             code: Some(code),
+            summary: diff.summary,
             rendered_diff: diff.rendered,
             changed: diff.changed,
         })
@@ -289,6 +341,12 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
 
     /// Authorize and commit a prepared transaction. The lock is released across
     /// the challenge; commit re-validates everything.
+    ///
+    /// # Errors
+    ///
+    /// An [`EngineError`] if no matching live transaction exists, the sender
+    /// differs, the check is denied or fails, the state moved meanwhile, or the commit
+    /// fails.
     pub fn authorize(
         &self,
         uid: u32,
@@ -301,7 +359,9 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         // cancellation id is recorded in the txn BEFORE the lock is released, so
         // any invalidation that arrives while the challenge runs can cancel
         // exactly this check (reviewer M4/#2).
-        let check_id = new_check_id();
+        // Same entropy source as the txid; a failure refuses the Authorize rather
+        // than minting a predictable (all-zero) id that could collide.
+        let check_id = hex::encode(new_txid().map_err(EngineError::AuthError)?);
         let (message, deadline) = {
             let mut guard = plock(&cell);
             let now = self.clock.now_secs();
@@ -328,18 +388,12 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
             // full timeout, so a stuck agent cannot outlive the slot.
             let elapsed = now.saturating_sub(t.created_secs);
             let remaining = t.ttl_secs.saturating_sub(elapsed).max(1);
-            (
-                format!(
-                    "Relaunch: {} login-start change(s). Cancel unless your panel shows code {}.",
-                    t.changed,
-                    t.code()
-                ),
-                Duration::from_secs(remaining),
-            )
+            (t.prompt.clone(), Duration::from_secs(remaining))
         };
 
         // Phase 2: the human challenge, WITHOUT holding the lock.
         let req = AuthRequest {
+            action: AuthAction::Authorize,
             uid,
             sender,
             message: &message,
@@ -350,11 +404,11 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         // do NOT fire a cancellation (the id is retired, cancelling it would
         // only leak into the pre-dispatch set — reviewer #3).
         let ok = self.auth.authorize(req).map_err(|e| {
-            self.invalidate(&cell, txid);
+            Self::invalidate(&cell, txid);
             EngineError::AuthError(e)
         })?;
         if !ok {
-            self.invalidate(&cell, txid);
+            Self::invalidate(&cell, txid);
             return Err(EngineError::AuthDenied);
         }
 
@@ -383,8 +437,13 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         self.commit(uid, &txn.user, new_gen, txn.proposal)
     }
 
-    /// Reduce: disable/drop only, on a verified base. No prompt (allow_any).
+    /// Reduce: disable/drop only, on a verified base. No prompt (`allow_any`).
     /// Invalidates any pending transaction first.
+    ///
+    /// # Errors
+    ///
+    /// An [`EngineError`] if the base does not verify, an op names an unknown
+    /// class, or the commit fails.
     pub fn reduce(
         &self,
         uid: u32,
@@ -432,7 +491,8 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
                 uid,
                 user: user.to_string(),
                 gen: new_gen,
-                stagger_seconds: base.stagger_seconds,
+                pre_launch_ms: base.pre_launch_ms,
+                post_launch_ms: base.post_launch_ms,
                 entries,
             };
             self.commit(uid, user, new_gen, cfg)
@@ -442,11 +502,31 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         result
     }
 
-    /// Purge: invalidate any pending transaction, then durably delete the uid's
-    /// key and state. The per-uid guard is held THROUGH `Store::purge` (reviewer
-    /// #4), so a same-uid Prepare/commit cannot interleave with the filesystem
-    /// mutation and leave a pending txn against a just-removed enrollment.
-    pub fn purge(&self, uid: u32) -> Result<(), EngineError> {
+    /// Purge: after the caller authenticates as themselves (its own polkit
+    /// action, always prompting: deleting the key is destructive), invalidate
+    /// any pending transaction, then durably delete the uid's key and state. A
+    /// denied or failed check touches nothing. The per-uid guard is held
+    /// THROUGH `Store::purge` (reviewer #4), so a same-uid Prepare/commit cannot
+    /// interleave with the filesystem mutation and leave a pending txn against
+    /// a just-removed enrollment.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::AuthDenied`] / [`EngineError::AuthError`] if the check
+    /// refuses or cannot run; a store failure while deleting the uid's state.
+    pub fn purge(&self, uid: u32, sender: &str) -> Result<(), EngineError> {
+        let check_id = hex::encode(new_txid().map_err(EngineError::AuthError)?);
+        let req = AuthRequest {
+            action: AuthAction::Purge,
+            uid,
+            sender,
+            message: PURGE_MESSAGE,
+            cancellation_id: &check_id,
+            deadline: PURGE_DEADLINE,
+        };
+        if !self.auth.authorize(req).map_err(EngineError::AuthError)? {
+            return Err(EngineError::AuthDenied);
+        }
         let cell = self.cell(uid);
         let (result, cancelled) = {
             let mut guard = plock(&cell);
@@ -482,7 +562,7 @@ impl<C: Clock, A: Authenticator> Engine<C, A> {
         })
     }
 
-    fn invalidate(&self, cell: &Arc<Mutex<Cell>>, txid: &[u8; 16]) {
+    fn invalidate(cell: &Arc<Mutex<Cell>>, txid: &[u8; 16]) {
         let mut guard = plock(cell);
         if let Some(t) = &guard.pending {
             if &t.txid == txid {

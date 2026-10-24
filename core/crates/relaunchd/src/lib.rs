@@ -9,16 +9,26 @@
 //! lookup from bus credentials, and the polkit-backed `Authenticator` are a
 //! thin adapter added in a later chunk. Keeping the security decisions here, off
 //! the bus, is what makes them testable in isolation.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        reason = "test code: a failed unwrap/index is a failed assertion"
+    )
+)]
 
 pub mod diff;
 pub mod engine;
 pub mod polkit;
 pub mod store;
 pub mod txn;
-pub mod users;
 
 pub use engine::{
-    AuthRequest, Authenticator, Engine, EngineError, InvalidateHook, PrepareOk, Proposal, ReduceOp,
+    AuthAction, AuthRequest, Authenticator, Engine, EngineError, InvalidateHook, PrepareOk,
+    Proposal, ReduceOp,
 };
 pub use polkit::{PolkitAuthenticator, PolkitCanceller};
 pub use store::{enrollment_id_for, PublicState, Store, StoreError};

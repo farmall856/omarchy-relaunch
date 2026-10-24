@@ -1,0 +1,11 @@
+{"in": "omarchy-launch-webapp https://maps.example.com/app", "out": "https://maps.example.com/app"}
+{"in": "omarchy-launch-webapp --flag https://x.example.com/ %U", "out": "https://x.example.com/"}
+{"in": "uwsm-app -- omarchy-launch-webapp https://y.example.com/p", "out": "https://y.example.com/p"}
+{"in": "env FOO=bar omarchy-launch-webapp https://z.example.com/", "out": "https://z.example.com/"}
+{"in": "/usr/bin/omarchy-launch-webapp 'https://q.example.com/a b'", "out": "https://q.example.com/a b"}
+{"in": "setsid omarchy-launch-webapp %u", "out": null}
+{"in": "omarchy-launch-webapp", "out": null}
+{"in": "brave --app=https://not-a-webapp-line.example.com/", "out": null}
+{"in": "omarchy-launch-webapp-extra https://n.example.com/", "out": null}
+{"in": "nice -n 5 omarchy-launch-webapp https://w.example.com/", "out": null}
+{"in": "VAR=1 --x omarchy-launch-webapp https://v.example.com/", "out": null}

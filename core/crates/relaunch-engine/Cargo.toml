@@ -1,0 +1,47 @@
+[package]
+name = "relaunch-engine"
+description = "The Relaunch engine: capture, resolution, proposals and the panel protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "relaunch_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "relaunch"
+path = "src/main.rs"
+
+[features]
+# Test-only overrides (fixture data dirs, hyprctl stub, /proc fixtures, the
+# anchor binary path). Compiled OUT of the release binary (D-P3): production
+# reads the real system. RELAUNCH_CONFIG_DIR is not a fixture: it only redirects
+# the user's own files and stays available in production.
+fixtures = []
+
+[dependencies]
+lexopt.workspace = true
+xdg.workspace = true
+relaunch-core = { path = "../relaunch-core" }
+relaunch-sys = { path = "../relaunch-sys" }
+relaunch-desktop = { path = "../relaunch-desktop" }
+relaunch-shell = { path = "../relaunch-shell" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+# The propose contract test relays the engine's output through the client's own
+# frame parser, as the panel does.
+relaunchctl = { path = "../relaunchctl" }
+
+[lints]
+workspace = true

@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 # Fixture tests for the bash+jq relaunch engine.
 set -euo pipefail
+# Never the installed client: a suite names its own stand-in.
+unset RELAUNCH_RELAUNCHCTL
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RELAUNCH="$ROOT/relaunch"
+# The engine under test. RELAUNCH_ENGINE selects another build (the Rust port);
+# the default is the bash engine, which stays the differential oracle until the
+# port's cutover. Sections that source bash internals run only against it.
+RELAUNCH="${RELAUNCH_ENGINE:-$ROOT/tests/oracle/relaunch}"
+# Absolute: some sections run from another directory.
+RELAUNCH="$(realpath "$RELAUNCH")"
+ENGINE_IS_BASH=false
+[[ "$(head -c 64 "$RELAUNCH" 2>/dev/null | tr -d '\0')" == '#!'*bash* ]] && ENGINE_IS_BASH=true
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -62,11 +71,20 @@ export PREFIX="$WORKDIR"
 # sandboxed above, so no test can name -- or write to -- the real ~/.local/bin.
 CANONICAL_ENGINE="$PREFIX/bin/relaunch"
 export HYPRCTL="$HYPRCTL_STUB"
+export FAKE_CLIENTS="$WORKDIR/clients.json"
+# The Rust engine wires boot only through an installed anchor; a fixtures
+# build trusts our own uid in place of root. The bash engine ignores these.
+mkdir -p "$WORKDIR/anchor"
+export RELAUNCH_ANCHOR_LUA="$WORKDIR/anchor/anchor.lua" RELAUNCH_ANCHOR_BIN="$WORKDIR/anchor/relaunch-anchor"
+printf -- '-- anchor\n' >"$RELAUNCH_ANCHOR_LUA"; chmod 0644 "$RELAUNCH_ANCHOR_LUA"
+printf '#!/bin/sh\n' >"$RELAUNCH_ANCHOR_BIN"; chmod 0755 "$RELAUNCH_ANCHOR_BIN"
 mkdir -p "$RELAUNCH_CONFIG_DIR"
 : >"$RELAUNCH_AUTOSTART"
 : >"$RELAUNCH_HYPRLAND_LUA"
 
 # --- generate / snippet (rules only; launches are relaunch boot) ---
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (generate, save, legacy import/set-exec/drop).
+# The Rust engine's coverage of what this section checks: relaunch-anchor emit tests (pins, escaping, tiled/float), tests/hooks-test.sh (loader, legacy hyprland.conf), differential `suite:` cases pwa + resolve:/lookup:/index-dump: (symlinked, user-dir-first), propose::tests::sol8_*, tests/edit_contract.rs.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {
   "staggerSeconds": 1,
@@ -144,7 +162,6 @@ StartupWMClass=pct-app
 Type=Application
 EOF
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg"
-export FAKE_CLIENTS="$WORKDIR/clients.json"
 cat >"$FAKE_CLIENTS" <<'EOF'
 [
   {"class":"libreoffice-calc","initialClass":"libreoffice-calc","pid":71,"floating":false,"workspace":{"id":7}},
@@ -312,10 +329,14 @@ jq -e '.["libreoffice-calc"] == "localc --norestore"' "$RELAUNCH_CONFIG_DIR/over
 jq -e '.["libreoffice-calc"]' "$RELAUNCH_CONFIG_DIR/overrides.json" >/dev/null \
   && fail "drop must remove the class from overrides.json"
 
+fi
+
 # --- overrides.json is never rewritten from a file we could not parse (#10) ---
 # The fallback turned a malformed file into {}, and the very next set-exec
 # wrote that empty object back: one bad byte discarded every override the user
 # had. config.json already fails loudly here; so must this.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save, legacy import/set-exec/drop).
+# The Rust engine's coverage of what this section checks: differential list-bad-overrides, hooks-test.sh (badover), edit_contract::edits_never_write_a_file.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[
   {"class":"keepme","workspace":1,"exec":"true","execSource":"guess","enabled":true}
@@ -392,10 +413,14 @@ cmp -s "$WORKDIR/overrides.stillbad" "$RELAUNCH_CONFIG_DIR/overrides.json" \
   || fail "ensure-hooks must not touch a malformed overrides.json"
 printf '{}\n' >"$RELAUNCH_CONFIG_DIR/overrides.json"
 
+fi
+
 # --- executable validation parses quoting the way bash -c will (#3) ---
 # Boot runs the exec through `bash -c`, so cutting at the first space called a
 # quoted path missing: the panel warned about a command that launches fine and
 # boot skipped it.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (legacy boot).
+# The Rust engine's coverage of what this section checks: relaunch-shell execcheck tests, anchor boot_and_the_panel_judge_a_command_alike, report not_found record.
 mkdir -p "$WORKDIR/My App"
 printf '#!/bin/sh\nexit 0\n' >"$WORKDIR/My App/app"
 chmod +x "$WORKDIR/My App/app"
@@ -432,11 +457,15 @@ jq -e '
 ' "$RELAUNCH_CONFIG_DIR/last-boot.json" >/dev/null \
   || fail "boot must launch a quoted path and still skip a missing one: $(jq -c '[.launches[] | {class, status}]' "$RELAUNCH_CONFIG_DIR/last-boot.json")"
 
+fi
+
 # --- a launcher command keeps the application name, whoever wrote it ---
 # `gio launch <file>.desktop` names the app inside the file. Resolving it was
 # gated on execSource == desktop-file, so the moment a user edited the launch
 # command by hand -- which changes the SOURCE, not the command -- the label
 # fell through to the leaf and Signal displayed as "gio".
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (legacy set-exec).
+# The Rust engine's coverage of what this section checks: edit_contract::set_exec_reads_the_command_from_stdin_and_shows_it_as_typed (label kept, D8).
 mkdir -p "$WORKDIR/xdg-label/applications"
 cat >"$WORKDIR/xdg-label/applications/labelled.desktop" <<'EOF'
 [Desktop Entry]
@@ -455,12 +484,16 @@ jq -e '[.entries[] | select(.class == "labelme") | .label] == ["Properly Named A
 jq -e '[.entries[] | select(.class == "labelme") | .execSource] == ["overrides-table"]'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "set-exec must still record the source as overrides-table"
 unset RELAUNCH_DATA_DIRS
 
+fi
+
 # --- the command token is the program, not the prefix (#3) ---
 # One helper decides what will actually run, and BOTH the panel row and the
 # boot preflight call it. They disagreed before: the row warned about
 # `FOO=bar /bin/true` while boot saw the `=`, skipped its own check and
 # launched it. And judging the wrapper reported `env FOO=bar /nope` as fine,
 # which is worse than a warning -- it says a missing command is present.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (legacy boot, save).
+# The Rust engine's coverage of what this section checks: execcheck::program tests, anchor verdict test, differential capture:herdr + suite:hosted.
 mkdir -p "$WORKDIR/relbin"
 printf '#!/bin/sh\nexit 0\n' >"$WORKDIR/relbin/relok"
 chmod +x "$WORKDIR/relbin/relok"
@@ -561,7 +594,11 @@ EOF
 ' >/dev/null || fail "parent terminal --app-id must supply the launch command"
 unset RELAUNCH_CMDLINE_DIR
 
+fi
+
 # --- capture merge ---
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save).
+# The Rust engine's coverage of what this section checks: propose::tests (enabled/label/float kept, the_lowest_workspace_window_of_a_class_wins, special workspace).
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {
   "staggerSeconds": 0,
@@ -616,7 +653,11 @@ echo "$(cat "$RELAUNCH_CONFIG_DIR/config.json")" | jq -e '
   .entries | length == 1 and .[0].class == "foot" and .[0].workspace == 1
 ' >/dev/null || fail "first-seen lowest workspace"
 
+fi
+
 # --- startup inventory is READ-ONLY / import / drop ---
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (legacy import/drop).
+# The Rust engine's coverage of what this section checks: differential list/list-text startup rows, edit_contract (import, drop).
 cat >"$RELAUNCH_AUTOSTART" <<'EOF'
 -- Extra autostart processes.
 o.launch_on_start("sunsetr")
@@ -673,7 +714,11 @@ done
 # The whole point: none of that touched the user'"'"'s file.
 diff -q "$WORKDIR/autostart.readonly-before" "$RELAUNCH_AUTOSTART" >/dev/null   || fail "the startup inventory is read-only, but autostart.lua changed"
 
+fi
+
 # --- boot skip / disable, and hidden self ---
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (legacy boot, save).
+# The Rust engine's coverage of what this section checks: anchor boot::tests (flags, skip-once consumed, self never launched), hooks-test.sh flags, differential DSK + reload-text + identity:/capture:.
 "$RELAUNCH" import --class proton-mail --workspace 3 >/dev/null
 "$RELAUNCH" boot-skip
 [[ -f "$RELAUNCH_CONFIG_DIR/skip-once" ]] || fail "skip-once file"
@@ -771,11 +816,15 @@ EOF
 ' >/dev/null || fail "explicit --app-id must keep trailing hosted args"
 unset RELAUNCH_CMDLINE_DIR
 
+fi
+
 # --- hosted argv keeps argument boundaries (Omarchy TUI .desktop shape) ---
 # Disk Usage runs as: foot --app-id=TUI.float -e bash -c 'dua i /'
 # "dua i /" is ONE argv element. A "${inner[*]}" join loses that, and boot's
 # bash -c re-split then runs `dua` with no arguments: it prints and exits, so
 # the window is gone before the workspace pin applies.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save).
+# The Rust engine's coverage of what this section checks: differential `suite:` cases hosted (exec round-trips to 5 words).
 export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"
 mkdir -p "$RELAUNCH_CMDLINE_DIR"
 printf 'foot\0--app-id=TUI.float\0-e\0bash\0-c\0dua i /\0' >"$RELAUNCH_CMDLINE_DIR/4400"
@@ -795,12 +844,16 @@ eval "set -- ${saved#xdg-terminal-exec }"
 [[ "$2" == "-e" ]] || fail "hosted TUI must keep -e, got $2"
 [[ "$5" == "dua i /" ]] || fail "hosted TUI must keep 'dua i /' as one argument, got [$5]"
 
+fi
+
 # --- a stale terminal-source entry re-heals on recapture ---
 # Entries written by an older engine carry execSource "terminal" with a
 # flattened, -e-less command. That is not a fallback source, so the old heal
 # rule skipped it and the broken value was sticky forever. Terminal identity
 # is re-derived from live /proc on every save, and the user's own text lives
 # in overrides.json, so a differing resolution must win.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save, legacy set-exec/drop).
+# The Rust engine's coverage of what this section checks: propose::tests::sol8_recapture_keeps_enabled_and_disabled_state (exec refreshed), sol8_an_overrides_table_command_is_never_replaced_by_capture.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[
   {"class":"TUI.float","workspace":4,"exec":"xdg-terminal-exec --app-id=TUI.float bash -c dua i /","execSource":"terminal","enabled":true,"float":true}
@@ -843,11 +896,15 @@ EOF
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
+fi
+
 # --- float/tile is captured and pinned in both directions ---
 # Omarchy tags TUI.float +floating-window in default/hypr/apps/system.lua, so
 # a pin that stays silent about float lets that tag win and a window that was
 # tiled comes back floating at 875x600. The generated rule has to say which
 # one it wants. relaunch.lua is loaded after the Omarchy defaults, so it wins.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save, generate, legacy import).
+# The Rust engine's coverage of what this section checks: propose::tests::sol8_float_is_observed_and_kept_when_not_reported, anchor emit_tiled_entry_removes_floating_tag_first.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[]}
 EOF
@@ -917,8 +974,12 @@ assert_not_contains "$lua" 'legacy)$" }, { workspace = "2 silent", tile'
 "$RELAUNCH" import --class legacy2 --workspace 5 --json >/dev/null
 jq -e '[.entries[] | select(.class == "legacy2") | has("float")] == [false]'   "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null   || fail "import has no live window, so float must stay unknown"
 
+fi
+
 # --- display labels: stored at save time, one tier at a time ---
 # class stays the identity and the only lookup key; label is display only.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save, legacy import/drop).
+# The Rust engine's coverage of what this section checks: differential label-* (tiers 1-4), propose::tests::sol8_labels_*, edit_contract import label.
 LBL="$WORKDIR/lbl"
 mkdir -p "$LBL/applications"
 cat >"$LBL/applications/brave-browser.desktop" <<'EOF'
@@ -1028,6 +1089,8 @@ jq -e '[.entries[] | select(.class == "brave-browser") | .label] == ["Brave Web 
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
+fi
+
 # --- manual session snapshot (diagnostic; user-invoked; changes nothing) ---
 export FAKE_MONITORS="$WORKDIR/monitors.json"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
@@ -1091,6 +1154,8 @@ unset FAKE_MONITORS
 # /proc. Boot runs the stored string through bash -c, so a "${argv[*]}"
 # join lets spaces, quotes, semicolons, ampersands, globs and $(...) change
 # meaning at launch.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save).
+# The Rust engine's coverage of what this section checks: differential `suite:` cases cmdline (6 arguments, metacharacters literal).
 export RELAUNCH_DATA_DIRS="$WORKDIR/xdg-empty"
 mkdir -p "$WORKDIR/xdg-empty/applications"
 export RELAUNCH_CMDLINE_DIR="$WORKDIR/argvcmd"
@@ -1129,10 +1194,14 @@ mapfile -t got < <(PATH="$WORKDIR/argvstub:$PATH" bash -c "$saved" 2>/dev/null)
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
+fi
+
 # --- Omarchy web-app windows resolve to their launchers (github issue #11) ---
 # Chromium encodes an --app=URL class as brave-<host>_<path with / as _>-Default.
 # No StartupWMClass, desktop-file id or Name can match that, so resolution used
 # to fall through to the generic browser cmdline and boot started plain Brave.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save).
+# The Rust engine's coverage of what this section checks: differential `suite:` cases wa (+ label).
 WA_USER="$WORKDIR/wa-user/applications"
 WA_SYS="$WORKDIR/wa-sys/applications"
 mkdir -p "$WA_USER" "$WA_SYS"
@@ -1234,11 +1303,15 @@ jq -e '[.entries[] | select(.class == "brave-maps.google.com__-Default") | .labe
   [.rows[] | select(.class == "brave-maps.google.com__-Default") | .execSource] == ["desktop-file"]
 ' >/dev/null || fail "list must report the stored source without resolving"
 
+fi
+
 # --- two windows sharing one pid resolve independently ---
 # Chromium serves every web app from one process, so a Google Maps window and
 # the ordinary browser window report the SAME pid. Patches used to be keyed by
 # pid, so from_entries collapsed them and both windows took whichever
 # resolution ran last -- Maps resolved to brave-browser.desktop.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save).
+# The Rust engine's coverage of what this section checks: differential `suite:` cases wa, differential capture:/resolve: (pid 107 shared).
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[]}
 EOF
@@ -1256,7 +1329,11 @@ out="$("$RELAUNCH" save --json)"
 jq -e '.entries | length == 2' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null \
   || fail "two windows sharing a pid must produce two entries"
 
+fi
+
 # --- unsupported class variants stay unresolved (no guessing) ---
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save).
+# The Rust engine's coverage of what this section checks: differential `suite:` cases wa (Profile_2, chromium).
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[]}
 EOF
@@ -1272,7 +1349,11 @@ out="$("$RELAUNCH" save --json)"
 [[ "$(wsrc 'chromium-maps.google.com__-Default')" == "cmdline" ]] \
   || fail "an unsupported browser prefix must stay unresolved"
 
+fi
+
 # --- ambiguity: two surviving distinct ids, one identity ---
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save).
+# The Rust engine's coverage of what this section checks: differential `suite:` cases collide, differential lookup:webapp:ambiguous.
 cat >"$WA_USER/Collide App.desktop" <<'EOF'
 [Desktop Entry]
 Name=Collide App
@@ -1291,8 +1372,12 @@ out="$("$RELAUNCH" save --json)"
   || fail "an ambiguous identity must not resolve, got $(wsrc 'brave-example.com__foo_bar-Default')"
 rm -f "$WA_USER/Collide App.desktop"
 
+fi
+
 # --- XDG desktop-ID masking, web-app index only ---
 # Same id in a lower-priority dir is masked by the user copy.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save).
+# The Rust engine's coverage of what this section checks: differential `suite:` cases mask-sys, mask-hidden, mask-other.
 cat >"$WA_SYS/Google Maps.desktop" <<'EOF'
 [Desktop Entry]
 Name=Google Maps
@@ -1340,7 +1425,11 @@ out="$("$RELAUNCH" save --json)"
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
+fi
+
 # --- PR #12 review fixes, one block per finding ---
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save, legacy import, snapshot-hook).
+# The Rust engine's coverage of what this section checks: differential `suite:` cases appid, gurl, gurl-collide, case, nested; edit_contract import hosted; differential last-session-diff(-text), list.
 
 # (1) A synthesized --app-id must be shell-quoted like the inner argv: boot
 # runs the whole string through bash -c, so a space would split it and a
@@ -1600,10 +1689,14 @@ echo "$report" | jq -e '[.classes[] | select(.class == "moved") | .missing] == [
   || fail "the human diff must show a MOVED row"
 unset FAKE_MONITORS
 
+fi
+
 # --- RFC 3986 5.2.4 and GURL edge cases (PR #12 re-review) ---
 # A segment-stack approximation drops empty segments and the trailing slash a
 # final "." or ".." produces. Those are different Chromium identities, so each
 # case gets a launcher and a window and must resolve to its own file.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save).
+# The Rust engine's coverage of what this section checks: differential `suite:` cases rfc, rfc-schemeless; unit goldens webapp_ident.jsonl.
 RFC="$WORKDIR/rfc/applications"
 mkdir -p "$RFC"
 mkrfc() { printf '%s\n' '[Desktop Entry]' "Name=$1" "Exec=omarchy-launch-webapp $2" 'Type=Application' >"$RFC/$1.desktop"; }
@@ -1661,7 +1754,11 @@ rm -f "$RFC/Schemeless.desktop"
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
+fi
+
 # --- an overrides-table entry keeps its exec and its label ---
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save).
+# The Rust engine's coverage of what this section checks: propose::tests::sol8_an_overrides_table_command_is_never_replaced_by_capture.
 export RELAUNCH_CMDLINE_DIR="$WORKDIR/cmdlines"
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[
@@ -1678,6 +1775,8 @@ EOF
     and .label == "My Custom Herdr"
 ' >/dev/null || fail "an overrides-table entry must keep exec and label"
 unset RELAUNCH_CMDLINE_DIR
+
+fi
 
 # --- a config written by an older version upgrades cleanly ---
 # `ignored` and `startupKeys` were written by versions that edited
@@ -1712,6 +1811,11 @@ echo "$legacy" | jq -e '
 echo "$legacy" | jq -e '
   [.rows[] | select(.kind == "startup" and .exec == "brave")] | length == 1
 ' >/dev/null || fail "a legacy ignored line must still be listed"
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (generate, legacy boot, save).
+# The Rust engine's coverage: a legacy config is shown (above) but never launched
+# or rewritten -- the anchor boots only a verified signed document
+# (boot::tests::an_unverified_document_launches_nothing), and no Rust command
+# writes config.json except install-signed (DRO, DED).
 "$RELAUNCH" generate >/dev/null || fail "a legacy config must generate cleanly"
 assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'class = "^(brave-browser)$"'
 assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'startupKeys'
@@ -1729,8 +1833,10 @@ jq -e '
   and ([.entries[] | has("startupKeys")] | any | not)
 ' "$RELAUNCH_CONFIG_DIR/config.json" >/dev/null \
   || fail "a Save must drop the legacy autostart-editing fields"
+fi
 unset RELAUNCH_DATA_DIRS
 
+if $ENGINE_IS_BASH; then  # bash internals; Rust: nkey unit tests (issue #13 vectors)
 # --- normalize_desktop_key derivation is pinned (github issue #13) ---
 # The builtin rewrite replaced `printf | tr | tr`. Key derivation decides
 # which .desktop file a window class resolves to, so a future rewrite must
@@ -1768,10 +1874,13 @@ keycheck "Ünïcödé-näme"    "Ünïcödé-Näme"
   keycheck "Äpp" "Äpp"
   keycheck "foo" "Foo" ) || fail "key derivation must not vary with locale"
 
+fi
 # --- boot placement has three outcomes (github issue #15) ---
 # A single immediate sample cannot tell a wrong workspace from a window that
 # has not mapped yet. LibreOffice and the Chromium web app were both reported
 # MISPLACED after restoring correctly.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (legacy boot).
+# The Rust engine's coverage of what this section checks: relaunch-anchor report::tests (landed/misplaced/pending, slow starter, deadline, log/record vs bash), boot::tests.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[
   {"class":"ontarget","workspace":3,"exec":"true","execSource":"guess","enabled":true},
@@ -1854,12 +1963,16 @@ jq -e '[.launches[] | select(.class == "slowapp") | .outcome] == ["landed"]' "$l
   || fail "a slow-starting app that restores correctly must not be reported misplaced"
 assert_not_contains "$(cat "$RELAUNCH_CONFIG_DIR/last-boot.log")" "MISPLACED"
 
+fi
+
 # --- CRLF .desktop files parse (PR #16 review) ---
 # The optimized parser matched the section header before stripping the
 # trailing \r, so "[Desktop Entry]\r" matched nothing and the whole file
 # contributed no Exec, Name or StartupWMClass. For a web app that is worse
 # than losing the file: it can still claim its case-sensitive desktop id and
 # then register no launcher, masking a valid lower-priority file.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save).
+# The Rust engine's coverage of what this section checks: differential `suite:` cases crlf (+ label), relaunch-desktop file_format_tests.
 CRLF="$WORKDIR/crlf/applications"
 mkdir -p "$CRLF"
 printf '[Desktop Entry]\r\nName=CRLF App\r\nExec=crlf-app %%U\r\nStartupWMClass=crlf-app\r\nType=Application\r\n' \
@@ -1895,23 +2008,21 @@ jq -e '[.entries[] | select(.class == "crlf-app") | .label] == ["CRLF App"]' <<<
 unset RELAUNCH_DATA_DIRS
 unset RELAUNCH_CMDLINE_DIR
 
+fi
+
 # --- symlinked config files survive every write (github issue #2) ---
 # A rename replaces whatever sits at the destination, so renaming onto a
 # symlink destroys the link and disconnects a dotfiles-managed file. mktemp
 # also defaults to /tmp, making the move cross-filesystem and therefore not
 # atomic either. Both are the same line.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save, legacy set-exec).
+# The Rust engine's coverage of what this section checks: tests/capture-test.sh (install-signed through dangling links and chains), hooks-test.sh symlinks.
 SYM="$WORKDIR/symlinks"
 mkdir -p "$SYM/dotfiles"
 printf '%s\n' '-- Extra autostart processes.' 'o.launch_on_start("sunsetr")' >"$SYM/dotfiles/autostart.lua"
 printf '%s\n' '-- Hyprland configuration.' 'require("hypr.autostart")' >"$SYM/dotfiles/hyprland.lua"
 ln -sf "$SYM/dotfiles/autostart.lua" "$SYM/autostart.lua"
 ln -sf "$SYM/dotfiles/hyprland.lua" "$SYM/hyprland.lua"
-symcheck() {
-  [[ -L "$SYM/autostart.lua" ]] || fail "$1: autostart.lua stopped being a symlink"
-  [[ -L "$SYM/hyprland.lua" ]] || fail "$1: hyprland.lua stopped being a symlink"
-  [[ "$(readlink "$SYM/autostart.lua")" == "$SYM/dotfiles/autostart.lua" ]] \
-    || fail "$1: autostart.lua points somewhere new"
-}
 symenv() {
   env RELAUNCH_CONFIG_DIR="$SYM/cfg" RELAUNCH_AUTOSTART="$SYM/autostart.lua" \
     RELAUNCH_HYPRLAND_LUA="$SYM/hyprland.lua" RELAUNCH_HYPR_CONF="$SYM/hyprland.conf" \
@@ -1920,20 +2031,7 @@ symenv() {
     "$RELAUNCH" "$@"
 }
 mkdir -p "$SYM/cfg"
-symenv ensure-hooks >/dev/null 2>&1 || fail "ensure-hooks failed against symlinked config"
-symcheck "after install"
-# The bootstrap must have reached the TARGET through the link. The boot hook
-# itself no longer lives in autostart.lua at all -- it is in the owned loader.
-grep -q 'relaunch.lua' "$SYM/dotfiles/hyprland.lua" \
-  || fail "the dofile hook must reach the dotfiles target"
-grep -q 'sunsetr' "$SYM/dotfiles/autostart.lua" || fail "install ate an unrelated autostart line"
-grep -q 'relaunch boot' "$SYM/dotfiles/autostart.lua" \
-  && fail "the boot hook must not be written into the user's autostart.lua"
-# ensure-hooks is idempotent through the link and never touches autostart.lua.
-symenv ensure-hooks >/dev/null 2>&1
-symcheck "after repair"
-[[ "$(grep -c 'relaunch.lua' "$SYM/dotfiles/hyprland.lua")" -eq 1 ]] \
-  || fail "a second ensure-hooks duplicated the bootstrap in the target"
+mkdir -p "$SYM/cfg"
 # config.json goes through the same writer.
 ln -sf "$SYM/dotfiles/config.json" "$SYM/cfg/config.json"
 printf '{"staggerSeconds":0,"entries":[]}\n' >"$SYM/dotfiles/config.json"
@@ -1941,17 +2039,6 @@ symenv save >/dev/null 2>&1 || fail "save failed against a symlinked config.json
 [[ -L "$SYM/cfg/config.json" ]] || fail "save replaced the symlinked config.json with a regular file"
 jq -e '.entries' "$SYM/dotfiles/config.json" >/dev/null \
   || fail "save must write through the link into the dotfiles target"
-# …and uninstall, which removes our bootstrap through the same resolver.
-# Clean removal is the one guarantee, so it has to reach the link TARGET.
-symenv uninstall --yes >/dev/null 2>&1
-symcheck "after uninstall"
-grep -q 'relaunch.lua' "$SYM/dotfiles/hyprland.lua" \
-  && fail "uninstall must remove the bootstrap from the target"
-grep -q 'require("hypr.autostart")' "$SYM/dotfiles/hyprland.lua" \
-  || fail "uninstall ate an unrelated hyprland.lua line"
-grep -q 'sunsetr' "$SYM/dotfiles/autostart.lua" \
-  || fail "uninstall must leave the user autostart.lua alone"
-
 # A dangling symlink writes through to the named target rather than being
 # replaced by a regular file. Exercised on the files this change owns:
 # overrides.json (ensure_file_with) and config.json (atomic_write).
@@ -1993,6 +2080,8 @@ ln -sf "$SYM/mid-overrides.json" "$SYM/cfg3/overrides.json"
 jq -e '.chainapp == "chaincmd"' "$SYM/chaintarget/real-overrides.json" >/dev/null \
   || fail "the write must reach the FINAL target of the chain"
 
+fi
+
 # --- a link whose TARGET PARENT does not exist (PR #18 review) ---
 # Plain redirection follows a symlink but still fails when the target's
 # directory is absent -- the ordinary "dotfiles repo not cloned yet" shape.
@@ -2005,8 +2094,10 @@ ln -s "$MP/dotfiles/rl/overrides.json" "$MP/cfg/overrides.json"
     RELAUNCH_PLUGIN_DIR="$MP/plugin"
   "$RELAUNCH" ensure-hooks >/dev/null 2>&1 ) \
   || fail "ensure-hooks must survive a link into a missing directory"
+if $ENGINE_IS_BASH; then  # the Rust engine writes no loader (H1): hooks-test.sh anchor
 [[ -L "$MP/cfg/relaunch.lua" && -f "$MP/dotfiles/rl/relaunch.lua" ]] \
   || fail "the generated-rules file must be created through its link"
+fi
 [[ -L "$MP/cfg/overrides.json" && -f "$MP/dotfiles/rl/overrides.json" ]] \
   || fail "overrides.json must be created through its link into a missing directory"
 jq -e 'type == "object"' "$MP/dotfiles/rl/overrides.json" >/dev/null \
@@ -2051,7 +2142,8 @@ grep -q '# also keep' "$BP/dotfiles/hyprland.conf" || fail "legacy cleanup ate a
 # install/save/list/uninstall cycle leaves the link, every byte of the target,
 # and its mode exactly as they were.
 cp "$BP/dotfiles/autostart.lua" "$BP/autostart.before"
-bprun save >/dev/null 2>&1
+# Capture (bash: save; Rust: propose, which writes nothing) must not touch it.
+if $ENGINE_IS_BASH; then bprun save >/dev/null 2>&1; else bprun propose --json >/dev/null 2>&1; fi
 bprun list --json >/dev/null 2>&1 || fail "list failed on the bypass fixture"
 bprun uninstall --yes >/dev/null 2>&1 || fail "uninstall failed on the bypass fixture"
 [[ -L "$BP/autostart.lua" ]] \
@@ -2066,6 +2158,8 @@ diff -q "$BP/autostart.before" "$BP/dotfiles/autostart.lua" >/dev/null \
 # records what their windows were called. Mode preservation is for the USER's
 # files; ours are ENFORCED at 0600, or an install predating this keeps 0644
 # forever -- nothing else ever revisits the bits.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (save, legacy boot, drop create the files checked here).
+# The Rust engine's coverage: tests/hooks-test.sh (modes: config dir 0700, files 0600 from creation under umask 000, tightening, the user's modes kept, uninstall byte for byte), tests/capture-test.sh (install-signed and snapshot born 0600 in a 0700 dir), relaunch-sys fs tests (write_private and write_private_artifact 0600 / touch_private); the anchor's last-boot.json/.log use write_private_artifact.
 MODE="$WORKDIR/modes"
 modeenv() {
   env RELAUNCH_CONFIG_DIR="$MODE/cfg" RELAUNCH_AUTOSTART="$MODE/autostart.lua" \
@@ -2159,6 +2253,8 @@ rm -rf "$MODE/cfg"
   || fail "a write before ensure-hooks must still create the dir 0700, got $(stat -c '%a' "$MODE/cfg")"
 
 
+fi
+
 # --- one canonical engine path (github issue #26) ---
 # $SELF is whichever copy is running. Writing it into the loader meant the bar
 # widget re-pointed boot at whatever last ran ensure_hooks, including a source
@@ -2171,6 +2267,8 @@ rm -rf "$MODE/cfg"
 # the path never ran under test and both defects survived. A SYMLINK at the
 # canonical location points at the copy under test: the real code path runs,
 # and cmp sees identical content so nothing is clobbered.
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (the bash self-install (the engine ships root-owned)).
+# The Rust engine's coverage of what this section checks: tests/hooks-test.sh (the loader names $PREFIX/bin/relaunch).
 CANON="$WORKDIR/canonical"
 rm -rf "$CANON"; mkdir -p "$CANON/cfg" "$CANON/plugin" "$CANON/prefix/bin" "$CANON/checkout"
 ln -s "$RELAUNCH" "$CANON/prefix/bin/relaunch"
@@ -2228,7 +2326,13 @@ booted="${booted% boot}"
   || fail "boot must still point at an executable engine after the checkout is gone: $booted"
 rm -rf "$CANON"
 
-# --- owned boot module (github issue #19, closes #5) ---
+fi
+
+# --- the boot wiring (ensure-hooks, uninstall, flags, bootstrap): tests/hooks-test.sh,
+# engine-agnostic, so the gate also runs it against the Rust engine ---
+RELAUNCH_ENGINE="$RELAUNCH" "$ROOT/tests/hooks-test.sh"
+
+if $ENGINE_IS_BASH; then  # generate is retired by D-P4
 OB="$WORKDIR/ownedboot"
 obrun() {
   env PREFIX="$OB/prefix" \
@@ -2238,69 +2342,10 @@ obrun() {
     RELAUNCH_VERIFY_SLEEP=0 RELAUNCH_VERIFY_DEADLINE=0 RELAUNCH_VERIFY_INTERVAL=0 \
     "$RELAUNCH" "$@"
 }
-obreset() {
-  rm -rf "$OB"; mkdir -p "$OB/cfg"
-  printf '%s\n' '-- Extra autostart processes.' 'o.launch_on_start("sunsetr")' >"$OB/autostart.lua"
-  printf '%s\n' 'require("hypr.autostart")' >"$OB/hyprland.lua"
-  echo '[]' >"$FAKE_CLIENTS"
-}
-
-# First install, before any save: the loader must already register boot.
-# A bare `return` placeholder would leave the bootstrap live with no hook.
-obreset
+rm -rf "$OB"; mkdir -p "$OB/cfg"
+printf '%s\n' 'require("hypr.autostart")' >"$OB/hyprland.lua"
+echo '[]' >"$FAKE_CLIENTS"
 obrun ensure-hooks >/dev/null 2>&1
-[[ -f "$OB/cfg/relaunch.lua" ]] || fail "first install must create the loader"
-grep -Fq "$OB/prefix/bin/relaunch boot" "$OB/cfg/relaunch.lua" \
-  || fail "the loader must register the canonical engine, got: $(grep exec_on_start "$OB/cfg/relaunch.lua")"
-grep -qx 'return' "$OB/cfg/relaunch.lua" \
-  && fail "the loader must not be the bare return placeholder"
-[[ -f "$OB/cfg/rules.lua" ]] || fail "rules.lua must exist for the loader to read"
-grep -q 'relaunch boot' "$OB/autostart.lua" \
-  && fail "nothing may be written into the user's autostart.lua"
-
-# Boot registration must come BEFORE the disable/skip gate, or a skipped
-# session never registers the handler that clears skip-once.
-regline="$(grep -n 'exec_on_start' "$OB/cfg/relaunch.lua" | head -1 | cut -d: -f1)"
-gateline="$(grep -n 'disabled' "$OB/cfg/relaunch.lua" | head -1 | cut -d: -f1)"
-[[ -n "$regline" && -n "$gateline" && "$regline" -lt "$gateline" ]] \
-  || fail "boot registration must precede the disable/skip gate (reg=$regline gate=$gateline)"
-
-# Fault isolation, EXECUTED rather than grepped: feed the loader a malformed
-# rules.lua under a real Lua interpreter with o.exec_on_start mocked, and
-# require that registration still happened and the error was reported.
-grep -q 'o.window' "$OB/cfg/relaunch.lua" \
-  && fail "generated pins must live in rules.lua, not the loader"
-LUABIN="$(command -v lua5.4 || command -v lua || command -v luajit || true)"
-if [[ -n "$LUABIN" ]]; then
-  printf 'this is not ) valid lua (\n' >"$OB/cfg/rules.lua"
-  cat >"$OB/harness.lua" <<'EOF'
-local captured = nil
-o = { exec_on_start = function(cmd) captured = cmd end }
-local reported = nil
-local real_print = print
-print = function(msg) reported = tostring(msg) end
-local ok = pcall(dofile, os.getenv("LOADER"))
-print = real_print
-if captured == nil then print("NO_REGISTRATION"); os.exit(1) end
-if reported == nil or not string.find(reported, "rules.lua failed to load", 1, true) then
-  print("NO_ERROR_REPORT"); os.exit(1)
-end
-if not ok then print("LOADER_ABORTED"); os.exit(1) end
-print("OK " .. captured)
-EOF
-  # The loader derives its dir from XDG_CONFIG_HOME, so point that at a tree
-  # whose omarchy-relaunch IS this test's config dir.
-  mkdir -p "$OB/xdg"
-  ln -sfn "$OB/cfg" "$OB/xdg/omarchy-relaunch"
-  luaout="$(HOME="$OB" XDG_CONFIG_HOME="$OB/xdg" LOADER="$OB/cfg/relaunch.lua" \
-    "$LUABIN" "$OB/harness.lua" 2>&1)" || fail "loader must survive a malformed rules.lua: $luaout"
-  [[ "$luaout" == OK* ]] || fail "loader fault isolation: $luaout"
-  [[ "$luaout" == *"boot"* ]] || fail "registration must carry the boot command: $luaout"
-  # Restore a valid rules file for anything that follows.
-  printf -- '-- Generated by omarchy-relaunch. Do not edit by hand.\n' >"$OB/cfg/rules.lua"
-else
-  grep -q 'pcall' "$OB/cfg/relaunch.lua" || fail "rules must be loaded with pcall"
-fi
 cat >"$OB/cfg/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[
   {"class":"herdr","workspace":1,"exec":"true","execSource":"guess","enabled":true}
@@ -2310,83 +2355,7 @@ obrun generate >/dev/null 2>&1
 grep -q 'o.window' "$OB/cfg/rules.lua" || fail "generate must write pins into rules.lua"
 grep -Fq "$OB/prefix/bin/relaunch boot" "$OB/cfg/relaunch.lua" \
   || fail "generate must leave the loader's boot registration intact"
-
-# ensure-hooks never touches autostart.lua -- not to install, not to clean up,
-# not to adopt a hand-written line. Relaunch owns its own module; whatever is
-# in the user's file stays exactly as they left it.
-obreset
-cat >"$OB/autostart.lua" <<'EOF'
--- Extra autostart processes.
-o.launch_on_start("sunsetr")
-o.exec_on_start("relaunch boot")
--- omarchy-relaunch (managed; hidden from the Relaunch list)
-o.launch_on_start("brave")
-EOF
-cp "$OB/autostart.lua" "$OB/autostart.before"
-obrun ensure-hooks >/dev/null 2>&1
-diff -q "$OB/autostart.before" "$OB/autostart.lua" >/dev/null \
-  || fail "ensure-hooks modified the user's autostart.lua"
-obrun uninstall --yes >/dev/null 2>&1
-diff -q "$OB/autostart.before" "$OB/autostart.lua" >/dev/null \
-  || fail "uninstall modified the user's autostart.lua"
-
-# Clean removal is the one guarantee, and the standard is BYTE-FOR-BYTE: the
-# file Relaunch hands back has to be the file it was given. Grepping that the
-# hook is gone and the user's lines remain passes on a file that has grown a
-# blank line on every cycle, which is how ten of them ended up in a user's
-# autostart.lua. cmp against a saved copy, or this proves nothing.
-cyclecheck() {
-  # $1 label, $2 the exact original bytes (already in $OB/hyprland.before)
-  cp "$OB/hyprland.before" "$OB/hyprland.lua"
-  obrun ensure-hooks >/dev/null 2>&1
-  grep -q 'relaunch.lua' "$OB/hyprland.lua" || fail "$1: ensure-hooks must write the bootstrap"
-  cmp -s "$OB/hyprland.before" "$OB/hyprland.lua" \
-    && fail "$1: ensure-hooks did not change hyprland.lua at all"
-  obrun uninstall --yes >/dev/null 2>&1
-  cmp -s "$OB/hyprland.before" "$OB/hyprland.lua" \
-    || fail "$1: uninstall did not restore hyprland.lua byte-for-byte: $(diff <(od -c "$OB/hyprland.before") <(od -c "$OB/hyprland.lua") | head -4 | tr '\n' ' ')"
-}
-
-obreset
-printf '%s\n' 'require("hypr.autostart")' '-- trailing comment' >"$OB/hyprland.before"
-cyclecheck "a normal hyprland.lua"
-
-# Repeat the cycle. A residue of one byte per cycle is invisible in a single
-# install/uninstall and obvious after five.
-obreset
-printf '%s\n' 'require("hypr.autostart")' >"$OB/hyprland.before"
-for _i in 1 2 3 4 5; do
-  obrun ensure-hooks >/dev/null 2>&1
-  obrun uninstall --yes >/dev/null 2>&1
-  cp "$OB/hyprland.lua" "$OB/hyprland.cycled"
-  cmp -s "$OB/hyprland.before" "$OB/hyprland.cycled" \
-    || fail "cycle $_i left residue in hyprland.lua: $(od -c "$OB/hyprland.cycled" | head -3 | tr '\n' ' ')"
-  cp "$OB/hyprland.cycled" "$OB/hyprland.lua"
-done
-
-# A file whose last line has NO trailing newline must not come back with one.
-obreset
-printf '%s' 'require("hypr.autostart")' >"$OB/hyprland.before"
-[[ -n "$(tail -c1 "$OB/hyprland.before")" ]] || fail "fixture should have no final newline"
-cyclecheck "an hyprland.lua with no final newline"
-
-obreset
-obrun ensure-hooks >/dev/null 2>&1
-obrun uninstall --yes >/dev/null 2>&1
-[[ ! -d "$OB/cfg" ]] || fail "uninstall must remove the config dir"
-
-# A hyprland.lua carrying our exact hook WITHOUT the marker is still ours,
-# byte for byte, and leaving it behind would keep Relaunch loading after
-# uninstall -- which is the one thing the project promises will not happen.
-obreset
-obrun ensure-hooks >/dev/null 2>&1
-hookline="$(grep 'relaunch.lua' "$OB/hyprland.lua")"
-printf '%s\n' 'require("hypr.autostart")' "$hookline" >"$OB/hyprland.lua"
-obrun uninstall --yes >/dev/null 2>&1
-grep -q 'relaunch.lua' "$OB/hyprland.lua" \
-  && fail "an unmarked copy of our own bootstrap must still be removed"
-grep -qx 'require("hypr.autostart")' "$OB/hyprland.lua" \
-  || fail "uninstall ate an unrelated hyprland.lua line"
+fi
 
 # --- startup exec with glob chars stays literal ---
 mkdir -p "$WORKDIR/globdir"
@@ -2404,6 +2373,8 @@ EOF
 ' >/dev/null || fail "startup exec glob chars must not expand against CWD"
 
 # --- stagger waits between launches, not before the first ---
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (legacy boot).
+# The Rust engine's coverage of what this section checks: anchor boot::tests::stagger_waits_between_launches_not_before_the_first, a_signed_stagger_is_capped.
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {
   "staggerSeconds": 5,
@@ -2425,12 +2396,18 @@ RELAUNCH_SLEEP="$WORKDIR/bin/record-sleep" "$RELAUNCH" boot
 [[ "$(wc -l <"$SLEEP_LOG")" -eq 2 ]] || fail "stagger should sleep between launches only, got $(cat "$SLEEP_LOG")"
 [[ "$(tr '\n' ' ' <"$SLEEP_LOG")" == "5 5 " ]] || fail "stagger sleep args: $(cat "$SLEEP_LOG")"
 
+fi
+
 # --- class backslash is escaped for Lua ---
+if $ENGINE_IS_BASH; then  # RETIRED by D-P4 (generate).
+# The Rust engine's coverage of what this section checks: anchor emitted_lua_hands_hyprland_the_literal_class_regex (evaluated).
 cat >"$RELAUNCH_CONFIG_DIR/config.json" <<'EOF'
 {"staggerSeconds":0,"entries":[{"class":"foo\\bar","workspace":1,"exec":"foo","enabled":true}]}
 EOF
 "$RELAUNCH" generate >/dev/null
 assert_contains "$(cat "$RELAUNCH_CONFIG_DIR/rules.lua")" 'o.window({ class = "^(foo\\\\bar)$"'
+
+fi
 
 # --- env-prefixed exec is not treated as the class ---
 cat >"$RELAUNCH_AUTOSTART" <<'EOF'
@@ -2444,22 +2421,6 @@ EOF
   [.startup[] | select(.exec == "FOO=bar signal-desktop") | .class] | length == 1
     and .[0] != "FOO=bar" and .[0] != ""
 ' >/dev/null || fail "env-prefixed exec class"
-
-# --- uninstall removes our bootstrap and nothing else ---
-"$RELAUNCH" ensure-hooks >/dev/null 2>&1
-hookline="$(grep 'relaunch.lua' "$RELAUNCH_HYPRLAND_LUA")"
-[[ -n "$hookline" ]] || fail "ensure-hooks did not write the bootstrap"
-printf '%s\n' '-- keep' '-- omarchy-relaunch' "$hookline" '-- after' >"$RELAUNCH_HYPRLAND_LUA"
-cp "$RELAUNCH_AUTOSTART" "$WORKDIR/autostart.before-uninstall"
-"$RELAUNCH" uninstall --yes >/dev/null
-grep -q 'omarchy-relaunch' "$RELAUNCH_HYPRLAND_LUA" && fail "hyprland marker survived uninstall"
-grep -q 'dofile' "$RELAUNCH_HYPRLAND_LUA" && fail "hyprland bootstrap survived uninstall"
-grep -q -- '-- keep' "$RELAUNCH_HYPRLAND_LUA" || fail "unrelated hyprland comment deleted"
-grep -q -- '-- after' "$RELAUNCH_HYPRLAND_LUA" || fail "adjacent hyprland comment deleted"
-# autostart.lua is the user's file. Uninstall reads it for the inventory and
-# writes nothing to it, whatever it happens to contain.
-diff -q "$WORKDIR/autostart.before-uninstall" "$RELAUNCH_AUTOSTART" >/dev/null \
-  || fail "uninstall modified the user's autostart.lua"
 
 # --- row metadata is paired by position, not by class ---
 # A startup row and a relaunch row share a class here. Each keeps its own
@@ -2504,71 +2465,83 @@ echo "$aligned" | jq -e '
   and (.entries[1].class == "aligned" and .entries[1].execOk == false)
 ' >/dev/null || fail "empty-class item broke metadata alignment: $(jq -c '[.entries[] | {class, execOk}]' <<<"$aligned")"
 
-# --- boot flag files are created private ---
-# Born 0600 under any umask, not tightened afterwards by whatever runs next.
-FLG="$WORKDIR/flags"
-rm -rf "$FLG"; mkdir -p "$FLG/cfg"
-flgrun() {
-  env RELAUNCH_CONFIG_DIR="$FLG/cfg" RELAUNCH_AUTOSTART="$FLG/autostart.lua" \
-    RELAUNCH_HYPRLAND_LUA="$FLG/hyprland.lua" RELAUNCH_HYPR_CONF="$FLG/hyprland.conf" \
-    RELAUNCH_PLUGIN_DIR="$FLG/plugin" HYPRCTL="$HYPRCTL_STUB" FAKE_CLIENTS="$FAKE_CLIENTS" \
-    "$RELAUNCH" "$@"
-}
-( umask 022; flgrun boot-skip >/dev/null )
-[[ "$(stat -c '%a' "$FLG/cfg/skip-once")" == "600" ]] \
-  || fail "skip-once mode $(stat -c '%a' "$FLG/cfg/skip-once"), want 600"
-( umask 022; flgrun boot-disable >/dev/null )
-[[ "$(stat -c '%a' "$FLG/cfg/disabled")" == "600" ]] \
-  || fail "disabled mode $(stat -c '%a' "$FLG/cfg/disabled"), want 600"
-
-# --- the hyprland.lua bootstrap treats an empty XDG_CONFIG_HOME as unset ---
-# Lua has no falsy empty string, so this runs the emitted line and checks
-# which relaunch.lua it actually loads.
-command -v lua >/dev/null 2>&1 || fail "lua is required for the bootstrap test"
-BOOT="$WORKDIR/bootstrap"
-rm -rf "$BOOT"; mkdir -p "$BOOT/home/.config/omarchy-relaunch" "$BOOT/xdg/omarchy-relaunch" "$BOOT/cfg"
-for w in home:home/.config xdg:xdg; do
-  printf 'io.open(os.getenv("MARK"), "w"):write("%s"):close()\n' "${w%%:*}" \
-    >"$BOOT/${w#*:}/omarchy-relaunch/relaunch.lua"
-done
-printf '%s\n' 'require("hypr.autostart")' >"$BOOT/hyprland.lua"
-env RELAUNCH_CONFIG_DIR="$BOOT/cfg" RELAUNCH_AUTOSTART="$BOOT/autostart.lua" \
-  RELAUNCH_HYPRLAND_LUA="$BOOT/hyprland.lua" RELAUNCH_HYPR_CONF="$BOOT/hyprland.conf" \
-  RELAUNCH_PLUGIN_DIR="$BOOT/plugin" "$RELAUNCH" ensure-hooks >/dev/null 2>&1
-hook="$(grep -F 'omarchy-relaunch/relaunch.lua' "$BOOT/hyprland.lua")"
-[[ -n "$hook" ]] || fail "ensure-hooks wrote no bootstrap"
-bootload() {
-  rm -f "$BOOT/mark"
-  env HOME="$BOOT/home" MARK="$BOOT/mark" "$@" lua -e "$hook" >/dev/null 2>&1 || true
-  cat "$BOOT/mark" 2>/dev/null || printf 'none'
-}
-[[ "$(bootload env XDG_CONFIG_HOME=)" == "home" ]] \
-  || fail "empty XDG_CONFIG_HOME loaded $(bootload env XDG_CONFIG_HOME=), want home"
-[[ "$(bootload env -u XDG_CONFIG_HOME)" == "home" ]] \
-  || fail "unset XDG_CONFIG_HOME loaded $(bootload env -u XDG_CONFIG_HOME), want home"
-[[ "$(bootload env XDG_CONFIG_HOME=$BOOT/xdg)" == "xdg" ]] \
-  || fail "set XDG_CONFIG_HOME loaded $(bootload env XDG_CONFIG_HOME=$BOOT/xdg), want xdg"
-
-# A hyprland.lua carrying a released bootstrap gets it replaced, not joined,
-# and uninstall still takes it back.
-OLD_HOOK='local _rl = (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/omarchy-relaunch/relaunch.lua"; local _f = io.open(_rl); if _f then _f:close(); dofile(_rl) end'
-printf '%s\n' '-- keep' '-- omarchy-relaunch' "$OLD_HOOK" >"$BOOT/hyprland.lua"
-env RELAUNCH_CONFIG_DIR="$BOOT/cfg" RELAUNCH_AUTOSTART="$BOOT/autostart.lua" \
-  RELAUNCH_HYPRLAND_LUA="$BOOT/hyprland.lua" RELAUNCH_HYPR_CONF="$BOOT/hyprland.conf" \
-  RELAUNCH_PLUGIN_DIR="$BOOT/plugin" "$RELAUNCH" ensure-hooks >/dev/null 2>&1
-[[ "$(grep -cF 'omarchy-relaunch/relaunch.lua' "$BOOT/hyprland.lua")" -eq 1 ]] \
-  || fail "a released bootstrap must be replaced, not joined: $(cat "$BOOT/hyprland.lua")"
-grep -qxF "$OLD_HOOK" "$BOOT/hyprland.lua" && fail "the released bootstrap survived ensure-hooks"
-grep -q -- '-- keep' "$BOOT/hyprland.lua" || fail "ensure-hooks ate an unrelated line"
-printf '%s\n' '-- keep' '-- omarchy-relaunch' "$OLD_HOOK" >"$BOOT/hyprland.lua"
-env RELAUNCH_CONFIG_DIR="$BOOT/cfg" RELAUNCH_AUTOSTART="$BOOT/autostart.lua" \
-  RELAUNCH_HYPRLAND_LUA="$BOOT/hyprland.lua" RELAUNCH_HYPR_CONF="$BOOT/hyprland.conf" \
-  RELAUNCH_PLUGIN_DIR="$BOOT/plugin" "$RELAUNCH" uninstall --yes >/dev/null 2>&1
-grep -q 'omarchy-relaunch' "$BOOT/hyprland.lua" \
-  && fail "uninstall left a released bootstrap behind: $(cat "$BOOT/hyprland.lua")"
-grep -q -- '-- keep' "$BOOT/hyprland.lua" || fail "uninstall ate an unrelated line"
-
+# --- install.sh ships what the plugin loads ---
 grep -q 'install -m 0755 "$REPO_DIR/relaunch"      "$PLUGIN_DST/relaunch"' \
   "$ROOT/install.sh" || fail "install.sh must copy relaunch into the plugin folder"
+# Every script the panel imports: a missing one breaks the whole panel.
+js_imports="$(sed -n 's/^import "\([A-Za-z]*\.js\)" as .*/\1/p' "$ROOT/Panel.qml")"
+[[ -n "$js_imports" ]] || fail "found no script imports in Panel.qml"
+for js in $js_imports; do
+  grep -qF "install -m 0644 \"\$REPO_DIR/$js\" \"\$PLUGIN_DST/$js\"" "$ROOT/install.sh" \
+    || fail "install.sh must copy $js (Panel.qml imports it)"
+done
+
+# --- the panel's transaction lifecycle (INV-4/INV-10), as a pure state machine ---
+command -v node >/dev/null 2>&1 || fail "node is required to test TxnLifecycle.js"
+node --test "$ROOT/tests/txn-lifecycle.test.js" >"$WORKDIR/txn-test.out" 2>&1 \
+  || fail "TxnLifecycle.js tests failed:"$'\n'"$(cat "$WORKDIR/txn-test.out")"
+
+if $ENGINE_IS_BASH; then  # bash internals; Rust: host-walk / trust-gate unit tests
+# --- §9 capture trust primitives: pid_is_host / window_trusted ---
+# These gate which windows may contribute an argv-derived (host-provenance)
+# launch command. The namespace check is fixture-driven under
+# RELAUNCH_CMDLINE_DIR via "<pid>.ns" files (spec §9); a missing .ns defaults
+# to host so the argv fixtures above keep working, and only an explicit
+# "foreign" marks a pid non-host. Run each probe in a subshell that sources the
+# engine library (trailing `main "$@"` stripped), matching the keycheck block.
+NSLIB="$WORKDIR/nslib.sh"
+head -n -1 "$RELAUNCH" >"$NSLIB"
+NSDIR="$WORKDIR/nsfix"
+mkdir -p "$NSDIR"
+printf 'host\n'    >"$NSDIR/100.ns"     # explicit host
+printf 'foreign\n' >"$NSDIR/200.ns"     # a sandboxed/container pid
+# pid 300 has no .ns file -> defaults to host under the fixture dir.
+
+trust() {
+  # trust <expect:0|1> <fn> <args...>; expect 0 = success (host/trusted). The
+  # probe legitimately returns non-zero, so capture it with `|| rc=$?` rather
+  # than letting `set -e` abort the suite.
+  local expect="$1" fn="$2"; shift 2
+  local rc=0
+  RELAUNCH_CMDLINE_DIR="$NSDIR" bash -c '
+    source "$1"; shift; fn="$1"; shift
+    "$fn" "$@"' _ "$NSLIB" "$fn" "$@" || rc=$?
+  [[ "$rc" -eq "$expect" ]] || fail "$fn $*: want rc=$expect, got rc=$rc"
+}
+
+trust 0 pid_is_host 100          # explicit host fixture
+trust 1 pid_is_host 200          # explicit foreign fixture => non-host
+trust 0 pid_is_host 300          # absent fixture defaults to host (suite)
+trust 1 pid_is_host 0            # not a valid pid
+trust 1 pid_is_host abc          # non-numeric
+
+trust 0 window_trusted false 100 # native Wayland + host => trusted
+trust 1 window_trusted true  100 # XWayland is never trusted, even on the host
+trust 1 window_trusted false 200 # native but foreign namespace => untrusted
+# A missing xwayland field is fail-closed in production; under the fixture dir
+# it defaults to native, so the host/namespace result decides.
+trust 0 window_trusted "" 100
+trust 1 window_trusted "" 200
+
+# Fail-closed with no fixture dir: a non-numeric/absent pid cannot read any
+# /proc namespace link, so the real check returns non-host.
+NONS_RC=0; bash -c 'source "$1"; pid_is_host 999999999' _ "$NSLIB" || NONS_RC=$?
+[[ "$NONS_RC" -ne 0 ]] || fail "pid_is_host of an absent pid must fail closed without a fixture"
+
+# The parent walk stops at a non-host ancestor (spec §9): a terminal host whose
+# wrapper process is foreign yields no wrapped identity, so no argv is adopted.
+mkdir -p "$WORKDIR/nswalk"
+printf 'herdr\0'                           >"$WORKDIR/nswalk/90"      # window proc (host)
+printf '91\n'                              >"$WORKDIR/nswalk/90.ppid"
+printf 'foot\0--app-id=herdr\0-e\0herdr\0' >"$WORKDIR/nswalk/91"      # terminal wrapper
+printf 'foreign\n'                         >"$WORKDIR/nswalk/91.ns"   # ...but sandboxed
+WALK="$(RELAUNCH_CMDLINE_DIR="$WORKDIR/nswalk" bash -c '
+  source "$1"; identity_pid_into_globals 90; printf "%s\n" "$_ID_WRAPPED"' _ "$NSLIB")"
+[[ "$WALK" == false ]] || fail "parent walk must stop at a non-host ancestor, got _ID_WRAPPED=$WALK"
+
+fi
+# --- §8/§9 capture, install-signed, propose: engine-agnostic, so the gate also
+# runs them against the Rust engine ---
+RELAUNCH_ENGINE="$RELAUNCH" "$ROOT/tests/capture-test.sh"
 
 printf 'ok %s\n' "$(basename "$0")"

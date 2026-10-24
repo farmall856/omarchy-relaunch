@@ -147,6 +147,17 @@ log `outcome: launched` and no `MISPLACED` rows.
 everything on ws 1 (Lua pins failed to load), or a Hyprland config error
 banner.
 
+**Web-app placement checkpoint (Layton's recurring issue: web apps landing on the
+browser's workspace).** Before the reboot, capture and authorize at least two web apps on
+workspaces OTHER than Brave's: the Proton Drive PWA (`brave-fnnddiokljlbkmeppnclajginnfbffgb-Default`)
+and a URL web app such as Google Maps (`brave-maps.google.com__-Default`), each on its own
+workspace. After the reboot, both must show `landed=ws <captured workspace>` in
+`~/.config/omarchy-relaunch/last-boot.log`, with **no `MISPLACED`** on either row, and
+`hyprctl clients -j` must agree (`workspace.id` = captured, `initialClass` = the pinned class).
+A `MISPLACED` web-app row here is a FAIL, and it is the trigger for the mitigation (a
+post-sampling correction pass in the anchor that moves a misplaced window to its pinned workspace).
+Boot today DETECTS placement; it does not correct it.
+
 4. Optional second boot: cold power-off vs reboot. Same checks.
 
 ## Phase 6 — Edges that matter here

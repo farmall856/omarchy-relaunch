@@ -1,9 +1,14 @@
 [package]
 name = "relaunchd"
+description = "Root D-Bus authority for Relaunch: per-uid keys, polkit-gated signing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lib]
 name = "relaunchd"
@@ -20,12 +25,17 @@ serde_json.workspace = true
 ed25519-dalek.workspace = true
 sha2.workspace = true
 hex.workspace = true
-getrandom = "=0.3.3"
+getrandom.workspace = true
+relaunch-sys = { path = "../relaunch-sys" }
 # Transport (binary only). Caret + Cargo.lock pin; vendored for the package
 # build. The security core (relaunch-core) stays free of this tree.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
-libc = "0.2"
 futures-util = "0.3"
 
 [dev-dependencies]
+# Sets the umask in tests/store_umask.rs (its own process).
+nix = { workspace = true, features = ["fs"] }
+
+[lints]
+workspace = true

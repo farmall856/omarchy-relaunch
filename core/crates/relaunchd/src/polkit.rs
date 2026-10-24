@@ -3,7 +3,7 @@
 //!
 //! `CheckAuthorization` names a `system-bus-name` subject = the *caller's* unique
 //! connection, so polkit resolves the subject to the calling process and runs
-//! AUTH_SELF for that uid (fingerprint, then password — the installed polkit-1
+//! `AUTH_SELF` for that uid (fingerprint, then password — the installed polkit-1
 //! PAM stack). The `00-` rule (spec §3) denies non-local/inactive callers first.
 //!
 //! The call is driven from the sync `Authenticator` trait via `handle.block_on`
@@ -13,8 +13,8 @@
 //! indefinitely. Each call carries a unique cancellation id; `PolkitCanceller`
 //! lets the engine fire `CancelCheckAuthorization` for a uid when its pending
 //! transaction is invalidated (Purge, disconnect, denial). The polkit dialog is
-//! NOT a trusted display surface (spec §1/D6); the panel code is the human
-//! cross-check, this message is only a pointer.
+//! NOT a trusted display surface (spec §1/D6); the panel's review is, and this
+//! message only repeats its summary.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -24,7 +24,7 @@ use tokio::sync::Notify;
 use zbus::zvariant::{OwnedValue, Type, Value};
 use zbus::Connection;
 
-use crate::engine::{AuthRequest, Authenticator};
+use crate::engine::{AuthAction, AuthRequest, Authenticator};
 
 /// Bound on the remembered pre-dispatch cancellation ids. When full, the OLDEST
 /// is evicted (never a bulk clear), so a still-live pre-dispatch cancellation is
@@ -38,20 +38,33 @@ struct Subject {
     details: HashMap<String, OwnedValue>,
 }
 
-/// `(bba{ss})` — a polkit AuthorizationResult.
+/// `(bba{ss})` — a polkit `AuthorizationResult`.
 #[derive(Deserialize, Type)]
 struct AuthzResult {
     is_authorized: bool,
-    #[allow(dead_code)]
-    is_challenge: bool,
-    #[allow(dead_code)]
-    details: HashMap<String, String>,
+    // Decoded by position for the (bba{ss}) shape; not otherwise used.
+    _is_challenge: bool,
+    _details: HashMap<String, String>,
 }
 
 const AUTHORITY_DEST: &str = "org.freedesktop.PolicyKit1";
 const AUTHORITY_PATH: &str = "/org/freedesktop/PolicyKit1/Authority";
 const AUTHORITY_IFACE: &str = "org.freedesktop.PolicyKit1.Authority";
-/// CheckAuthorizationFlags::AllowUserInteraction.
+/// The polkit action for committing an authority-expanding change.
+pub const AUTHORIZE_ACTION_ID: &str = "io.github.laytonf.relaunch.authorize";
+/// The polkit action for deleting the caller's key and state.
+pub const PURGE_ACTION_ID: &str = "io.github.laytonf.relaunch.purge";
+
+/// The polkit action that guards `action`.
+#[must_use]
+pub fn action_id(action: AuthAction) -> &'static str {
+    match action {
+        AuthAction::Authorize => AUTHORIZE_ACTION_ID,
+        AuthAction::Purge => PURGE_ACTION_ID,
+    }
+}
+
+/// `CheckAuthorizationFlags::AllowUserInteraction`.
 const ALLOW_USER_INTERACTION: u32 = 0x1;
 
 /// Owns the system-bus connection used for polkit and runs/cancels checks by
@@ -69,10 +82,10 @@ struct Coord {
     order: VecDeque<String>,
 }
 
+/// Runs polkit checks by cancellation id and cancels them on invalidation.
 pub struct PolkitCanceller {
     bus: Connection,
     handle: tokio::runtime::Handle,
-    action_id: String,
     coord: Mutex<Coord>,
 }
 
@@ -89,11 +102,12 @@ impl Drop for InflightGuard<'_> {
 }
 
 impl PolkitCanceller {
-    pub fn new(bus: Connection, handle: tokio::runtime::Handle, action_id: &str) -> Arc<Self> {
+    /// A canceller on the service's bus connection.
+    #[must_use]
+    pub fn new(bus: Connection, handle: tokio::runtime::Handle) -> Arc<Self> {
         Arc::new(PolkitCanceller {
             bus,
             handle,
-            action_id: action_id.to_string(),
             coord: Mutex::new(Coord {
                 inflight: HashMap::new(),
                 pre: HashSet::new(),
@@ -103,7 +117,9 @@ impl PolkitCanceller {
     }
 
     fn lock_coord(&self) -> std::sync::MutexGuard<'_, Coord> {
-        self.coord.lock().unwrap_or_else(|p| p.into_inner())
+        self.coord
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Register a check as in-flight, unless it was already cancelled
@@ -118,7 +134,8 @@ impl PolkitCanceller {
         Some(n)
     }
 
-    async fn check(&self, sender: &str, message: &str, id: &str) -> Result<bool, String> {
+    async fn check(&self, req: &AuthRequest<'_>) -> Result<bool, String> {
+        let (sender, message, id) = (req.sender, req.message, req.cancellation_id);
         let name: OwnedValue = Value::new(sender.to_string())
             .try_into()
             .map_err(|e| format!("{e}"))?;
@@ -141,7 +158,7 @@ impl PolkitCanceller {
                 "CheckAuthorization",
                 &(
                     subject,
-                    self.action_id.as_str(),
+                    action_id(req.action),
                     details,
                     ALLOW_USER_INTERACTION,
                     id,
@@ -155,15 +172,14 @@ impl PolkitCanceller {
 
     /// Run a bounded, cancellable check for the request's cancellation id, using
     /// the request's remaining-lease deadline. Blocks the calling
-    /// (spawn_blocking) thread until the result, the deadline, or a cancel. The
+    /// (`spawn_blocking`) thread until the result, the deadline, or a cancel. The
     /// abort `Notify` is armed under the lock BEFORE dispatch, so a cancel that
     /// arrives at any point from registration onward aborts the check rather
     /// than letting it run to the deadline (reviewer #2).
-    fn authorize_blocking(&self, req: &AuthRequest) -> Result<bool, String> {
+    fn authorize_blocking(&self, req: &AuthRequest<'_>) -> Result<bool, String> {
         let id = req.cancellation_id;
-        let notify = match self.register(id) {
-            Some(n) => n,
-            None => return Err("authorization cancelled".into()),
+        let Some(notify) = self.register(id) else {
+            return Err("authorization cancelled".into());
         };
         let _guard = InflightGuard {
             canceller: self,
@@ -172,8 +188,8 @@ impl PolkitCanceller {
         self.handle.block_on(async {
             tokio::select! {
                 biased;
-                _ = notify.notified() => Err("authorization cancelled".into()),
-                r = tokio::time::timeout(req.deadline, self.check(req.sender, req.message, id)) => {
+                () = notify.notified() => Err("authorization cancelled".into()),
+                r = tokio::time::timeout(req.deadline, self.check(req)) => {
                     match r {
                         Ok(inner) => inner,
                         Err(_timeout) => {
@@ -232,18 +248,20 @@ impl PolkitCanceller {
     }
 }
 
+/// The production [`Authenticator`]: polkit `AUTH_SELF` for the caller.
 pub struct PolkitAuthenticator {
     canceller: Arc<PolkitCanceller>,
 }
 
 impl PolkitAuthenticator {
+    /// An authenticator sharing `canceller` with the invalidation hook.
     pub fn new(canceller: Arc<PolkitCanceller>) -> Self {
         PolkitAuthenticator { canceller }
     }
 }
 
 impl Authenticator for PolkitAuthenticator {
-    fn authorize(&self, req: AuthRequest) -> Result<bool, String> {
+    fn authorize(&self, req: AuthRequest<'_>) -> Result<bool, String> {
         self.canceller.authorize_blocking(&req)
     }
 }
@@ -258,5 +276,17 @@ mod tests {
         // polkit Subject is (sa{sv}); AuthorizationResult is (bba{ss}).
         assert_eq!(Subject::SIGNATURE.to_string(), "(sa{sv})");
         assert_eq!(AuthzResult::SIGNATURE.to_string(), "(bba{ss})");
+    }
+
+    #[test]
+    fn purge_is_checked_against_its_own_action() {
+        assert_eq!(
+            action_id(AuthAction::Authorize),
+            "io.github.laytonf.relaunch.authorize"
+        );
+        assert_eq!(
+            action_id(AuthAction::Purge),
+            "io.github.laytonf.relaunch.purge"
+        );
     }
 }

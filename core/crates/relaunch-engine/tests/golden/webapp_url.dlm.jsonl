@@ -1,0 +1,2 @@
+{"in": "brave --app=https://not-a-webapp-line.example.com/", "out": "https://not-a-webapp-line.example.com/"}
+{"in": "omarchy-launch-webapp-extra https://n.example.com/", "out": "https://n.example.com/"}

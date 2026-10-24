@@ -9,6 +9,9 @@ ExecStart=/usr/lib/omarchy-relaunch/relaunchd
 # Owns the per-uid key store; nothing else is writable.
 StateDirectory=omarchy-relaunch
 StateDirectoryMode=0755
+# public.json is born 0644 for the anchor; signing.key stays 0600 (set
+# explicitly by the store either way).
+UMask=0022
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes

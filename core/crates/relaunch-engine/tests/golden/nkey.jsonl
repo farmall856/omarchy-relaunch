@@ -1,0 +1,21 @@
+{"in": "A B..C", "out": "a-b-c"}
+{"in": "Foo___Bar", "out": "foo-bar"}
+{"in": "x", "out": "x"}
+{"in": "", "out": ""}
+{"in": "A.B_C D", "out": "a-b-c-d"}
+{"in": "___", "out": "-"}
+{"in": "a..b__c  d", "out": "a-b-c-d"}
+{"in": "brave-browser", "out": "brave-browser"}
+{"in": "org.gnome.Nautilus", "out": "org-gnome-nautilus"}
+{"in": "LibreOffice  Calc", "out": "libreoffice-calc"}
+{"in": "a__b", "out": "a-b"}
+{"in": "x.y_z-w", "out": "x-y-z-w"}
+{"in": "ÉCOLE", "out": "École"}
+{"in": "---", "out": "-"}
+{"in": "Mixed.Case_Name", "out": "mixed-case-name"}
+{"in": "a - b", "out": "a-b"}
+{"in": " lead", "out": "-lead"}
+{"in": "trail ", "out": "trail-"}
+{"in": "UPPER", "out": "upper"}
+{"in": "tab\there", "out": "tab\there"}
+{"in": "dots...", "out": "dots-"}

@@ -3,8 +3,11 @@
 // non-undefined Result wins), so a blanket "YES" for the empower group cannot
 // skip the credential on our action. Non-local or inactive callers are denied
 // outright; a local, active caller must authenticate as themselves.
+// Both of our actions: authorize (expands what starts at login) and purge
+// (deletes the user's signing key and state).
 polkit.addRule(function (action, subject) {
-  if (action.id !== "io.github.laytonf.relaunch.authorize") {
+  if (action.id !== "io.github.laytonf.relaunch.authorize" &&
+      action.id !== "io.github.laytonf.relaunch.purge") {
     return polkit.Result.NOT_HANDLED;
   }
   if (!subject.local || !subject.active) {

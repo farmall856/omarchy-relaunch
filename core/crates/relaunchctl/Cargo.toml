@@ -1,0 +1,38 @@
+[package]
+name = "relaunchctl"
+description = "Relaunch client: holds one bus connection across Prepare and Authorize"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "relaunchctl"
+path = "src/lib.rs"
+
+[[bin]]
+name = "relaunchctl"
+path = "src/main.rs"
+
+[dependencies]
+relaunch-core = { path = "../relaunch-core" }
+relaunch-sys = { path = "../relaunch-sys" }
+serde.workspace = true
+# raw_value: the proposal is forwarded as its exact bytes, so the service's strict
+# parse (not a client-side Value) sees any duplicate key (Sol #13).
+serde_json = { workspace = true, features = ["raw_value"] }
+# Transport (binary only). Caret + Cargo.lock pin; vendored for the package
+# build, matching relaunchd. The security core (relaunch-core) stays free of
+# this tree.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "io-util", "sync", "time"] }
+
+[lints]
+workspace = true

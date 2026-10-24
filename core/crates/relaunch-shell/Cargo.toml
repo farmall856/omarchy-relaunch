@@ -1,0 +1,17 @@
+[package]
+name = "relaunch-shell"
+description = "Relaunch's shell-word primitives: bash-compatible quoting and splitting, argv helpers, and the one 'would bash -c run it' verdict"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+relaunch-sys = { path = "../relaunch-sys" }
+
+[lints]
+workspace = true

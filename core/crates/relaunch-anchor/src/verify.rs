@@ -3,8 +3,6 @@
 //! public key, generation and current account name. Any failure is fail-closed
 //! (the caller emits a comment and launches nothing).
 
-use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use ed25519_dalek::VerifyingKey;
@@ -14,46 +12,38 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PublicState {
-    #[allow(dead_code)]
     v: u32,
     uid: u32,
     user: String,
     gen: u64,
     #[serde(rename = "enrollmentId")]
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "the service binds transactions to it; the anchor only needs the file to parse"
+    )]
     enrollment_id: String,
     pubkey: String,
 }
 
-/// Every component from `path` up to and including `boundary` must be owned by
-/// `trusted_uid` (root in production), be a real file/dir (not a symlink), and
-/// carry no group/other write bit. The walk stops at `boundary` (the state
-/// root), since the filesystem above it is system-trusted; `path` must lie
-/// within it.
+/// [`relaunch_sys::fs::trusted_chain`] with exactly one trusted owner,
+/// `trusted_uid` (root in production): the shared walk, so the anchor and the
+/// engine judge a root-installed path alike.
+///
+/// # Errors
+///
+/// A message naming the first component that is a symlink, is not owned by
+/// `trusted_uid`, or is group/world-writable.
 pub fn trusted_chain(path: &Path, trusted_uid: u32, boundary: &Path) -> Result<(), String> {
-    let mut cur = path;
-    loop {
-        let md = fs::symlink_metadata(cur).map_err(|e| format!("lstat {}: {e}", cur.display()))?;
-        if md.file_type().is_symlink() {
-            return Err(format!("symlink in trust path: {}", cur.display()));
-        }
-        if md.uid() != trusted_uid {
-            return Err(format!("not owned by uid {trusted_uid}: {}", cur.display()));
-        }
-        if md.mode() & 0o022 != 0 {
-            return Err(format!("group/other-writable: {}", cur.display()));
-        }
-        if cur == boundary {
-            return Ok(());
-        }
-        cur = cur
-            .parent()
-            .ok_or_else(|| "path is not under the state root".to_string())?;
-    }
+    relaunch_sys::fs::trusted_chain(path, |uid| uid == trusted_uid, boundary)
 }
 
 /// Verify the trust chain and the signature, binding uid, current account name
 /// and generation. Returns the verified config on success.
+///
+/// # Errors
+///
+/// A reason the state is not trusted or the document does not verify;
+/// the caller then launches nothing.
 pub fn load_verified(
     state_root: &Path,
     uid: u32,
@@ -66,10 +56,15 @@ pub fn load_verified(
     trusted_chain(&public_path, trusted_uid, state_root)?;
 
     let st: PublicState = serde_json::from_slice(
-        &crate::fsio::read_regular_capped(&public_path, crate::fsio::MAX_FILE_BYTES)
+        &relaunch_sys::fs::read_regular_capped(&public_path, relaunch_sys::fs::MAX_FILE_BYTES)
             .map_err(|e| format!("read public.json: {e}"))?,
     )
     .map_err(|e| format!("parse public.json: {e}"))?;
+    // Any other public.json version is a format this anchor does not
+    // understand (fail closed).
+    if st.v != relaunch_core::PUBLIC_STATE_VERSION {
+        return Err(format!("public.json version {} unsupported", st.v));
+    }
     if st.uid != uid {
         return Err("public.json uid mismatch".into());
     }
@@ -88,7 +83,29 @@ pub fn load_verified(
     }
     // config.json uses the shared document limit the service enforces at sign
     // time (reviewer #1), so an authorized max-size change is always readable.
-    let json = crate::fsio::read_regular_capped(config_path, relaunch_core::MAX_DOCUMENT_BYTES)
-        .map_err(|e| format!("read config.json: {e}"))?;
+    let json =
+        relaunch_sys::fs::read_regular_capped(config_path, relaunch_core::MAX_DOCUMENT_BYTES)
+            .map_err(|e| format!("read config.json: {e}"))?;
+    if signed_version(&json).is_some_and(|v| v != relaunch_core::SIGNED_SCHEMA_VERSION) {
+        return Err(crate::boot::SCHEMA_UPGRADE_NEEDED.into());
+    }
     parse_and_verify(&json, &vk, uid, user, st.gen).map_err(|e| format!("{e:?}"))
+}
+
+/// The signed schema version a `config.json` claims, read without trusting
+/// anything else in it. Only the report's wording depends on it: a document of
+/// another version launches nothing, as any unverified one does, and is named
+/// as needing a fresh Save rather than as tampered.
+fn signed_version(json: &[u8]) -> Option<u32> {
+    #[derive(Deserialize)]
+    struct Signed {
+        v: u32,
+    }
+    #[derive(Deserialize)]
+    struct File {
+        signed: Signed,
+    }
+    serde_json::from_slice::<File>(json)
+        .ok()
+        .map(|f| f.signed.v)
 }

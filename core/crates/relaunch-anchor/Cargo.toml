@@ -1,9 +1,14 @@
 [package]
 name = "relaunch-anchor"
+description = "Relaunch login verifier: checks the signed launch list, emits pins, launches"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lib]
 name = "relaunch_anchor"
@@ -20,4 +25,12 @@ serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
 ed25519-dalek.workspace = true
-libc = "0.2"
+relaunch-sys = { path = "../relaunch-sys" }
+relaunch-desktop = { path = "../relaunch-desktop" }
+relaunch-shell = { path = "../relaunch-shell" }
+
+[dev-dependencies]
+nix = { workspace = true, features = ["fs"] }
+
+[lints]
+workspace = true

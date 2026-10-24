@@ -1,0 +1,86 @@
+# Maintainer: Layton F <layton@f22.me>
+#
+# The Relaunch SYSTEM CORE ("authorized boot tools"): the root-owned, login-time
+# signature-verified app relauncher for Omarchy. This is the helper package the
+# Relaunch shell plugin installs on the user's behalf (its "Install boot tools"
+# button runs `omarchy pkg aur add omarchy-relaunch`, elevating with polkit/sudo).
+#
+# The user-space bar widget (the plugin QML) is NOT shipped here; it is installed
+# separately through the Omarchy plugin marketplace (`omarchy plugin add <url>`).
+# This package provides only the root components the marketplace path cannot:
+# relaunchd (the polkit-gated signing authority), relaunch-anchor (the login
+# verifier), the relaunch engine + relaunchctl, the polkit action/rule, the D-Bus
+# activation, the anchor loader, and the systemd unit.
+
+pkgname=omarchy-relaunch
+pkgver=2.0.0
+pkgrel=1
+pkgdesc="Relaunch system core: login-time, signature-verified app relauncher for Omarchy (helper package for the Relaunch shell plugin)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/farmall856/omarchy-relaunch"
+license=('MIT')
+depends=('polkit' 'systemd' 'dbus')
+optdepends=('hyprland: the compositor Relaunch restores windows into (required at login, not to install)')
+makedepends=('cargo' 'git')
+install="$pkgname.install"
+# AUR builds from a PUBLISHED ref. Tag the current code `v$pkgver` and push it
+# first (see packaging/aur/README.md); SKIP is correct for a git source.
+source=("$pkgname::git+$url.git#tag=v$pkgver")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$srcdir/$pkgname/core"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$srcdir/$pkgname/core"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release \
+    -p relaunchd -p relaunch-anchor -p relaunch-engine -p relaunchctl
+}
+
+package() {
+  cd "$srcdir/$pkgname"
+  local rel="core/target/release"
+
+  # Root-owned core binaries (relaunchd + anchor run as root; the engine and
+  # client are run by the user but live here, root-owned, so the trust chain the
+  # anchor checks holds).
+  install -Dm0755 "$rel/relaunchd"       "$pkgdir/usr/lib/omarchy-relaunch/relaunchd"
+  install -Dm0755 "$rel/relaunch-anchor" "$pkgdir/usr/lib/omarchy-relaunch/relaunch-anchor"
+  install -Dm0755 "$rel/relaunch"        "$pkgdir/usr/lib/omarchy-relaunch/relaunch"
+  install -Dm0755 "$rel/relaunchctl"     "$pkgdir/usr/lib/omarchy-relaunch/relaunchctl"
+  # `relaunch` on PATH for every user, so wiring the login anchor
+  # (`relaunch ensure-hooks --anchor`, which the plugin runs) is the only
+  # per-user step. The plugin itself calls the /usr/lib path directly.
+  install -dm0755 "$pkgdir/usr/bin"
+  ln -s /usr/lib/omarchy-relaunch/relaunch "$pkgdir/usr/bin/relaunch"
+
+  # polkit: the authorize + purge actions (allow_active=auth_self) and the rule
+  # that out-orders empower.rules and denies non-local/inactive callers.
+  install -Dm0644 packaging/polkit/io.github.laytonf.relaunch.policy \
+    "$pkgdir/usr/share/polkit-1/actions/io.github.laytonf.relaunch.policy"
+  install -Dm0644 packaging/polkit/00-io.github.laytonf.relaunch.rules \
+    "$pkgdir/usr/share/polkit-1/rules.d/00-io.github.laytonf.relaunch.rules"
+
+  # D-Bus: system-service activation (starts relaunchd on demand, as root) + policy.
+  install -Dm0644 packaging/dbus/io.github.laytonf.Relaunch1.service \
+    "$pkgdir/usr/share/dbus-1/system-services/io.github.laytonf.Relaunch1.service"
+  install -Dm0644 packaging/dbus/io.github.laytonf.Relaunch1.conf \
+    "$pkgdir/usr/share/dbus-1/system.d/io.github.laytonf.Relaunch1.conf"
+
+  # The anchor loader hyprland.lua runs at login (root 0644), and the systemd unit.
+  install -Dm0644 packaging/lua/anchor.lua \
+    "$pkgdir/usr/share/omarchy-relaunch/anchor.lua"
+  install -Dm0644 packaging/systemd/relaunchd.service \
+    "$pkgdir/usr/lib/systemd/system/relaunchd.service"
+
+  # Licenses + third-party notices.
+  install -Dm0644 THIRD-PARTY-NOTICES.md \
+    "$pkgdir/usr/share/licenses/$pkgname/THIRD-PARTY-NOTICES.md"
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm0644 LICENSES/freedesktop-desktop-entry/LICENSE \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSES/freedesktop-desktop-entry/LICENSE"
+}

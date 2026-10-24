@@ -7,36 +7,37 @@
 //! via a captured Tokio handle. Authorization is delegated to polkit
 //! (`polkit::PolkitAuthenticator`). The name is held non-replaceably; a client
 //! disconnect invalidates that uid's pending transaction; name loss exits.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        reason = "test code: a failed unwrap/index is a failed assertion"
+    )
+)]
 
+use relaunch_sys::diag;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use serde::Deserialize;
 use zbus::fdo;
+use zbus::fdo::{RequestNameFlags, RequestNameReply};
 use zbus::names::BusName;
 
-use relaunch_core::Entry;
+// Request caps are shared with the client via relaunch-core (INV-5) and enforced
+// here BEFORE any parse.
+use relaunch_core::{MAX_CLASS_LEN, MAX_REDUCE_OPS, MAX_REQUEST_BYTES};
 use relaunchd::engine::{Engine, EngineError, Proposal, ReduceOp};
+use relaunchd::polkit;
 use relaunchd::store::Store;
 use relaunchd::txn::Clock;
-use relaunchd::{polkit, users};
 
 const STATE_ROOT: &str = "/var/lib/omarchy-relaunch";
 const BUS_NAME: &str = "io.github.laytonf.Relaunch1";
 const OBJECT_PATH: &str = "/io/github/laytonf/Relaunch1";
-const ACTION_ID: &str = "io.github.laytonf.relaunch.authorize";
 const IDLE_EXIT_SECS: u64 = 30;
-/// Upper bound on a single request's byte-ish inputs, enforced BEFORE any parse
-/// (reviewer I6/M2). It is the shared document limit plus envelope headroom, so
-/// a just-signed document (up to MAX_DOCUMENT_BYTES) always round-trips as the
-/// next Prepare/Reduce `base` (reviewer #1). D-Bus's own maximum is not an
-/// application limit.
-const MAX_REQUEST_BYTES: usize = relaunch_core::MAX_DOCUMENT_BYTES + 64 * 1024;
-const MAX_REDUCE_OPS: usize = 512;
-// Compile-time round-trip guarantee (reviewer #1): any document the service
-// may sign fits a Prepare/Reduce base request.
-const _: () = assert!(MAX_REQUEST_BYTES >= relaunch_core::MAX_DOCUMENT_BYTES);
-
 struct SystemClock;
 impl Clock for SystemClock {
     fn now_secs(&self) -> u64 {
@@ -49,16 +50,6 @@ impl Clock for SystemClock {
 }
 
 type Eng = Engine<SystemClock, polkit::PolkitAuthenticator>;
-
-/// Proposal as the bash client sends it (JSON). Identity (uid/user/gen) is set
-/// by the service from bus credentials, never taken from the client.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProposalWire {
-    #[serde(rename = "staggerSeconds", default)]
-    stagger_seconds: u32,
-    entries: Vec<Entry>,
-}
 
 struct Activity {
     inflight: AtomicUsize,
@@ -89,8 +80,25 @@ struct Service {
     handle: tokio::runtime::Handle,
 }
 
-fn eng_err(e: EngineError) -> fdo::Error {
-    fdo::Error::Failed(format!("{e:?}"))
+/// The reduce operations of a request. The errors are fixed text: nothing
+/// from the request is echoed back.
+fn parse_reduce_ops(ops: Vec<(String, String)>) -> Result<Vec<ReduceOp>, &'static str> {
+    ops.into_iter()
+        .map(|(kind, class)| {
+            if class.len() > MAX_CLASS_LEN {
+                return Err("class too long");
+            }
+            match kind.as_str() {
+                "disable" => Ok(ReduceOp::Disable(class)),
+                "drop" => Ok(ReduceOp::Drop(class)),
+                _ => Err("unknown reduce op"),
+            }
+        })
+        .collect()
+}
+
+fn eng_err(e: &EngineError) -> fdo::Error {
+    fdo::Error::Failed(relaunch_core::bounded_message(&format!("{e:?}")))
 }
 
 impl Service {
@@ -106,7 +114,7 @@ impl Service {
         let uid = dbus
             .get_connection_unix_user(BusName::from(sender.clone()))
             .await?;
-        let user = users::name_for_uid(uid)
+        let user = relaunch_sys::account_name(uid)
             .ok_or_else(|| fdo::Error::Failed(format!("no account for uid {uid}")))?;
         Ok((uid, user, sender.as_str().to_string()))
     }
@@ -123,7 +131,7 @@ impl Service {
             .spawn_blocking(move || f(&engine))
             .await
             .map_err(|e| fdo::Error::Failed(format!("task: {e}")))?;
-        r.map_err(eng_err)
+        r.map_err(|e| eng_err(&e))
     }
 }
 
@@ -135,17 +143,14 @@ impl Service {
         #[zbus(connection)] conn: &zbus::Connection,
         base: Vec<u8>,
         proposal_json: Vec<u8>,
-    ) -> fdo::Result<(Vec<u8>, String, String)> {
+    ) -> fdo::Result<(Vec<u8>, String, String, String)> {
         if base.len() > MAX_REQUEST_BYTES || proposal_json.len() > MAX_REQUEST_BYTES {
             return Err(fdo::Error::InvalidArgs("request too large".into()));
         }
         let (uid, user, sender) = Self::caller(conn, &hdr).await?;
-        let wire: ProposalWire = serde_json::from_slice(&proposal_json)
-            .map_err(|e| fdo::Error::InvalidArgs(format!("proposal: {e}")))?;
-        let proposal = Proposal {
-            stagger_seconds: wire.stagger_seconds,
-            entries: wire.entries,
-        };
+        let proposal: Proposal = serde_json::from_slice(&proposal_json).map_err(|e| {
+            fdo::Error::InvalidArgs(format!("proposal: {}", relaunch_core::json_error(&e)))
+        })?;
         let base_opt = if base.is_empty() { None } else { Some(base) };
         let sender_for_prepare = sender.clone();
         let out = self
@@ -160,6 +165,7 @@ impl Service {
                 Ok((
                     out.txid.map(|t| t.to_vec()).unwrap_or_default(),
                     out.code.unwrap_or_default(),
+                    out.summary,
                     out.rendered_diff,
                 ))
             })
@@ -181,7 +187,7 @@ impl Service {
             if !still_owned {
                 let engine = self.engine.clone();
                 std::mem::drop(tokio::task::spawn_blocking(move || {
-                    engine.invalidate_sender(&sender)
+                    engine.invalidate_sender(&sender);
                 }));
             }
         }
@@ -213,21 +219,7 @@ impl Service {
             return Err(fdo::Error::InvalidArgs("request too large".into()));
         }
         let (uid, user, _sender) = Self::caller(conn, &hdr).await?;
-        let mut parsed = Vec::with_capacity(ops.len());
-        for (kind, class) in ops {
-            if class.len() > 256 {
-                return Err(fdo::Error::InvalidArgs("class too long".into()));
-            }
-            parsed.push(match kind.as_str() {
-                "disable" => ReduceOp::Disable(class),
-                "drop" => ReduceOp::Drop(class),
-                other => {
-                    return Err(fdo::Error::InvalidArgs(format!(
-                        "unknown reduce op {other}"
-                    )))
-                }
-            });
-        }
+        let parsed = parse_reduce_ops(ops).map_err(|e| fdo::Error::InvalidArgs(e.into()))?;
         self.run_blocking(move |eng| eng.reduce(uid, &user, &base, &parsed))
             .await
     }
@@ -237,8 +229,8 @@ impl Service {
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
     ) -> fdo::Result<()> {
-        let (uid, _user, _sender) = Self::caller(conn, &hdr).await?;
-        self.run_blocking(move |eng| eng.purge(uid)).await
+        let (uid, _user, sender) = Self::caller(conn, &hdr).await?;
+        self.run_blocking(move |eng| eng.purge(uid, &sender)).await
     }
 
     async fn has_pending(
@@ -252,7 +244,7 @@ impl Service {
     }
 }
 
-/// Consume a NameOwnerChanged stream, invalidating a uid's pending transaction
+/// Consume a `NameOwnerChanged` stream, invalidating a uid's pending transaction
 /// when the Prepare connection drops (reviewer I7/#3). The synchronous,
 /// lock-taking invalidation is offloaded to the blocking pool so it cannot stall
 /// the tokio worker or subsequent disconnect handling.
@@ -266,12 +258,12 @@ async fn run_disconnect_watcher(mut stream: zbus::fdo::NameOwnerChangedStream, e
                 let name = name.to_string();
                 // Fire-and-forget: the detached JoinHandle keeps the task running.
                 std::mem::drop(tokio::task::spawn_blocking(move || {
-                    engine.invalidate_sender(&name)
+                    engine.invalidate_sender(&name);
                 }));
             }
         }
     }
-    eprintln!("relaunchd: disconnect watcher stream ended");
+    diag!("relaunchd: disconnect watcher stream ended");
 }
 
 #[tokio::main]
@@ -280,7 +272,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A dedicated system-bus connection for polkit calls, created under this
     // runtime so the authenticator's block_on can drive it.
     let pk_conn = zbus::Connection::system().await?;
-    let canceller = polkit::PolkitCanceller::new(pk_conn, handle.clone(), ACTION_ID);
+    let canceller = polkit::PolkitCanceller::new(pk_conn, handle.clone());
     let authenticator = polkit::PolkitAuthenticator::new(canceller.clone());
     // On invalidation (denial, disconnect, Purge) cancel exactly that check
     // (reviewer M4): the deadline passed into each check is the transaction's
@@ -322,7 +314,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut name_lost = dbus.receive_name_lost().await?;
     tokio::spawn(run_disconnect_watcher(owner_changed, engine.clone()));
 
-    use zbus::fdo::{RequestNameFlags, RequestNameReply};
     let reply = conn
         .request_name_with_flags(BUS_NAME, RequestNameFlags::DoNotQueue.into())
         .await?;
@@ -338,7 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 use futures_util::StreamExt;
                 name_lost.next()
             } => break,
-            _ = tick => {
+            () = tick => {
                 let idle = activity.inflight.load(Ordering::SeqCst) == 0
                     && !engine.any_pending()
                     && SystemClock.now_secs()
@@ -351,4 +342,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reduce_op_errors_echo_nothing_from_the_request() {
+        let long = "SECRET".repeat(100_000);
+        assert_eq!(
+            parse_reduce_ops(vec![(long.clone(), "c".into())]).unwrap_err(),
+            "unknown reduce op"
+        );
+        assert_eq!(
+            parse_reduce_ops(vec![("drop".into(), long)]).unwrap_err(),
+            "class too long"
+        );
+        assert_eq!(
+            parse_reduce_ops(vec![
+                ("disable".into(), "a".into()),
+                ("drop".into(), "b".into())
+            ])
+            .unwrap(),
+            vec![ReduceOp::Disable("a".into()), ReduceOp::Drop("b".into())]
+        );
+    }
 }

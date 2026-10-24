@@ -1,0 +1,151 @@
+== exit
+0
+== stdout
+{"class":"CrlfApp","eligible":true,"exec":"crlfapp","execSource":"cmdline","provenance":"host"}
+== stderr
+== files
+./cfg-badover/overrides.json 644 f109b002d2f351fa534341fcb7d18145d187efd8a47fc21539f8395a7a85d0d6
+./cfg-signed/config.json 644 1616653019d29b7716a2d957f8cbd6bc86e611bf1665a0102428d5db6aa9a9f6
+./cfg-signed/skip-once 644 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+./cfg/config.json 644 64053ccdcce5b7d928d841067dbc94aa8424933aac7187507c5de2c985d94ead
+./cfg/last-boot.json 644 f25b2baff1b35342eeaa4074e41c6e42219c8876c73e9cf13d0783d755167418
+./cfg/last-boot.log 644 ae3087c4609c1c1014c242af487b9a02d51a3870f91cc6d4c172e66d1ea8793d
+./cfg/last-session.json 644 4a1c71174b1e3650f1834e1714016cf0852029baea5fb7cb9428a890a6fa9bd4
+./cfg/overrides.json 644 b7e812ef997e78c24fb4f037b0f1dc16ea80ff58c3f6cfde9953005fd82a2581
+./clients.json 644 858210f6230a3f808d83c64419dc76cf1b39a5485e726debf9db64682f2f7b5d
+./cmd/101 644 815442b9f7e820918196b3e6937313fcd6d251fe8c0a4093c131a5448d8be564
+./cmd/102 644 4f83e94db9bd38b6dc1c4e928f98f93c05da5cf3084b08b7d1d8db3bc5e6ac9a
+./cmd/102.ppid 644 1a55a7d16b47deb40890edb52c2234c4adddf330dbac2e1f1eedf0a9723a4c70
+./cmd/103 644 7eb6974a18d5ecf331f2715941ce154b9723bae1459e9eca632c88af29b34546
+./cmd/104 644 9d3113cda9245a02bb8c67c1f15141f53e191c9de5a19a32742e1ad7f46d7bd4
+./cmd/105 644 9f9032f19aa22b02ddeb9eb244ea2f1d71bcba939d39e7804a98e3e4b16fbfb3
+./cmd/105.ns 644 98f059308e647d8fe178114f3f6796e3408bb08ba05c25dc01b25fb7426810ee
+./cmd/106 644 b8309073c2c0ea9b06ba38ad802326793ca6d71643cd3269ba9dac44363d13ee
+./cmd/107 644 1e6f07c1263083f47e9ab09814582322b081b3569a01e65893760cb15c50ee7a
+./cmd/107.ppid 644 e904f5e96608b65d8cc42d740d07758cd4bec60479abd0d0da16118d64fba336
+./cmd/111 644 eb7d43f65a89345708ddb19908363d8c5b3e16b45aa249999da462f37cead51f
+./cmd/112 644 b3c3ffd50337e1441d9562a7b36765dd82299dc45ecd8058470a4c943ea4523b
+./cmd/113 644 56635f3ed185c7889b5097b1a68c7030ec42d79c931b9b3bab9fc93782830bdd
+./cmd/114 644 fdc40f4735d43aed6b650dbc186398b81db26882745bd30bd57771f8e8b5769d
+./cmd/114.ppid 644 d030dea268935dbd3e2db7c17196757924d0463c5800349904bc5dcf538e1149
+./cmd/202 644 84c03e629bd00afa28657690ada3311b3f759961c79e67aa290b91b44a497faf
+./cmd/207 644 24acebafaead4fa415a5d8a7bf48ffdb176898fcc5d531316836188b9d4804f1
+./cmd/214 644 e4e2d65364c3a8e36c7cde25f90ce6e27a5ce623107b2212d20cbeb8279197b1
+./cmd/214.ns 644 98f059308e647d8fe178114f3f6796e3408bb08ba05c25dc01b25fb7426810ee
+./data1/applications/brave-maps.desktop 644 cc90087311c8c29e3abef5f319974a1d6c2fa046e5c872f15833b3851bd3b810
+./data1/applications/crlf.desktop 644 3b61c0090e249a8fb25369927d4764c0cd2b344c46529cf91f8e9b2109374549
+./data1/applications/dbusapp.desktop 644 91c97df3cb97b9760cdc84de643f29307adb5a618c322e739eb905348ab6013f
+./data1/applications/disk.desktop 644 73e4f1813bc18bfce4475de090c5f29b20b88471d88bc32ebab979ee9ea1351a
+./data1/applications/hiddencase.desktop 644 8fb6ce3a4dce6241207e2114e30ecacd42bf52341d9fa611bea7b2fecc83ee65
+./data1/applications/hiddenkey.desktop 644 5fbadb1622f2a1fb25cfc2f8a669af6ed696a36be606d32edaf91c0d5cf37be8
+./data1/applications/hiddenweb.desktop 644 6373c5b724f3c6e8052d3837b485aa6823c7ef24b3d2321da6679a6de4807457
+./data1/applications/idonly.desktop 644 b77b48a60160c6fee74d6baaa5c2f13b55a826cedf8f8c6c9011940268be98e8
+./data1/applications/myapp.desktop 644 679f153e540560c7f73cb950b1156da2a18533a210853d148182cae0b7e84ccb
+./data1/applications/nameonly-xyz.desktop 644 c98b9c961b08e9e646cbdbba1a30614856571d39d7cd0cf54500e398d5571e67
+./data1/applications/shadowed.desktop 644 4a578214722831fa6e469039813c0b5ee3445c99b004a6885cc4bbc56b5f0f00
+./data1/applications/spaced.desktop 644 094574a95d7318bddc272b77f951f1fd5a9510261f76c96b2c0f6f69bfc80fab
+./data1/applications/web-a.desktop 644 8a272dd90c376e5f545ab84fb4bba0d0287658b8d015db0934c8f4e4b5901bd5
+./data1/applications/web-b.desktop 644 25af4de901fc361e5e6cc9f7f1e64cf4b976989114c5aa6c839ff537bd2414c9
+./data2/applications/hiddenweb.desktop 644 2cd49857945cf72daa5768f1676ce6522b71d1da144cbf64b3bb8ce8a707c1a5
+./data2/applications/linked.desktop -> real-target.desktop
+./data2/applications/myapp-system.desktop 644 1823d77af0a5ca088ea4cc066706d3f174ee788754e8a9ca23bb242c2c8b6f92
+./data2/applications/real-target.desktop 644 f8358d3aae08a10f04cb80767734c186088506286d2fe36e437c6d900666550c
+./data2/applications/shadowed.desktop 644 961e15c84f6d497845d1a1d76d1fac5b233d281e8bc7b2f9972de9847b62e56f
+./data2/applications/sub/nested.desktop 644 a7d0ede8b04d704985f9e0d5f989967c7eb141bcc16b3de8e437ae021b66e322
+./home/.local/share/applications/homeapp.desktop 644 bc1a829a9312240060f3b9daef35a8c290b52bf05619e980d17b2b15add8f07f
+./hypr/autostart.lua 644 dff59b79369ab28e4f455bc65b4208bc0a7996c0f0c6f972c8c8b78656d31309
+./hypr/hyprland.lua 644 46486dec685ae663f98dbd51b5e1da38d1bef88ac720344faf7cf66fbe760201
+./s/appid/cmd/1200 644 fa38a1a666ca3ef5bf82a119ad47f31299ddd029b8ed978b1a1c63905206bc8d
+./s/case/d1/applications/Foo.desktop 644 3ff2a8c8fe9022c3dfbb861de8cf2a3877fd3e5d006d26657a005acba91e49d9
+./s/case/d1/applications/foo.desktop 644 3f3e856fe3d81ebbfbe5648ce2fba7547d97d2f68dbbf471a6ecb283d2a672f8
+./s/cmdline/cmd/950 644 639ffbd7b6d855fafcca5ce498b65ceb5344efc742007404b2c954cc44c0416d
+./s/collide/cmd/1000 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/collide/cmd/1001 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/collide/cmd/1002 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/collide/cmd/1003 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/collide/cmd/1004 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/collide/d1/applications/Collide App.desktop 644 7539c256a91fdda9dcb87c194c98a22ce520e399b5bc3dd740d6246a1fdfb1c3
+./s/collide/d1/applications/Deep App.desktop 644 6b03c6f8d0727bfb0d4dd76770697ad93a958e7cbba0d7e78c7ff483aefd6683
+./s/collide/d1/applications/Google Maps.desktop 644 8988ae77914785ab1696d0e56eb95fbd9e4d3823ee4652b1647bea7c207e5f67
+./s/collide/d1/applications/Hyphen App.desktop 644 d33816bff0b6795f1445d44bc2f330d56df37ecc1a0b46474a77e9c5f45aa9eb
+./s/collide/d1/applications/Query App.desktop 644 24673b69646e38d35b0c355082dd7129b63def2e4b5ee56f2c24819d6cef4d5e
+./s/collide/d2/applications/brave-browser.desktop 644 5cf7adf1d96c231e47fd8c363c9ad8f7add16063975ce34b73d389a3c1494642
+./s/crlf/d1/applications/crlf-app.desktop 644 6597390909b7340e61ea6da2307f32e6a45017ccd75d1911feed5e038c5ef51d
+./s/crlf/d1/applications/crlf-web.desktop 644 72995bd3f526dc43f7af4d097d4ab33eba6887d8ce1181b7aaabcd6609cca3ed
+./s/crlf/d2/applications/lf-app.desktop 644 20328a5e7c5074a90f6e7cad38a28912523cc95c3267bdd085d025a977d7221f
+./s/fg/cmd/4500 644 c74bd7c4f80adee9e96ba9d495e3c7d499ec20e8c1450e110fd964edfb9e34f3
+./s/fg/cmd/4500.cwd 644 f465c3739385890c221dff1a05e578c6cae0d0430e46996d319db7439f884336
+./s/fg/cmd/4500.ppid 644 4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865
+./s/fg/cmd/4501 644 977aa8968b4edb8d254f36f936ac2f0fe8bdbd6c1a87c7c1b7e59c66d68e61b8
+./s/fg/cmd/4501.cwd 644 b768fe2e560ab9202aae863884f1320d4606081d835fde0893324733fdaeaf84
+./s/fg/cmd/4501.ppid 644 57d5b2f4b904b110c1287771800e2021d2442d6979896858ba13b870e1b72701
+./s/fg/cmd/4501.tpgid 644 1b3873ad3ef83f69d809a72fb6101eccddec12f4bf3b1d254abece22532de0ad
+./s/fg/cmd/4502 644 be243009ed938cd8db9cc774ba11efe3c9dbbece731c18152ef3448f0b331b1a
+./s/fg/cmd/4502.cwd 644 58d24954758ffd79b1b70c005687cbef7ecb8481a4204422c2f2ac109240e54e
+./s/fg/cmd/4502.ppid 644 ee99730b86d60b7ddaabdc808430d1fcc8cff6b2d212b7905ade4f3ddd682750
+./s/fg/cmd/4510 644 c74bd7c4f80adee9e96ba9d495e3c7d499ec20e8c1450e110fd964edfb9e34f3
+./s/fg/cmd/4510.cwd 644 f465c3739385890c221dff1a05e578c6cae0d0430e46996d319db7439f884336
+./s/fg/cmd/4510.ppid 644 4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865
+./s/fg/cmd/4511 644 977aa8968b4edb8d254f36f936ac2f0fe8bdbd6c1a87c7c1b7e59c66d68e61b8
+./s/fg/cmd/4511.cwd 644 7f87e8621e1341a425262cf9281f4a6c811dc0d0e670725970917315d28f43e5
+./s/fg/cmd/4511.ppid 644 689ee8c52aef1cce29aa4342e62a8713e76a0e64ed192f0eb44329c32820e818
+./s/fg/cmd/4511.tpgid 644 f0f43b70fa5341844b287193a90cfdadcbd4fc9c828353811620f6ae9d465cc3
+./s/fg/d1/applications/foot.desktop 644 739dfef9aecff54c7ecf5fbaf6368607e824bdf9e62569f6dca30862768a96b2
+./s/gurl-collide/d1/applications/Ported.desktop 644 cb21f113fc5ceae3fa5451ced671a60dc9d07e7dbb2676bbfa4e2f8faa0d9b7e
+./s/gurl-collide/d1/applications/Unported.desktop 644 953ae4243a4af004e3542a0688d5343f2bfc82d1d1edc09add70f2f69c105ef9
+./s/gurl/d1/applications/Dotty.desktop 644 e5025f306ffb5bd4a75e04cd4922fede4f7597fff71ea071e5abb7601c2df160
+./s/gurl/d1/applications/Ported.desktop 644 cb21f113fc5ceae3fa5451ced671a60dc9d07e7dbb2676bbfa4e2f8faa0d9b7e
+./s/gurl/d1/applications/Userinfo.desktop 644 213bd125ae3b3571ad6218fa7ba6180da48c3cdce981ec86ca61c682a5885510
+./s/hosted/cmd/4400 644 ec8ec14b9cc38758e04072630f53e901b57da804d3ad45150a9ca08600038640
+./s/mask-hidden/cmd/1000 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-hidden/cmd/1001 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-hidden/cmd/1002 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-hidden/cmd/1003 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-hidden/cmd/1004 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-hidden/d1/applications/Deep App.desktop 644 6b03c6f8d0727bfb0d4dd76770697ad93a958e7cbba0d7e78c7ff483aefd6683
+./s/mask-hidden/d1/applications/Google Maps.desktop 644 6cfaf0c04393f6ceeee963dce2c57e7d4961eb6be13f4f31ff6ef5977ec762fd
+./s/mask-hidden/d1/applications/Hyphen App.desktop 644 d33816bff0b6795f1445d44bc2f330d56df37ecc1a0b46474a77e9c5f45aa9eb
+./s/mask-hidden/d1/applications/Query App.desktop 644 24673b69646e38d35b0c355082dd7129b63def2e4b5ee56f2c24819d6cef4d5e
+./s/mask-hidden/d2/applications/Google Maps.desktop 644 8988ae77914785ab1696d0e56eb95fbd9e4d3823ee4652b1647bea7c207e5f67
+./s/mask-hidden/d2/applications/brave-browser.desktop 644 5cf7adf1d96c231e47fd8c363c9ad8f7add16063975ce34b73d389a3c1494642
+./s/mask-other/cmd/1000 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-other/cmd/1001 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-other/cmd/1002 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-other/cmd/1003 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-other/cmd/1004 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-other/d1/applications/Deep App.desktop 644 6b03c6f8d0727bfb0d4dd76770697ad93a958e7cbba0d7e78c7ff483aefd6683
+./s/mask-other/d1/applications/Google Maps.desktop 644 fa7b56bfe82f38ab21debdde4cff2c3114fb8264083a26aef2618810a39e2890
+./s/mask-other/d1/applications/Hyphen App.desktop 644 d33816bff0b6795f1445d44bc2f330d56df37ecc1a0b46474a77e9c5f45aa9eb
+./s/mask-other/d1/applications/Query App.desktop 644 24673b69646e38d35b0c355082dd7129b63def2e4b5ee56f2c24819d6cef4d5e
+./s/mask-other/d2/applications/Google Maps.desktop 644 8988ae77914785ab1696d0e56eb95fbd9e4d3823ee4652b1647bea7c207e5f67
+./s/mask-other/d2/applications/brave-browser.desktop 644 5cf7adf1d96c231e47fd8c363c9ad8f7add16063975ce34b73d389a3c1494642
+./s/mask-sys/cmd/1000 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-sys/cmd/1001 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-sys/cmd/1002 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-sys/cmd/1003 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-sys/cmd/1004 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/mask-sys/d1/applications/Deep App.desktop 644 6b03c6f8d0727bfb0d4dd76770697ad93a958e7cbba0d7e78c7ff483aefd6683
+./s/mask-sys/d1/applications/Google Maps.desktop 644 8988ae77914785ab1696d0e56eb95fbd9e4d3823ee4652b1647bea7c207e5f67
+./s/mask-sys/d1/applications/Hyphen App.desktop 644 d33816bff0b6795f1445d44bc2f330d56df37ecc1a0b46474a77e9c5f45aa9eb
+./s/mask-sys/d1/applications/Query App.desktop 644 24673b69646e38d35b0c355082dd7129b63def2e4b5ee56f2c24819d6cef4d5e
+./s/mask-sys/d2/applications/Google Maps.desktop 644 8988ae77914785ab1696d0e56eb95fbd9e4d3823ee4652b1647bea7c207e5f67
+./s/mask-sys/d2/applications/brave-browser.desktop 644 5cf7adf1d96c231e47fd8c363c9ad8f7add16063975ce34b73d389a3c1494642
+./s/nested/d1/applications/sub/bar.desktop 644 e72e3af23cb5b6a79b2c93a5f522eda02575f63f485052ca27f5e1a4c55501ee
+./s/pwa/d1/applications/brave-jnpecgipniidlgicjocehkhajgdnjekh-Default.desktop 644 32754143f8c5afbed1e6618813ff2725d603b982dfde9e5dbbfcc3bb09c04b8e
+./s/pwa/d1/applications/proton-mail.desktop 644 988e0953629834d68c1a6de448e97a5e7d41aa3c606e5dfe18ed8c7e8caaf7c1
+./s/rfc-schemeless/d1/applications/Schemeless.desktop 644 c625bb742e97b348fd61b5e853483527697cd641c0477c5384247b213bbb8527
+./s/rfc/d1/applications/Dot.desktop 644 4f52dc1012de9863e53858dbcc9b6a6f68c8fa9e77057e7d3e9396bf90425c57
+./s/rfc/d1/applications/Empty.desktop 644 3e3e63a10a6690e098d6d6c6d50626b11546fbc0f2872c2da5cc6604c9b42a73
+./s/rfc/d1/applications/Six.desktop 644 14e639ed02473285c290d497eeaf60116ef2c5d0ffe047a6f5c0a368a1fc5fc3
+./s/rfc/d1/applications/TrailA.desktop 644 2fd1d20c3c5f6c2b605f5928cbcf8ef1170d539f2cf3e734670faa91b9986bfd
+./s/rfc/d1/applications/TrailB.desktop 644 99df2f5c6235a04c330d4238ad0aa681b7a6e809d7871531c7aa65c3db8e1a49
+./s/wa/cmd/1000 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/wa/cmd/1001 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/wa/cmd/1002 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/wa/cmd/1003 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/wa/cmd/1004 644 0658ad5faaad0901d6c7d74e2401efe95fe8848fcf0f9832125f71b57d1f73ae
+./s/wa/d1/applications/Deep App.desktop 644 6b03c6f8d0727bfb0d4dd76770697ad93a958e7cbba0d7e78c7ff483aefd6683
+./s/wa/d1/applications/Google Maps.desktop 644 8988ae77914785ab1696d0e56eb95fbd9e4d3823ee4652b1647bea7c207e5f67
+./s/wa/d1/applications/Hyphen App.desktop 644 d33816bff0b6795f1445d44bc2f330d56df37ecc1a0b46474a77e9c5f45aa9eb
+./s/wa/d1/applications/Query App.desktop 644 24673b69646e38d35b0c355082dd7129b63def2e4b5ee56f2c24819d6cef4d5e
+./s/wa/d2/applications/brave-browser.desktop 644 5cf7adf1d96c231e47fd8c363c9ad8f7add16063975ce34b73d389a3c1494642

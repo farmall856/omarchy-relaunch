@@ -17,4 +17,16 @@
       <allow_active>auth_self</allow_active>
     </defaults>
   </action>
+
+  <!-- Destructive: deletes the user's signing key and saved list (uninstall).
+       allow_active=auth_self (never *_keep): it always asks. -->
+  <action id="io.github.laytonf.relaunch.purge">
+    <description>Remove Relaunch's login-launch signing key</description>
+    <message>Relaunch: remove your login-launch signing key and saved list?</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
 </policyconfig>

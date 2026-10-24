@@ -1,12 +1,25 @@
 [workspace]
 resolver = "2"
-members = ["crates/relaunch-core", "crates/relaunchd", "crates/relaunch-anchor"]
+members = [
+    "crates/relaunch-core",
+    "crates/relaunch-sys",
+    "crates/relaunch-desktop",
+    "crates/relaunch-shell",
+    "crates/relaunchd",
+    "crates/relaunch-anchor",
+    "crates/relaunchctl",
+    "crates/relaunch-engine",
+]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.90"
+repository = "https://github.com/farmall856/omarchy-relaunch"
+readme = "README.md"
+keywords = ["omarchy", "hyprland", "relaunch", "polkit"]
+categories = ["command-line-utilities"]
 
 # Pinned, vendored for the package build (see core/README.md). Exact versions,
 # not caret ranges, so a rebuild cannot silently pull a newer transitive tree
@@ -17,3 +30,40 @@ serde_json = "=1.0.145"
 ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
 sha2 = "=0.10.9"
 hex = "=0.4.3"
+getrandom = "=0.3.3"
+# Safe getuid/getpwuid_r for relaunch-sys; no unsafe anywhere in the workspace.
+nix = { version = "=0.31.3", default-features = false, features = ["user"] }
+# XDG base directories (zero runtime deps) and argv parsing (zero deps,
+# OsString-native). Vetted like nix: exact pins, default features off.
+xdg = { version = "=3.0.0", default-features = false }
+lexopt = { version = "=0.3.2", default-features = false }
+# Desktop Entry file format + Exec parsing (MPL-2.0, pop-os; used unmodified).
+# Default features OFF: the default `gettext` feature binds a C library.
+freedesktop-desktop-entry = { version = "=0.8.4", default-features = false }
+
+# Lint policy: relauncher-design-archive/rust-lint-policy.md. Every member opts in
+# with `[lints] workspace = true`; the gate runs clippy with `-D warnings`.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# The only workspace-level relaxation: duplicate versions come from transitive
+# trees (syn 2/3 via zbus+tokio vs serde, wasi via mio, getrandom 0.2 via an
+# optional crypto feature) that this workspace cannot unify. Cargo.lock still
+# pins and is reviewed.
+multiple_crate_versions = "allow"
+# A security core must not panic on untrusted input.
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "warn"
+panic = "deny"

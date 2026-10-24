@@ -5,7 +5,7 @@ then relaunches those apps into the same workspaces after a reboot or crash.
 Each app restores its own context; this makes sure it comes back up in the
 right place.
 
-Click the bar icon → **Save Current Workspaces**. That's it. On the next
+Click the bar icon → **Capture open windows**. That's it. On the next
 boot, herdr is back on workspace 1, Brave on 2, your terminal on 6 — wherever
 you had them.
 
@@ -31,40 +31,74 @@ they survive a crash for free.
 
 ## Install
 
-Via Omarchy (recommended):
+Relaunch comes in two parts: the bar widget, from the Omarchy plugin
+marketplace, and its **boot tools**, a small system package from the AUR.
 
 ```sh
 omarchy plugin add https://github.com/farmall856/omarchy-relaunch.git --enable
 ```
 
-That clone is enough. Opening the widget (or just loading the bar) runs the
-engine from the plugin folder and installs the owned loader plus the one
-`relaunch.lua` source line in `hyprland.lua`. Optionally also:
+Open the widget. Until the boot tools are installed it says so, explains what
+they are, and offers **Install boot tools**.
 
-```sh
-git clone https://github.com/farmall856/omarchy-relaunch.git
-cd omarchy-relaunch
-./install.sh
-```
+> **Helper package required.** Relaunch restores apps at login through a small
+> root-owned system service installed from the AUR as `omarchy-relaunch` (the
+> "boot tools"): a polkit-gated signing authority, a login-time verifier that
+> runs only a signature-verified launch list, a D-Bus activation file, and a
+> systemd unit. The plugin will prompt to install it (polkit/sudo) on first use,
+> or install it yourself with `omarchy pkg aur add omarchy-relaunch` and then
+> `relaunch ensure-hooks --anchor` (which wires the login step into
+> `hyprland.lua`). Remove it with `sudo pacman -Rns omarchy-relaunch`. The plugin never changes your config
+> without an explicit Authorize.
 
-`install.sh` copies `relaunch` into `~/.local/bin`, installs the plugin folder,
-and wires the same hooks.
+The button runs exactly two fixed commands:
+
+1. `omarchy pkg aur add omarchy-relaunch` in a terminal window, where the
+   package builds and pacman asks for your password. The plugin itself never
+   elevates.
+2. Once the package's files are in place,
+   `/usr/lib/omarchy-relaunch/relaunch ensure-hooks --anchor`, which adds the
+   one login line to `~/.config/hypr/hyprland.lua`. Running it again changes
+   nothing.
+
+Nothing launches at login until you capture a layout and Authorize it.
+
+Once they are installed, the panel's **Boot tools** section shows the
+installed version and manages the package, each in a terminal window that
+asks for your password:
+
+- **Check for updates** asks the AUR for a newer version (no password, no
+  terminal), and offers **Update** (`yay -S --needed omarchy-relaunch`) when
+  there is one.
+- **Reinstall** rebuilds the current version (`yay -S --rebuild
+  omarchy-relaunch`), for damaged files or a half-finished update.
+- **Uninstall** removes the package (`omarchy pkg drop omarchy-relaunch`).
+  Your saved layout, your signing key and the widget are kept, so installing
+  again brings everything back; until then nothing restores at login.
+
+`omarchy pkg aur add` leaves an installed package as it is, so updates go to
+yay, the AUR helper Omarchy uses, directly.
+
+From a checkout instead, `./install.sh` installs the plugin folder and wires
+the same login line (the boot tools package still comes from the AUR).
 
 ### Dependencies
 
-- **bash** and **jq** — both ship with Omarchy Quattro. No compiler.
-- **Hyprland / Omarchy Quattro** — the runtime.
+- **Omarchy / Hyprland** — the runtime, and `omarchy pkg aur add` for the
+  boot tools.
+- **polkit**, **systemd**, **dbus** — pulled in by the `omarchy-relaunch`
+  package.
 - A Nerd Font in the bar (Omarchy default) for the widget glyph.
-
-The engine runs `hyprctl`. No elevated privileges; everything runs as your
-user, like any Hyprland command.
 
 ## Usage
 
 1. Arrange your apps across workspaces the way you want them on boot.
 2. Click the Relaunch icon in the bar.
-3. **Save Current Workspaces** — captures the layout and writes the pins. The
-   status line reports how many entries were added and updated.
+3. **Capture open windows** — captures the layout as the boot list, replacing
+   what was saved. If that would remove pinned apps that aren't open, the panel
+   asks first. **Add open windows** instead adds the open apps and keeps every
+   other pin — the one to use when only some of your apps are running. Either
+   way you review the change and authorize it.
 
 The panel is titled **relaunch**, with a **?** icon opposite it on the same
 line that opens this README on GitHub. Below the save button the panel is
@@ -185,9 +219,14 @@ Runtime files (not in git):
 
 ## Remove
 
-From the panel: **Remove Relaunch permanently** (click twice). That removes the
+Only the boot tools, keeping your layout and key: **Uninstall** in the panel's
+Boot tools section (see Install).
+
+Everything: **Remove Relaunch permanently** (click twice, then confirm the
+password prompt). That deletes your signing key and signed state, removes the
 `hyprland.lua` source line, `~/.config/omarchy-relaunch/` (loader, rules and
-all state), and the plugin folder. Your `autostart.lua` is not touched, because
+all state), and the plugin folder. The boot tools package stays; remove it
+with `sudo pacman -Rns omarchy-relaunch`. Your `autostart.lua` is not touched, because
 Relaunch never wrote to it.
 
 Complete removal is the one thing Relaunch promises unconditionally: every file

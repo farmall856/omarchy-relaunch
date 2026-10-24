@@ -1,0 +1,23 @@
+post_install() {
+  cat <<'EOF'
+==> Relaunch system core installed.
+    The relaunchd authority is D-Bus activated (Type=dbus) and starts on demand
+    as root; there is nothing to enable or start. systemd/D-Bus/polkit are
+    reloaded automatically by pacman's own hooks.
+
+    This package is only the root core. To use Relaunch, install the shell
+    plugin (the bar widget) from the Omarchy plugin marketplace:
+        omarchy plugin add https://github.com/farmall856/omarchy-relaunch --enable
+    then open the plugin and finish per-user setup (it wires the login anchor
+    into your hyprland.lua). The plugin's "Install boot tools" button installs
+    THIS package for you; installing it by hand is equivalent.
+EOF
+}
+
+post_upgrade() {
+  cat <<'EOF'
+==> Relaunch system core upgraded. relaunchd re-activates on the next call;
+    no reboot is required for the core. If a signed boot config already exists,
+    it keeps working unchanged.
+EOF
+}

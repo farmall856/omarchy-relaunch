@@ -1,0 +1,4 @@
+# Keep complexity honest; tune with data, not vibes. Raise a value only with a
+# justification when a real function trips it (rust-lint-policy.md §3).
+too-many-arguments-threshold = 7
+type-complexity-threshold = 250

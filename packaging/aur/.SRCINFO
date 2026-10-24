@@ -1,0 +1,19 @@
+pkgbase = omarchy-relaunch
+	pkgdesc = Relaunch system core: login-time, signature-verified app relauncher for Omarchy (helper package for the Relaunch shell plugin)
+	pkgver = 2.0.0
+	pkgrel = 1
+	url = https://github.com/farmall856/omarchy-relaunch
+	install = omarchy-relaunch.install
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = cargo
+	makedepends = git
+	depends = polkit
+	depends = systemd
+	depends = dbus
+	optdepends = hyprland: the compositor Relaunch restores windows into (required at login, not to install)
+	source = omarchy-relaunch::git+https://github.com/farmall856/omarchy-relaunch.git#tag=v2.0.0
+	sha256sums = SKIP
+
+pkgname = omarchy-relaunch
