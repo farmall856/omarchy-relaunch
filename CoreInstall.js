@@ -238,7 +238,7 @@ function create(fx) {
       if (r && r.started && r.exitCode === 0) {
         ready(s.wiredFor === "update" ? "Boot tools updated to " + s.version + "."
           : s.wiredFor === "reinstall" ? "Boot tools reinstalled."
-          : "Boot tools installed. Save a layout and it will restore at login.", false)
+          : "Boot tools installed. Capture a layout and it will restore at login.", false)
         fx.ready()
       } else {
         s.phase = "unwired"

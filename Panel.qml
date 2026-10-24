@@ -1121,7 +1121,7 @@ Panel {
                   + "the login verifier that runs only a signature-verified launch list, and a systemd unit. "
                   + "Installing it uses pacman in a terminal window and will ask for your password (sudo). "
                   + "Relaunch will then wire its login step into your Hyprland config (hyprland.lua). "
-                  + "Nothing launches until you Save and Authorize a layout."
+                  + "Nothing launches until you Capture and Authorize a layout."
                 color: root.ink
                 opacity: 0.85
                 wrapMode: Text.Wrap
