@@ -108,6 +108,14 @@ while IFS= read -r -d '' path && IFS= read -r -d '' sha && IFS= read -r -d '' ex
   [[ "$(sha256sum "$path" | cut -d' ' -f1)" == "$sha" ]] || fail "launcher $path does not hash to its pin"
   [[ "$("$ANCHOR" canonical-exec "$path")" == "$exec" ]] || fail "launcher $path does not read back to $exec"
 done < <(jq -j '.signed.entries[] | .launcher.path, "\u0000", .launcher.sha256, "\u0000", .exec, "\u0000"' "$S/doc.json")
+# A pin copied from a DBusActivatable launcher (the fixture's GApplication
+# service window) is that launcher's Exec, in a private launcher without the
+# key, which boot runs.
+if ! $live; then
+  dbus="$(jq -r '.signed.entries[] | select(.windowClass == "DbusApp") | "\(.exec) \(.execSource) \(.launcher.path)"' "$S/doc.json")"
+  [[ "${dbus% *}" == "dbusapp desktop-file" ]] || fail "the DbusApp pin must be its launcher's Exec: $dbus"
+  ! grep -q '^DBusActivatable' "${dbus##* }" || fail "a private launcher must not carry DBusActivatable: ${dbus##* }"
+fi
 
 python3 -I - "$S/old/cfg/config.json" "$S/propose.json" "$live" <<'EOF'
 import json, sys

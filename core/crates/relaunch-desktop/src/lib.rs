@@ -20,7 +20,8 @@
 //! It parses the launcher buffer the anchor hashed, so the argv that is
 //! `execve`'d is exactly what was in the approved bytes — never shell, never a
 //! `gio`/`gtk-launch` reopen. `DBusActivatable`/`Terminal` launchers are
-//! refused by [`canonical_exec`].
+//! refused by [`canonical_exec`]; capture ([`exec_argv`]) refuses only
+//! `Terminal`, since a `DBusActivatable` file's `Exec` is still its command.
 //!
 //! [`freedesktop-desktop-entry`]: https://github.com/pop-os/freedesktop-desktop-entry
 #![cfg_attr(
@@ -38,7 +39,8 @@
 pub struct DesktopEntry {
     /// The `Exec` argv with field codes expanded.
     pub argv: Vec<String>,
-    /// `DBusActivatable=true`: the entry must not be run as a command.
+    /// `DBusActivatable=true`: the entry asks to be activated over D-Bus, which
+    /// the anchor does not do, so a launcher carrying it is not run.
     pub dbus_activatable: bool,
     /// `Terminal=true`: the entry must not be run as a command.
     pub terminal: bool,
@@ -134,18 +136,18 @@ pub fn split_canonical_exec(exec: &str) -> Vec<String> {
 
 /// The argv of a `.desktop` file's `Exec`, for capture to copy into a pin's
 /// private launcher. The file is resolved, read bounded as a regular file,
-/// parsed with [`parse_entry`], and refused if it is `DBusActivatable` or
-/// `Terminal=true` (it cannot be relaunched as a command).
+/// parsed with [`parse_entry`], and refused if it is `Terminal=true` (it
+/// cannot be relaunched as a command). A `DBusActivatable` file's `Exec` is
+/// read like any other: the spec keeps it as the launch for a caller that does
+/// not activate over the bus, and the private launcher it is copied into
+/// carries no `DBusActivatable` key.
 ///
 /// # Errors
 ///
 /// A message if the path cannot be resolved or read, is not UTF-8, has no
-/// usable `Exec`, or is a refused launcher kind.
+/// usable `Exec`, or is `Terminal=true`.
 pub fn exec_argv_file(path: &str) -> Result<Vec<String>, String> {
-    let resolved = std::fs::canonicalize(path).map_err(|e| format!("resolve {path}: {e}"))?;
-    let buf = relaunch_sys::fs::read_regular_capped(&resolved, relaunch_sys::fs::MAX_FILE_BYTES)?;
-    let text = String::from_utf8(buf).map_err(|_| "launcher is not valid UTF-8".to_string())?;
-    exec_argv(&text)
+    exec_argv(&read_launcher(path)?)
 }
 
 /// [`exec_argv_file`] over a buffer already read.
@@ -155,30 +157,38 @@ pub fn exec_argv_file(path: &str) -> Result<Vec<String>, String> {
 /// As [`exec_argv_file`], for the parse and refusal steps.
 pub fn exec_argv(buffer: &str) -> Result<Vec<String>, String> {
     let entry = parse_entry(buffer)?;
-    if entry.dbus_activatable {
-        return Err("DBusActivatable launcher cannot be relaunched as a command".into());
-    }
     if entry.terminal {
         return Err("Terminal=true launcher cannot be relaunched as a command".into());
     }
     Ok(entry.argv)
 }
 
-/// The canonical `exec` of a `.desktop` file: [`exec_argv_file`], rendered.
+fn read_launcher(path: &str) -> Result<String, String> {
+    let resolved = std::fs::canonicalize(path).map_err(|e| format!("resolve {path}: {e}"))?;
+    let buf = relaunch_sys::fs::read_regular_capped(&resolved, relaunch_sys::fs::MAX_FILE_BYTES)?;
+    String::from_utf8(buf).map_err(|_| "launcher is not valid UTF-8".to_string())
+}
+
+/// The canonical `exec` of a launcher the anchor would run (its
+/// `canonical-exec`): [`exec_argv_file`], rendered, and refused as well if it
+/// is `DBusActivatable`, as boot refuses it.
 ///
 /// # Errors
 ///
-/// As [`exec_argv_file`].
+/// As [`exec_argv_file`], or a `DBusActivatable` launcher.
 pub fn canonical_exec_file(path: &str) -> Result<String, String> {
-    exec_argv_file(path).map(|argv| canonical_exec_string(&argv))
+    canonical_exec(&read_launcher(path)?)
 }
 
 /// [`canonical_exec_file`] over a buffer already read.
 ///
 /// # Errors
 ///
-/// As [`exec_argv_file`], for the parse and refusal steps.
+/// As [`canonical_exec_file`], for the parse and refusal steps.
 pub fn canonical_exec(buffer: &str) -> Result<String, String> {
+    if parse_entry(buffer)?.dbus_activatable {
+        return Err("DBusActivatable launcher cannot be relaunched as a command".into());
+    }
     exec_argv(buffer).map(|argv| canonical_exec_string(&argv))
 }
 
@@ -379,6 +389,14 @@ mod canonical_exec_tests {
         assert!(canonical_exec_from_buffer(d)
             .unwrap_err()
             .contains("DBusActivatable"));
+    }
+
+    #[test]
+    fn capture_reads_a_dbus_activatable_exec_and_refuses_a_terminal_one() {
+        let d = "[Desktop Entry]\nExec=files --new-window %U\nDBusActivatable=true\n";
+        assert_eq!(super::exec_argv(d).unwrap(), ["files", "--new-window"]);
+        let d = "[Desktop Entry]\nExec=htop\nTerminal=true\n";
+        assert!(super::exec_argv(d).unwrap_err().contains("Terminal"));
     }
 
     #[test]

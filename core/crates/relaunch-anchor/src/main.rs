@@ -19,12 +19,11 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use relaunch_anchor::boot::{self, Timing};
 use relaunch_anchor::report::{self, Launch, Record};
-use relaunch_anchor::{decide, hypr, launchable, load_verified, read_launcher, Spawn};
+use relaunch_anchor::{decide, hypr, launchable, load_verified, read_launcher};
 use relaunch_core::{Entry, SignedConfig};
 use relaunch_sys::cmd::output_capped;
 use relaunch_sys::diag;
@@ -192,7 +191,7 @@ fn launch_one(entry: &Entry, config_dir: &Path, uid: u32, path: &str) -> Launch 
     if let Err(reason) = launchable(&spawn, path) {
         return base("not_found", Some(reason));
     }
-    match do_spawn(&spawn) {
+    match relaunch_anchor::launch::spawn(&spawn, Path::new(paths::UWSM_APP)) {
         Ok(mut child) => match child.try_wait() {
             Ok(None) => Launch {
                 pid: Some(child.id()),
@@ -207,18 +206,6 @@ fn launch_one(entry: &Entry, config_dir: &Path, uid: u32, path: &str) -> Launch 
 /// The shared canonical-exec (INV-2: the same function the engine calls).
 fn canonical_exec_for(path: &str) -> Result<String, String> {
     relaunch_desktop::canonical_exec_file(path)
-}
-
-fn do_spawn(spawn: &Spawn) -> Result<std::process::Child, String> {
-    let Some((program, args)) = spawn.argv.split_first() else {
-        return Err("empty argv".to_string());
-    };
-    let mut c = Command::new(program);
-    c.args(args).env_remove("BASH_ENV");
-    if let Some(dir) = &spawn.cwd {
-        c.current_dir(dir);
-    }
-    c.spawn().map_err(|e| e.to_string())
 }
 
 fn write_last_boot(config_dir: &Path, started_at: &str, record: Record) {

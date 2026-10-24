@@ -238,6 +238,32 @@ jq -e '.proposalJson | fromjson | .entries | map(.windowClass) | sort == ["Back\
 jq -e '.candidates[] | select(.class == "Scratch") | .proposed == false and .reason == "special-workspace"' \
   >/dev/null <<<"$PROPOUT3" || fail "a special-workspace window must be shown, not proposed: $PROPOUT3"
 
+# A GApplication service (`--gapplication-service`) opens no window, so it is
+# never the captured command: the launcher's Exec instead, field codes dropped,
+# a DBusActivatable launcher's included.
+mkdir -p "$WORKDIR/svcdata/applications"
+cp "$CAPDATA/dbusapp.desktop" "$WORKDIR/svcdata/applications/"
+printf '[Desktop Entry]\nType=Application\nName=Files\nStartupWMClass=org.example.Files\nExec=files --new-window %%U\n' \
+  >"$WORKDIR/svcdata/applications/org.example.Files.desktop"
+printf '%s\0' /usr/bin/files --gapplication-service >"$CAPNS/920"
+printf '%s\0' /usr/bin/dbusapp --gapplication-service >"$CAPNS/921"
+cat >"$PROPC" <<'EOF'
+[
+  {"address":"0x20","pid":920,"initialClass":"org.example.Files","workspace":{"id":3},"xwayland":false},
+  {"address":"0x21","pid":921,"initialClass":"DbusApp","workspace":{"id":3},"xwayland":false}
+]
+EOF
+SVC="$(FAKE_CLIENTS="$PROPC" RELAUNCH_CONFIG_DIR="$WORKDIR/propose-empty" \
+  RELAUNCH_CMDLINE_DIR="$CAPNS" RELAUNCH_DATA_DIRS="$WORKDIR/svcdata" "$RELAUNCH" propose --json)"
+jq -e '.candidates[] | select(.class == "org.example.Files")
+       | .exec == "files --new-window" and .execSource == "desktop-file" and .proposed' \
+  >/dev/null <<<"$SVC" || fail "a GApplication service must be captured as its launcher: $SVC"
+jq -e '.candidates[] | select(.class == "DbusApp")
+       | .exec == "dbusapp" and .execSource == "desktop-file" and .proposed' \
+  >/dev/null <<<"$SVC" || fail "a DBusActivatable launcher's Exec must be the command: $SVC"
+jq -e '.proposalJson | fromjson | .entries | map(.exec) | sort == ["dbusapp", "files --new-window"]' \
+  >/dev/null <<<"$SVC" || fail "no service command may enter the proposal: $SVC"
+
 # Capture keys a pin by (window class, workspace, command): three foots on
 # workspace 6 running different commands are three pins; two identical foots
 # on workspace 2 are one, and the other is named as merged. Re-capturing the

@@ -91,3 +91,5 @@ DLM capture:Back\slash
 DLM capture:Scratch
 DLM suite:fg:command:capture
 DLM suite:fg:shell:capture
+DGS capture:DbusApp
+DGS propose

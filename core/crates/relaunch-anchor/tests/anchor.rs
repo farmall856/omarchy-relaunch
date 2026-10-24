@@ -10,7 +10,7 @@
 
 use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ed25519_dalek::SigningKey;
@@ -312,11 +312,121 @@ fn read_regular_capped_rejects_oversize() {
 
 #[test]
 fn the_anchor_runs_argv_directly_and_never_a_shell_or_gio() {
-    let main_src = include_str!("../src/main.rs");
-    for gone in ["RELAUNCH_EXEC", "/usr/bin/bash", "\"-c\"", "gio"] {
-        assert!(!main_src.contains(gone), "{gone}");
+    for src in [
+        include_str!("../src/main.rs"),
+        include_str!("../src/launch.rs"),
+    ] {
+        for gone in [
+            "RELAUNCH_EXEC",
+            "/usr/bin/bash",
+            "\"-c\"",
+            "gio",
+            "gtk-launch",
+            "setsid",
+        ] {
+            assert!(!src.contains(gone), "{gone}");
+        }
     }
-    assert!(main_src.contains("env_remove(\"BASH_ENV\")"));
+    assert!(include_str!("../src/launch.rs").contains("env_remove(\"BASH_ENV\")"));
+    assert!(include_str!("../src/main.rs")
+        .contains("launch::spawn(&spawn, Path::new(paths::UWSM_APP))"));
+}
+
+// ---- starting a verified spawn under uwsm-app ----
+
+/// A stand-in program that records its argv (one per line) and working
+/// directory in `<dir>/<name>.ran`, then exits with `code`.
+fn recorder(dir: &Path, name: &str, code: u8) -> PathBuf {
+    let path = dir.join(name);
+    let out = dir.join(format!("{name}.ran"));
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n{{ pwd; for a in \"$@\"; do printf '%s\\n' \"$a\"; done; }} >'{}'\nexit {code}\n",
+            out.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// `(cwd, argv)` a recorder ran with, once its process has exited.
+fn ran(dir: &Path, name: &str, mut child: std::process::Child) -> Option<(String, Vec<String>)> {
+    child.wait().unwrap();
+    let text = std::fs::read_to_string(dir.join(format!("{name}.ran"))).ok()?;
+    let mut lines = text.lines().map(str::to_owned);
+    let cwd = lines.next()?;
+    Some((cwd, lines.collect()))
+}
+
+fn argv(words: &[&str]) -> Vec<String> {
+    words.iter().map(|w| (*w).to_owned()).collect()
+}
+
+#[test]
+fn a_pin_runs_under_the_wrapper_after_a_double_dash_in_its_signed_directory() {
+    let tmp = Tmp::new("wrap");
+    let wrapper = recorder(&tmp.0, "uwsm-app", 0);
+    let work = tmp.0.join("work dir");
+    std::fs::create_dir(&work).unwrap();
+    for words in [
+        &["foot", "--app-id=btop", "-e", "btop"][..],
+        &["nautilus", "--new-window"],
+        &["/usr/bin/app", "a b", "--", "-h", "x.desktop"],
+    ] {
+        let spawn = Spawn {
+            argv: argv(words),
+            cwd: Some(work.to_string_lossy().into_owned()),
+        };
+        let child = relaunch_anchor::launch::spawn(&spawn, &wrapper).unwrap();
+        let (cwd, got) = ran(&tmp.0, "uwsm-app", child).unwrap();
+        assert_eq!(cwd, work.to_string_lossy(), "{words:?}");
+        let mut want = argv(&["--"]);
+        want.extend(argv(words));
+        assert_eq!(got, want, "the verified argv whole, after --");
+    }
+}
+
+#[test]
+fn only_a_wrapper_that_cannot_start_runs_the_argv_directly() {
+    let tmp = Tmp::new("fallback");
+    let direct = recorder(&tmp.0, "app", 0);
+    let spawn = Spawn {
+        argv: vec![direct.to_string_lossy().into_owned(), "--new-window".into()],
+        cwd: None,
+    };
+    let missing = tmp.0.join("no-uwsm-app");
+    let child = relaunch_anchor::launch::spawn(&spawn, &missing).unwrap();
+    assert_eq!(ran(&tmp.0, "app", child).unwrap().1, ["--new-window"]);
+    std::fs::remove_file(tmp.0.join("app.ran")).unwrap();
+
+    // A wrapper that runs and fails is the launch's result: no second launch.
+    let failing = recorder(&tmp.0, "uwsm-app", 1);
+    let child = relaunch_anchor::launch::spawn(&spawn, &failing).unwrap();
+    assert!(ran(&tmp.0, "uwsm-app", child).is_some());
+    assert!(
+        !tmp.0.join("app.ran").exists(),
+        "the app must not also run directly"
+    );
+
+    // One that cannot be executed starts nothing, so the app runs directly.
+    std::fs::set_permissions(&failing, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::remove_file(tmp.0.join("uwsm-app.ran")).unwrap();
+    let child = relaunch_anchor::launch::spawn(&spawn, &failing).unwrap();
+    assert_eq!(ran(&tmp.0, "app", child).unwrap().1, ["--new-window"]);
+    assert!(!tmp.0.join("uwsm-app.ran").exists());
+    std::fs::remove_file(tmp.0.join("app.ran")).unwrap();
+
+    // A signed directory that is gone fails the launch either way.
+    let gone = Spawn {
+        cwd: Some(tmp.0.join("gone").to_string_lossy().into_owned()),
+        ..spawn
+    };
+    let wrapper = recorder(&tmp.0, "uwsm-app", 0);
+    assert!(relaunch_anchor::launch::spawn(&gone, &wrapper).is_err());
+    assert!(!tmp.0.join("uwsm-app.ran").exists());
+    assert!(!tmp.0.join("app.ran").exists());
 }
 
 // ---- Lua emission ----

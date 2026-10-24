@@ -42,6 +42,13 @@ fn is_helper_argv(argv: &[String]) -> bool {
     argv.iter().any(|a| a.starts_with("--type="))
 }
 
+/// A `GApplication`'s D-Bus service (`--gapplication-service`, `GLib`'s
+/// activation flag): the session bus starts it to answer activation, and it
+/// opens no window of its own, so it never brings a window back.
+fn is_service_argv(argv: &[String]) -> bool {
+    argv.iter().any(|a| a == "--gapplication-service")
+}
+
 /// A command line whose separators were overwritten: one field holding
 /// spaces that is not itself a program. Chromium and Electron rewrite their
 /// own command line this way, and its words cannot be told apart again, so it
@@ -256,12 +263,14 @@ impl Capture {
 /// Two candidates, and no application is named:
 /// - D, the `.desktop` that claims the class (`StartupWMClass`, desktop-file
 ///   id, web-app identity, `Name`), its `Exec` as argv — none for a
-///   `Terminal=true` or `DBusActivatable` file, which is not a command;
+///   `Terminal=true` file, which is not a command (a `DBusActivatable` file's
+///   `Exec` is still its command);
 /// - P, the window process's command line (past `--type=` subprocesses).
 ///
-/// P is not the window's own command when it was title-smashed, when its
-/// process also owns a window of another class (`shares_process`), or when
-/// only a subprocess was found. Then D, if any. Otherwise P whole — flags and
+/// P is not the window's own command when it was title-smashed, when it is a
+/// `GApplication` service (`--gapplication-service`), when its process also
+/// owns a window of another class (`shares_process`), or when only a
+/// subprocess was found. Then D, if any. Otherwise P whole — flags and
 /// all, with its working directory — unless D runs a different program, which
 /// means the process is not what launches the window. Without either, the
 /// capture is an unsigned guess: a guess is never a launch command.
@@ -316,16 +325,16 @@ pub fn capture_resolve(
             })
         })
         .flatten()
-        .filter(|(_, argv)| !is_title_smashed(argv));
+        .filter(|(_, argv)| !is_title_smashed(argv) && !is_service_argv(argv));
     let d = desktop(false);
     if let Some((at, argv)) = own {
         if d.as_ref()
             .is_none_or(|d| program(&d.argv) == program(&argv))
         {
             let shown = terminal_shows(proc, index, at, &argv);
-            if let Some(Shown::Command { pid, argv: hosted }) = shown {
+            if let Some(Shown::Command { argv: hosted, cwd }) = shown {
                 return Capture {
-                    cwd: proc.cwd(pid),
+                    cwd,
                     hosted: program(&hosted).map(str::to_owned),
                     ..capture(
                         hosted_command(index, &argv, hosted),
@@ -334,12 +343,12 @@ pub fn capture_resolve(
                 };
             }
             // A terminal works where its shell is, not where it was started.
-            let cwd_of = match shown {
-                Some(Shown::Shell { pid }) => pid,
-                _ => at,
+            let cwd = match shown {
+                Some(Shown::Shell { cwd }) => cwd,
+                _ => proc.cwd(at),
             };
             return Capture {
-                cwd: proc.cwd(cwd_of),
+                cwd,
                 hosted: named_command(index, &argv),
                 ..capture(argv, Some(ExecSource::Cmdline))
             };
@@ -391,11 +400,14 @@ fn named_command(index: &DesktopIndex, argv: &[String]) -> Option<String> {
 
 /// What a terminal emulator window shows in its foreground.
 enum Shown {
-    /// Its own shell (pid): nothing was started in it, or its command line
-    /// already names the command it runs.
-    Shell { pid: u32 },
-    /// A command started in it, whose leader is `pid`.
-    Command { pid: u32, argv: Vec<String> },
+    /// Its own shell, in `cwd`: nothing was started in it, or its command
+    /// line already names the command it runs (then where that runs).
+    Shell { cwd: Option<String> },
+    /// A command started in it, whose leader runs in `cwd`.
+    Command {
+        argv: Vec<String>,
+        cwd: Option<String>,
+    },
 }
 
 /// For a terminal emulator window (`argv`, at pid `at`): its pty's
@@ -405,12 +417,13 @@ enum Shown {
 fn terminal_shows(proc: &Proc, index: &DesktopIndex, at: u32, argv: &[String]) -> Option<Shown> {
     let option = terminal_option(index, argv)?;
     match proc.foreground(at)? {
-        Foreground::Command { pid, argv: fg }
+        Foreground::Command { argv: fg, cwd, .. }
             if !names_command(argv, option) && !fg.is_empty() && !is_title_smashed(&fg) =>
         {
-            Some(Shown::Command { pid, argv: fg })
+            Some(Shown::Command { argv: fg, cwd })
         }
-        Foreground::Shell { pid } | Foreground::Command { pid, .. } => Some(Shown::Shell { pid }),
+        Foreground::Command { cwd, .. } => Some(Shown::Shell { cwd }),
+        Foreground::Shell { pid } => Some(Shown::Shell { cwd: proc.cwd(pid) }),
     }
 }
 
@@ -625,6 +638,45 @@ mod tests {
             got(&w.capture("foot", 11, false)),
             (Some(ExecSource::Cmdline), "/usr/bin/foot", Some("/")),
             "one field without a space is an honest one-word command"
+        );
+    }
+
+    #[test]
+    fn a_gapplication_service_is_never_the_windows_command() {
+        let w = World::new(
+            "service",
+            &[
+                (10, 1, &["/usr/bin/app", "--gapplication-service"], Some("/")),
+                (11, 1, &["/usr/bin/bus", "--gapplication-service"], Some("/")),
+            ],
+            &[
+                (
+                    "org.example.App.desktop",
+                    "StartupWMClass=org.example.App\nExec=app --new-window %U",
+                ),
+                (
+                    "org.example.Bus.desktop",
+                    "StartupWMClass=org.example.Bus\nExec=bus --new-window %U\nDBusActivatable=true",
+                ),
+            ],
+        );
+        let c = w.capture("org.example.App", 10, false);
+        assert_eq!(
+            got(&c),
+            (Some(ExecSource::DesktopFile), "app --new-window", None),
+            "the same program as its launcher, but the launcher opens a window"
+        );
+        assert_eq!(c.provenance, Provenance::None);
+        let c = w.capture("Nameless", 10, false);
+        assert_eq!(
+            c.source, None,
+            "a service and no launcher: an unsigned guess"
+        );
+        assert_eq!(c.to_json()["reason"], "no-command");
+        assert_eq!(
+            got(&w.capture("org.example.Bus", 11, false)),
+            (Some(ExecSource::DesktopFile), "bus --new-window", None),
+            "a DBusActivatable launcher's Exec is its command"
         );
     }
 
@@ -846,6 +898,83 @@ mod tests {
             c.source, None,
             "§9: an XWayland window's foreground is not eligible"
         );
+        assert!(!c.exec.contains("herdr"));
+    }
+
+    #[test]
+    fn a_leader_the_kernel_hides_is_the_command_only_when_the_host_started_it() {
+        let bare = |w: &World| w.capture("foot", 10, false).exec;
+        let w = terminal("fg-hidden", &["/usr/bin/foot"], 12, &[FOOT]);
+        w.file("12.ns", "eacces\n");
+        let c = w.capture("foot", 10, false);
+        assert_eq!(
+            got(&c),
+            (
+                Some(ExecSource::Cmdline),
+                "/usr/bin/foot -e herdr --session main",
+                Some("/home/u")
+            ),
+            "a non-dumpable command run from the host shell, in the shell's directory"
+        );
+        assert_eq!(c.provenance, Provenance::Host);
+        assert_eq!(c.hosted.as_deref(), Some("herdr"));
+
+        w.file("12.nspid", "2\n");
+        assert_eq!(bare(&w), "/usr/bin/foot", "in a nested PID namespace");
+        w.file("12.nspid", "1\n");
+        w.file("12.uid", "4242\n");
+        assert_eq!(bare(&w), "/usr/bin/foot", "another real uid");
+        w.file("12.uid", &format!("{}\n", relaunch_sys::current_uid()));
+        assert_eq!(bare(&w), "/usr/bin/foot -e herdr --session main");
+
+        // Its parents: every one on the host, up to the terminal's shell.
+        w.file("12.ppid", "1\n");
+        assert_eq!(
+            bare(&w),
+            "/usr/bin/foot",
+            "a walk that never reaches the shell"
+        );
+        w.file("13", "/usr/bin/helper\0");
+        w.file("13.ppid", "11\n");
+        w.file("13.cwd", "/home/u/helper\n");
+        w.file("12.ppid", "13\n");
+        assert_eq!(
+            got(&w.capture("foot", 10, false)),
+            (
+                Some(ExecSource::Cmdline),
+                "/usr/bin/foot -e herdr --session main",
+                Some("/home/u/helper")
+            ),
+            "through a host parent, in the nearest host directory"
+        );
+        w.file("13.ns", "eacces\n");
+        assert_eq!(bare(&w), "/usr/bin/foot", "a parent the kernel hides too");
+        w.file("13.ns", "foreign\n");
+        assert_eq!(bare(&w), "/usr/bin/foot", "a sandboxed parent");
+        std::fs::remove_file(w.0.join("cmd/13.cwd")).unwrap();
+        w.file("13.ns", "host\n");
+        assert_eq!(
+            w.capture("foot", 10, false).cwd.as_deref(),
+            Some("/home/u"),
+            "a parent with no directory: the next one up"
+        );
+
+        let w = terminal("fg-hidden-named", &["foot", "-e", "htop"], 12, &[FOOT]);
+        w.file("12.ns", "eacces\n");
+        assert_eq!(
+            got(&w.capture("foot", 10, false)),
+            (Some(ExecSource::Cmdline), "foot -e htop", Some("/home/u")),
+            "a terminal naming its command, where its hidden foreground runs"
+        );
+        let w = terminal("fg-hidden-untrusted", &["foot"], 12, &[FOOT]);
+        w.file("12.ns", "eacces\n");
+        let proc = Proc::fixture(w.0.join("cmd"));
+        let index = DesktopIndex::build(
+            &[w.0.join("applications").to_string_lossy().into_owned()],
+            crate::index::Launcher::None,
+        );
+        let c = capture_resolve(&proc, &index, "foot", 10, Some(true), false);
+        assert_eq!(c.source, None, "§9: never for an XWayland window");
         assert!(!c.exec.contains("herdr"));
     }
 

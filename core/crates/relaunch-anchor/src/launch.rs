@@ -2,10 +2,12 @@
 //! launcher, `<config_dir>/launchers/<class>.desktop`. The anchor reads that
 //! file once, and everything after works on those bytes: the hash the human
 //! approved, the parse into an argv, the check that the argv is the signed
-//! `exec`, and the `execve`. Nothing re-reads the path, so a file swapped
-//! after the check is never what runs.
+//! `exec`, and the spawn (under `uwsm-app`, outside the signature). Nothing
+//! re-reads the path, so a file swapped after the check is never what runs.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 
 use relaunch_core::Entry;
 use sha2::{Digest, Sha256};
@@ -15,8 +17,8 @@ use crate::desktop::{canonical_exec_string, parse_entry};
 /// The config-dir subdirectory every launcher lives in.
 pub const LAUNCHERS_SUBDIR: &str = "launchers";
 
-/// A verified entry's launch: `execve` this argv directly, optionally in `cwd`
-/// (the launcher's `Path=`).
+/// A verified entry's launch: this argv, never through a shell, optionally in
+/// `cwd` (the launcher's `Path=`); [`spawn`] starts it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Spawn {
     /// The program and its arguments.
@@ -98,4 +100,40 @@ pub fn launchable(spawn: &Spawn, path: &str) -> Result<(), String> {
         Some(p) => Err(format!("command not found: {p}")),
         None => Err("command not found: ".into()),
     }
+}
+
+/// Start a verified spawn under `wrapper` (`uwsm-app`), as `wrapper -- argv…`
+/// in the signed `cwd`: the wrapper is a prefix outside the signature, and the
+/// `--` keeps it from reading the command's own options. The environment is
+/// inherited but `BASH_ENV`. Only when the wrapper could not be started at all
+/// (missing, not executable: `spawn` fails before anything runs) is the argv
+/// started directly; a wrapper that starts and then fails is that launch's
+/// result, never a second launch.
+///
+/// # Errors
+///
+/// An empty argv, or why the process could not be started.
+pub fn spawn(spawn: &Spawn, wrapper: &Path) -> Result<Child, String> {
+    let Some((program, args)) = spawn.argv.split_first() else {
+        return Err("empty argv".to_string());
+    };
+    let command = |program: &OsStr, args: &[&OsStr]| {
+        let mut c = Command::new(program);
+        c.args(args).env_remove("BASH_ENV");
+        if let Some(dir) = &spawn.cwd {
+            c.current_dir(dir);
+        }
+        c
+    };
+    let after_dashes: Vec<&OsStr> = std::iter::once(OsStr::new("--"))
+        .chain(spawn.argv.iter().map(OsStr::new))
+        .collect();
+    command(wrapper.as_os_str(), &after_dashes)
+        .spawn()
+        .or_else(|_| {
+            let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+            command(OsStr::new(program), &args)
+                .spawn()
+                .map_err(|e| e.to_string())
+        })
 }

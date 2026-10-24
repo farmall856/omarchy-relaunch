@@ -18,6 +18,9 @@ pub const LAST_BOOT_LOG: &str = "last-boot.log";
 pub const HYPRCTL: &str = "/usr/bin/hyprctl";
 /// The clock every binary formats timestamps with: a fixed path, never `PATH`.
 pub const DATE: &str = "/usr/bin/date";
+/// The launch wrapper boot runs every pin under, as Omarchy's own launchers
+/// do (a scope in the session's app slice): a fixed path, never `PATH`.
+pub const UWSM_APP: &str = "/usr/bin/uwsm-app";
 
 /// The XDG base directories of this process (the `xdg` crate: spec-correct, so a
 /// relative value is ignored as if unset, and a missing `HOME` falls back to

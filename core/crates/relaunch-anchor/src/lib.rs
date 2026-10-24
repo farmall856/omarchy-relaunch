@@ -4,9 +4,9 @@
 //! It verifies the signed `config.json` against the root-held public key at
 //! login (`verify`), emits the Hyprland pins from the *verified* document only
 //! (`lua`), and at boot launches each enabled entry by parsing its hashed
-//! private launcher into a direct `execve` argv (`desktop`, `launch`), then
-//! moves its window to its workspace (`boot`, `hypr`). On-disk `rules.lua` is never
-//! executed. The binary resolves its paths from `getuid()`, `$HOME` and the
+//! private launcher into an argv it starts under `uwsm-app`, never a shell
+//! (`desktop`, `launch`), then moves its window to its workspace (`boot`,
+//! `hypr`). On-disk `rules.lua` is never executed. The binary resolves its paths from `getuid()`, `$HOME` and the
 //! fixed `/var/lib/omarchy-relaunch` — it reads no `RELAUNCH_*` override.
 #![cfg_attr(
     test,

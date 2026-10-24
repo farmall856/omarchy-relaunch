@@ -123,6 +123,9 @@ impl Proc {
     /// when no host child with a tty is found or anything along the way is
     /// not a host process; [`Foreground::Shell`] when the terminal's own child
     /// is itself the foreground (nothing was started in it).
+    ///
+    /// A leader whose namespaces cannot be read at all is still the command
+    /// when [`Proc::hidden_leader`] proves the host started it.
     #[must_use]
     pub fn foreground(&self, pid: u32) -> Option<Foreground> {
         if pid == 0 || !self.is_host(pid) {
@@ -136,11 +139,99 @@ impl Proc {
         if tpgid == child {
             return Some(Foreground::Shell { pid: child });
         }
-        if !self.is_host(tpgid) {
+        let cwd = if self.is_host(tpgid) {
+            self.cwd(tpgid)
+        } else {
+            self.hidden_leader(tpgid, child)?.cwd
+        };
+        let argv = self.argv(tpgid)?;
+        Some(Foreground::Command {
+            pid: tpgid,
+            argv,
+            cwd,
+        })
+    }
+
+    /// A foreground leader the kernel will not show us (a non-dumpable
+    /// process: setuid, file capabilities), accepted only when the host
+    /// started it: every namespace link refused with `EACCES` (none gone,
+    /// none readable), as deep in PID namespaces as we are, our real uid, and
+    /// every ancestor up to the terminal's shell `shell` on the host. A
+    /// sandboxed process can hide its links too, but not its PID-namespace
+    /// depth or a non-host parent: an unprivileged sandbox's own processes
+    /// stay readable to the user who owns it (and differ), and a privileged
+    /// helper is itself unreadable. Its own directory is hidden too, so it
+    /// runs in the nearest such ancestor's (the shell's, inherited at fork).
+    fn hidden_leader(&self, leader: u32, shell: u32) -> Option<HiddenLeader> {
+        if !self.ns_refused(leader)
+            || self.nspid_depth(leader)? != self.nspid_depth(std::process::id())?
+            || self.real_uid(leader)? != relaunch_sys::current_uid()
+        {
             return None;
         }
-        let argv = self.argv(tpgid)?;
-        Some(Foreground::Command { pid: tpgid, argv })
+        let mut cwd = None;
+        let mut pid = self.ppid(leader);
+        for _ in 0..MAX_HOPS {
+            if pid == 0 || !self.is_host(pid) {
+                return None;
+            }
+            cwd = cwd.or_else(|| self.cwd(pid));
+            if pid == shell {
+                return Some(HiddenLeader { cwd });
+            }
+            let next = self.ppid(pid);
+            if next == pid {
+                return None;
+            }
+            pid = next;
+        }
+        None
+    }
+
+    /// Every one of `pid`'s mount, user and PID namespace links refused with
+    /// `EACCES` (the kernel's answer when `ptrace` read access is denied;
+    /// `PermissionDenied` is how `std` names it). In a fixture tree,
+    /// `<pid>.ns` holding `eacces`.
+    fn ns_refused(&self, pid: u32) -> bool {
+        if let Some(dir) = &self.fixture {
+            return read_text(&dir.join(format!("{pid}.ns")))
+                .is_some_and(|s| s.split_whitespace().collect::<String>() == "eacces");
+        }
+        ["mnt", "user", "pid"].iter().all(|ns| {
+            std::fs::read_link(format!("/proc/{pid}/ns/{ns}"))
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+        })
+    }
+
+    /// How many PID namespaces `pid` is in (the fields of `NSpid:`). A
+    /// fixture tree gives it as `<pid>.nspid`, default 1.
+    fn nspid_depth(&self, pid: u32) -> Option<usize> {
+        if let Some(dir) = &self.fixture {
+            return match read_text(&dir.join(format!("{pid}.nspid"))) {
+                Some(s) => s.trim().parse().ok(),
+                None => Some(1),
+            };
+        }
+        let status = read_text(&PathBuf::from(format!("/proc/{pid}/status")))?;
+        let depth = status_field(&status, "NSpid:")?.split_whitespace().count();
+        (depth > 0).then_some(depth)
+    }
+
+    /// `pid`'s real uid (the first field of `Uid:`). A fixture tree gives it
+    /// as `<pid>.uid`, default ours.
+    fn real_uid(&self, pid: u32) -> Option<u32> {
+        if let Some(dir) = &self.fixture {
+            return match read_text(&dir.join(format!("{pid}.uid"))) {
+                Some(s) => s.trim().parse().ok(),
+                None => Some(relaunch_sys::current_uid()),
+            };
+        }
+        let status = read_text(&PathBuf::from(format!("/proc/{pid}/status")))?;
+        status_field(&status, "Uid:")?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
     }
 
     /// The direct children of `pid`.
@@ -223,7 +314,16 @@ pub enum Foreground {
         pid: u32,
         /// The leader's argv.
         argv: Vec<String>,
+        /// Where it runs: the leader's directory, or for a leader the kernel
+        /// hides, its nearest host ancestor's.
+        cwd: Option<String>,
     },
+}
+
+/// A foreground leader [`Proc::hidden_leader`] accepted.
+struct HiddenLeader {
+    /// Its nearest host ancestor's directory.
+    cwd: Option<String>,
 }
 
 /// The tpgid field of a `/proc/<pid>/stat` line. `comm` may hold spaces and
@@ -242,12 +342,13 @@ fn read_text(path: &Path) -> Option<String> {
 /// `PPid:` from a status file, or 0.
 fn status_ppid(path: &Path) -> u32 {
     read_text(path)
-        .and_then(|s| {
-            s.lines()
-                .find_map(|l| l.strip_prefix("PPid:"))
-                .and_then(|v| v.trim().parse().ok())
-        })
+        .and_then(|s| status_field(&s, "PPid:")?.trim().parse().ok())
         .unwrap_or(0)
+}
+
+/// The value of a status file's `key` line (`key` includes its colon).
+fn status_field<'a>(status: &'a str, key: &str) -> Option<&'a str> {
+    status.lines().find_map(|l| l.strip_prefix(key))
 }
 
 /// A pid from text: decimal with no sign or leading zero (`^[1-9][0-9]*$`).
@@ -268,6 +369,24 @@ mod tests {
         let p = Proc::live();
         assert!(p.is_host(std::process::id()));
         assert!(p.argv(std::process::id()).is_some());
+    }
+
+    #[test]
+    fn only_refused_namespace_links_are_hidden_and_the_status_reads_are_ours() {
+        let p = Proc::live();
+        let me = std::process::id();
+        assert!(!p.ns_refused(me), "readable links are not refused");
+        assert!(
+            !p.ns_refused(4_000_000_000),
+            "a gone process is not refused"
+        );
+        assert_eq!(p.real_uid(me), Some(relaunch_sys::current_uid()));
+        let depth = p.nspid_depth(me).unwrap();
+        assert!(depth >= 1);
+        assert_eq!(p.nspid_depth(4_000_000_000), None);
+        let status = "Name:\tx\nUid:\t1000\t0\t0\t0\nNSpid:\t70\t3\t1\n";
+        assert_eq!(status_field(status, "NSpid:"), Some("\t70\t3\t1"));
+        assert_eq!(status_field(status, "Gid:"), None);
     }
 
     #[test]
