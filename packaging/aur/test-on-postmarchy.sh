@@ -16,13 +16,16 @@
 # Tear down when done:
 #   omarchy pkg drop omarchy-relaunch
 #   sudo sed -i '/^\[relaunch-test\]/,/^Server = file:/d' /etc/pacman.conf && sudo pacman -Sy
-#   rm -rf ~/localrepo-relaunch
+#   sudo rm -rf /srv/localrepo-relaunch
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # packaging/aur -> repo root
 PKGVER="${PKGVER:-2.0.0}"
 REPO_NAME="relaunch-test"
-LOCALREPO="${LOCALREPO:-$HOME/localrepo-relaunch}"
+# Outside $HOME so pacman's DownloadUser=alpm sandbox can read it (a 0700 home
+# blocks it). One-time setup if it doesn't exist:
+#   sudo mkdir -p /srv/localrepo-relaunch && sudo chown "$USER" /srv/localrepo-relaunch
+LOCALREPO="${LOCALREPO:-/srv/localrepo-relaunch}"
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/relaunch-pkgbuild.XXXXXX")"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
@@ -86,7 +89,7 @@ pkgfile="$(ls -1 "$BUILD_DIR"/omarchy-relaunch-"$PKGVER"-*.pkg.tar.* | head -1)"
 echo "== built: $(basename "$pkgfile")"
 
 echo "== publishing into the local repo…"
-mkdir -p "$LOCALREPO"
+mkdir -p "$LOCALREPO" 2>/dev/null || [ -w "$LOCALREPO" ] || die "cannot write $LOCALREPO -- one-time setup: sudo mkdir -p '$LOCALREPO' && sudo chown '$(id -un)' '$LOCALREPO'"
 cp -f "$pkgfile" "$LOCALREPO/"
 repo-add "$LOCALREPO/$REPO_NAME.db.tar.gz" "$LOCALREPO/$(basename "$pkgfile")"
 
