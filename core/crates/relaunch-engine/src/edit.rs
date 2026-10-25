@@ -79,7 +79,7 @@ pub fn import(env: &Env, class: &str, workspace: u32) -> Result<Value, String> {
     };
     let Some(source) = capture.source else {
         return Err(format!(
-            "import: no verifiable launch command for {class} (open it and capture, or set one with set-exec)"
+            "import: no verifiable launch command for {class}: an untrusted (XWayland) window is trusted only through a root-owned launcher. Install a .desktop for it in /usr/share/applications (one under ~/.local/share is not trusted for such a window)."
         ));
     };
     let label = capture_label(&index, &capture);
