@@ -206,6 +206,7 @@ pub fn run(
                     address: None,
                     actual_workspace: None,
                     outcome: "no-show",
+                    seen_class: None,
                 });
                 batch.push(launches.len());
             }
@@ -231,6 +232,7 @@ pub fn run(
         timing.sweep_interval,
         host,
     );
+    claim_by_pid(&mut launches, &mut known, host);
     settle(&mut launches, host);
 
     let landed = !launches.is_empty() && launches.iter().all(Launch::placed);
@@ -283,21 +285,7 @@ fn watch(
                     continue;
                 };
                 known.insert(w.address.clone());
-                let on_target = w.workspace == Some(i64::from(l.workspace));
-                let float = l.float.filter(|&f| w.floating != Some(f));
-                let moved = (on_target && float.is_none())
-                    || host
-                        .place(&w.address, (!on_target).then_some(l.workspace), float)
-                        .is_ok();
-                l.placement = Some(Placement {
-                    address: Some(w.address.clone()),
-                    actual_workspace: if moved {
-                        Some(i64::from(l.workspace))
-                    } else {
-                        w.workspace
-                    },
-                    outcome: if moved { "placed" } else { "misplaced" },
-                });
+                claim(l, w, None, host);
             }
         }
         if elapsed >= limit || interval.is_zero() {
@@ -305,6 +293,59 @@ fn watch(
         }
         host.sleep(interval);
         elapsed += interval;
+    }
+}
+
+/// Move `w`, now `l`'s window, to `l`'s workspace and float or tile it as
+/// captured, each only if it is not already so.
+fn claim(l: &mut Launch, w: &Window, seen_class: Option<String>, host: &mut impl Host) {
+    let on_target = w.workspace == Some(i64::from(l.workspace));
+    let float = l.float.filter(|&f| w.floating != Some(f));
+    let moved = (on_target && float.is_none())
+        || host
+            .place(&w.address, (!on_target).then_some(l.workspace), float)
+            .is_ok();
+    l.placement = Some(Placement {
+        address: Some(w.address.clone()),
+        actual_workspace: if moved {
+            Some(i64::from(l.workspace))
+        } else {
+            w.workspace
+        },
+        outcome: if moved { "placed" } else { "misplaced" },
+        seen_class,
+    });
+}
+
+/// Once the sweep is over, give each launch still without a window the new
+/// window whose pid is exactly the one it spawned: an app whose window class
+/// changed since it was pinned (an update renamed it). One read; a window
+/// with no pid never matches.
+fn claim_by_pid(launches: &mut [Launch], known: &mut BTreeSet<String>, host: &mut impl Host) {
+    if !(0..launches.len()).any(|i| unclaimed(launches, i)) {
+        return;
+    }
+    let Some(windows) = host.windows() else {
+        return;
+    };
+    for l in launches.iter_mut() {
+        let waiting = l.placement.as_ref().is_some_and(|p| p.address.is_none());
+        let Some(pid) = l.pid.filter(|&p| p > 0 && waiting) else {
+            continue;
+        };
+        let Some(w) = windows
+            .iter()
+            .find(|w| w.pid == Some(pid) && !known.contains(&w.address))
+        else {
+            continue;
+        };
+        known.insert(w.address.clone());
+        let seen = if w.initial_class.is_empty() {
+            &w.class
+        } else {
+            &w.initial_class
+        };
+        claim(l, w, Some(seen.clone()), host);
     }
 }
 
@@ -357,6 +398,19 @@ mod tests {
         /// Report a placement as done without doing it (an app that puts
         /// its window back).
         ignore_moves: bool,
+        /// A pinned class whose app now maps its window under another class.
+        renamed: Vec<(String, String)>,
+        /// Classes whose launch first maps a helper window of another class
+        /// (`<class>-helper`) from the same process.
+        helper_first: Vec<String>,
+        /// Windows of a renamed app come from a process other than the one
+        /// launched.
+        stranger: bool,
+        /// One pid for every launch (a single-instance app handing off).
+        shared_pid: Option<u32>,
+        /// Classes that launch but map no window of their own.
+        silent: Vec<String>,
+        next_pid: u32,
     }
 
     impl Fake {
@@ -364,6 +418,7 @@ mod tests {
             Self {
                 spawn_ws: 1,
                 next: 0x100,
+                next_pid: 500,
                 ..Self::default()
             }
         }
@@ -382,6 +437,7 @@ mod tests {
             initial_class: class.into(),
             workspace: Some(ws),
             floating: Some(false),
+            pid: None,
         }
     }
 
@@ -398,12 +454,30 @@ mod tests {
         }
         fn launch(&mut self, e: &Entry) -> Launch {
             self.events.push(format!("launch {}", e.window_class));
-            if !self.never.contains(&e.window_class) {
-                let w = win(
+            self.next_pid += 1;
+            let pid = self.shared_pid.unwrap_or(self.next_pid);
+            if self.helper_first.contains(&e.window_class) {
+                let mut w = win(
                     &format!("0x{:x}", self.next),
-                    &e.window_class,
+                    &format!("{}-helper", e.window_class),
                     self.spawn_ws,
                 );
+                w.pid = Some(pid);
+                self.next += 1;
+                self.queued.push((0, w));
+            }
+            if !self.never.contains(&e.window_class) && !self.silent.contains(&e.window_class) {
+                let renamed = self
+                    .renamed
+                    .iter()
+                    .find(|(from, _)| *from == e.window_class);
+                let class = renamed.map_or(e.window_class.as_str(), |(_, to)| to.as_str());
+                let mut w = win(&format!("0x{:x}", self.next), class, self.spawn_ws);
+                w.pid = Some(if renamed.is_some() && self.stranger {
+                    pid + 1000
+                } else {
+                    pid
+                });
                 self.next += 1;
                 self.queued.push((self.delay, w));
             }
@@ -415,7 +489,7 @@ mod tests {
                 float: e.float,
                 exec: e.exec.clone(),
                 status: "started",
-                pid: Some(1),
+                pid: Some(pid),
                 error: None,
                 placement: None,
             }
@@ -674,6 +748,168 @@ mod tests {
         );
         assert_eq!(outcomes(&r), [("placed", Some(4)), ("no-show", None)]);
         assert_eq!(r.outcome, "launched", "landed needs every window placed");
+    }
+
+    #[test]
+    fn a_renamed_apps_window_is_claimed_by_its_pid_once_the_sweep_is_over() {
+        let mut host = Fake::new();
+        host.renamed = vec![("Proton Pass".into(), "proton-pass".into())];
+        let r = go(
+            "renamed",
+            doc(0, 0, vec![entry(1, "Proton Pass", "proton-pass", 4)]),
+            &mut host,
+        );
+        assert_eq!(outcomes(&r), [("placed", Some(4))]);
+        let p = r.launches[0].placement.as_ref().unwrap();
+        assert_eq!(p.seen_class.as_deref(), Some("proton-pass"));
+        assert!(
+            r.log()
+                .contains("placed  CLASS NOW proton-pass  proton-pass"),
+            "{}",
+            r.log()
+        );
+        assert!(r.json().contains("\"seenClass\": \"proton-pass\""));
+        let moved = host
+            .events
+            .iter()
+            .position(|e| e.starts_with("move "))
+            .unwrap();
+        let last_wait = host
+            .events
+            .iter()
+            .rposition(|e| e.starts_with("sleep "))
+            .unwrap();
+        assert!(moved > last_wait, "only after the sweep: {:?}", host.events);
+    }
+
+    #[test]
+    fn a_pid_claim_needs_the_launched_process_itself() {
+        let mut host = Fake::new();
+        host.renamed = vec![("Proton Pass".into(), "proton-pass".into())];
+        host.stranger = true;
+        let r = go(
+            "stranger",
+            doc(0, 0, vec![entry(1, "Proton Pass", "proton-pass", 4)]),
+            &mut host,
+        );
+        assert_eq!(outcomes(&r), [("no-show", None)]);
+        assert!(!host.events.iter().any(|e| e.starts_with("move ")));
+
+        // A window that was there before boot is never taken, whatever its pid.
+        let mut host = Fake::new().existing("proton-pass", 1);
+        host.windows[0].pid = Some(501);
+        host.never = vec!["Proton Pass".into()];
+        let r = go(
+            "before",
+            doc(0, 0, vec![entry(1, "Proton Pass", "proton-pass", 4)]),
+            &mut host,
+        );
+        assert_eq!(outcomes(&r), [("no-show", None)]);
+    }
+
+    #[test]
+    fn a_class_window_mapped_late_wins_over_an_earlier_helper_of_its_process() {
+        let mut host = Fake::new();
+        host.helper_first = vec!["Calc".into()];
+        host.delay = 6; // the real window: past the round, inside the sweep
+        host.never = vec!["Ghost".into()]; // so the pid pass runs
+        let r = go(
+            "helper",
+            doc(
+                0,
+                0,
+                vec![
+                    entry(1, "Calc", "libreoffice --calc", 4),
+                    entry(2, "Ghost", "ghost", 5),
+                ],
+            ),
+            &mut host,
+        );
+        assert_eq!(outcomes(&r), [("placed", Some(4)), ("no-show", None)]);
+        assert_eq!(r.launches[0].placement.as_ref().unwrap().seen_class, None);
+        assert!(!r.log().contains("CLASS NOW"));
+        assert!(!r.json().contains("seenClass"));
+        assert_eq!(
+            host.events
+                .iter()
+                .filter(|e| e.starts_with("move "))
+                .count(),
+            1,
+            "the helper is not moved: {:?}",
+            host.events
+        );
+    }
+
+    #[test]
+    fn one_window_is_never_given_to_two_launches_by_pid() {
+        let mut host = Fake::new();
+        host.renamed = vec![
+            ("Proton Pass".into(), "proton-pass".into()),
+            ("Proton Mail".into(), "proton-mail".into()),
+        ];
+        let r = go(
+            "two",
+            doc(
+                0,
+                0,
+                vec![
+                    entry(1, "Proton Pass", "proton-pass", 4),
+                    entry(2, "Proton Mail", "proton-mail", 3),
+                ],
+            ),
+            &mut host,
+        );
+        let addrs: Vec<_> = r
+            .launches
+            .iter()
+            .map(|l| l.placement.as_ref().unwrap().address.clone().unwrap())
+            .collect();
+        assert_ne!(addrs[0], addrs[1]);
+        let seen: Vec<_> = r
+            .launches
+            .iter()
+            .map(|l| {
+                (
+                    l.window_class.as_str(),
+                    l.placement.as_ref().unwrap().seen_class.clone().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("Proton Mail", "proton-mail".to_owned()),
+                ("Proton Pass", "proton-pass".to_owned())
+            ],
+            "each launch its own process's window"
+        );
+    }
+
+    #[test]
+    fn one_window_is_claimed_by_pid_once_even_when_two_launches_share_its_pid() {
+        let mut host = Fake::new();
+        host.shared_pid = Some(777);
+        host.renamed = vec![("Proton Pass".into(), "proton-pass".into())];
+        host.silent = vec!["Proton Pass Two".into()];
+        let r = go(
+            "shared-pid",
+            doc(
+                0,
+                0,
+                vec![
+                    entry(1, "Proton Pass", "proton-pass", 4),
+                    entry(2, "Proton Pass Two", "proton-pass", 4),
+                ],
+            ),
+            &mut host,
+        );
+        let claimed: Vec<_> = r
+            .launches
+            .iter()
+            .filter_map(|l| l.placement.as_ref().and_then(|p| p.address.clone()))
+            .collect();
+        assert_eq!(claimed.len(), 1, "one window, one launch: {:?}", r.launches);
+        assert_eq!(r.launches[0].pid, r.launches[1].pid);
     }
 
     #[test]

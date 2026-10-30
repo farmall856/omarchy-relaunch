@@ -6,6 +6,8 @@
 //! `failed`, `verify-failed`), and `outcome` where its window went —
 //! `placed` (on the pinned workspace), `misplaced` (on another; the actual
 //! workspace is named) or `no-show` (no window of its class appeared in time).
+//! A window recognised by the launch's own pid instead, because its class is
+//! not the pinned one, also names the class it had (`seenClass`).
 //! The boot's own `outcome` is `landed` only when every launch was placed.
 
 use std::fmt::Write as _;
@@ -47,6 +49,9 @@ pub struct Placement {
     pub actual_workspace: Option<i64>,
     /// `placed`, `misplaced` or `no-show`.
     pub outcome: &'static str,
+    /// The class the window had, when it was recognised by the launch's pid
+    /// because no window of the pinned class appeared.
+    pub seen_class: Option<String>,
 }
 
 impl Launch {
@@ -74,6 +79,9 @@ impl Launch {
             map.insert("address".into(), json!(p.address));
             map.insert("actualWorkspace".into(), json!(p.actual_workspace));
             map.insert("outcome".into(), json!(p.outcome));
+            if let Some(seen) = &p.seen_class {
+                map.insert("seenClass".into(), json!(seen));
+            }
         }
         v
     }
@@ -92,6 +100,9 @@ pub struct Window {
     pub workspace: Option<i64>,
     /// Whether it floats, when reported.
     pub floating: Option<bool>,
+    /// The process the compositor attributes it to, when reported and
+    /// positive.
+    pub pid: Option<u32>,
 }
 
 impl Window {
@@ -124,6 +135,8 @@ pub fn parse_clients(bytes: &[u8]) -> Option<Vec<Window>> {
         workspace: Option<Ws>,
         #[serde(default)]
         floating: Option<bool>,
+        #[serde(default)]
+        pid: Option<Value>,
     }
     let raw: Vec<Raw> = serde_json::from_slice(bytes).ok()?;
     Some(
@@ -134,6 +147,11 @@ pub fn parse_clients(bytes: &[u8]) -> Option<Vec<Window>> {
                 initial_class: r.initial_class.unwrap_or_default(),
                 workspace: r.workspace.and_then(|w| w.id),
                 floating: r.floating,
+                pid: r
+                    .pid
+                    .and_then(|p| p.as_u64())
+                    .and_then(|p| u32::try_from(p).ok())
+                    .filter(|&p| p > 0),
             })
             .collect(),
     )
@@ -208,6 +226,9 @@ impl Record {
                         ("no-show", _) => out.push_str("  NO-SHOW (no window)"),
                         _ => out.push_str("  placed"),
                     }
+                    if let Some(seen) = &p.seen_class {
+                        let _ = write!(out, "  CLASS NOW {seen}");
+                    }
                 }
                 let _ = write!(out, "  {}", l.exec);
                 if let Some(e) = &l.error {
@@ -239,6 +260,7 @@ mod tests {
                 address: Some("0xa".into()),
                 actual_workspace,
                 outcome,
+                seen_class: None,
             }),
         }
     }
@@ -258,11 +280,24 @@ mod tests {
                 initial_class: "Brave".into(),
                 workspace: Some(3),
                 floating: Some(true),
+                pid: None,
             }
         );
         assert!(w[0].is_of("Brave") && w[0].is_of("brave-browser") && !w[0].is_of("foot"));
         assert_eq!(w[1].workspace, None);
         assert!(parse_clients(b"{}").is_none());
+    }
+
+    #[test]
+    fn a_client_pid_is_kept_only_when_it_is_a_positive_integer() {
+        let w = parse_clients(
+            br#"[{"address":"0x1","pid":1543},{"address":"0x2","pid":0},
+                 {"address":"0x3","pid":-1},{"address":"0x4","pid":"12"},
+                 {"address":"0x5","pid":99999999999},{"address":"0x6"}]"#,
+        )
+        .unwrap();
+        let pids: Vec<_> = w.iter().map(|w| w.pid).collect();
+        assert_eq!(pids, [Some(1543), None, None, None, None, None]);
     }
 
     #[test]
