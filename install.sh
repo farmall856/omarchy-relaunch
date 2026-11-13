@@ -85,8 +85,8 @@ Done.
   1. Make sure $BIN_DIR is on PATH.
   2. Add the widget to your bar if it isn't auto-placed:
        omarchy bar move $PLUGIN_ID --section right
-  3. Open your apps on their workspaces, click the Relaunch bar icon, and
-     Save: review the change and Authorize it.
+  3. Open your apps on their workspaces, click the Relaunch bar icon, then
+     "Capture open windows": review the change and Authorize it.
   4. Reboot to restore.
 
 Remove with:
