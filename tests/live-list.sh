@@ -8,7 +8,8 @@
 # names no terminal and shows the class guess. So a terminal hosting a command
 # beside another window of its class is one more row in bash than in Rust,
 # which lists one running row per class: a bash-only row from its terminal
-# list is allowed.
+# list is allowed. When that terminal is its class's only window, Rust's row
+# for it is the class guess on the same workspace, paired with bash's row.
 set -euo pipefail
 # Never the installed client: a suite names its own stand-in.
 unset RELAUNCH_RELAUNCHCTL
@@ -36,6 +37,15 @@ rust_ids = {x["id"] for x in r["rows"]}
 hosted = [y for y in b["rows"] if y["id"] not in rust_ids
           and y["kind"] == "running" and y.get("execSource") == "terminal"]
 b["rows"] = [y for y in b["rows"] if y not in hosted]
+bash_ids = {y["id"] for y in b["rows"]} | {y["id"] for y in hosted}
+renamed = []
+for y in hosted:
+    alone = [x for x in r["rows"] if x["id"] not in bash_ids and x not in renamed
+             and x["kind"] == "running" and x["workspace"] == y["workspace"]
+             and x["execSource"] == "guess" and x["exec"] == x["class"].lower()]
+    if alone:
+        renamed.append(alone[0])
+r["rows"] = [x for x in r["rows"] if x not in renamed]
 assert len(r["rows"]) == len(b["rows"]), ([x["id"] for x in r["rows"]], [y["id"] for y in b["rows"]])
 d2 = dlm = 0
 for x, y in zip(r["rows"], b["rows"]):
@@ -54,5 +64,5 @@ for x, y in zip(r["rows"], b["rows"]):
     d2 += 1
 print(f"live list: {len(r['rows'])} rows, {len(r['startup'])} startup items; "
       f"identical except {d2} D2 guess rows, {dlm} DLM terminal rows and "
-      f"{len(hosted)} bash-only hosted-terminal rows")
+      f"{len(hosted)} bash-only hosted-terminal rows ({len(renamed)} of them Rust's class guess)")
 EOF

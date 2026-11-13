@@ -142,7 +142,9 @@ bad = []
 hosted = {}
 hosting = set()  # the engine pins that run a command the oracle names a window by
 for key in sorted(set(o) - set(at)):
-    runs = [e for e in new if e["workspace"] == key[1] and key[0] in argv(e["exec"])[1:]]
+    # The oracle names a hosted window by its program's basename.
+    runs = [e for e in new if e["workspace"] == key[1]
+            and key[0] in [w.rsplit("/", 1)[-1] for w in argv(e["exec"])[1:]]]
     if runs:
         hosting.add(runs[0]["class"])
         hosted[key] = runs[0]
