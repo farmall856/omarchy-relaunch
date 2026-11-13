@@ -166,6 +166,44 @@ fn decide_refuses_dbus_activatable() {
 }
 
 #[test]
+fn decide_refuses_a_program_word_uwsm_reads_as_a_desktop_entry() {
+    for program in [
+        "org.notes.desktop",
+        "/home/u/.local/share/applications/org.notes.desktop",
+        "org.notes.desktop:new-window",
+        "/home/u/.local/share/applications/org.notes.desktop:",
+    ] {
+        let buf = format!("[Desktop Entry]\nExec={program} --x\n");
+        let entry = pinned(&format!("{program} --x"), buf.as_bytes());
+        assert_eq!(
+            decide(&entry, buf.as_bytes()),
+            Err("desktop-entry-program".into()),
+            "{program}"
+        );
+    }
+}
+
+#[test]
+fn decide_allows_a_desktop_entry_only_as_a_later_argument() {
+    for (program, rest) in [
+        ("/usr/bin/foot", " notes.desktop"),
+        ("/usr/bin/gtk-launch", " org.notes.desktop:new"),
+        ("firefox", ""),
+        ("/usr/bin/foot", ""),
+        ("/opt/desktop/app", ""),
+        ("my.desktopapp", ""),
+    ] {
+        let buf = format!("[Desktop Entry]\nExec={program}{rest}\n");
+        let entry = pinned(&format!("{program}{rest}"), buf.as_bytes());
+        assert_eq!(
+            decide(&entry, buf.as_bytes()).map(|s| s.argv[0].clone()),
+            Ok(program.to_owned()),
+            "{program}{rest}"
+        );
+    }
+}
+
+#[test]
 fn decide_refuses_terminal_launcher() {
     let buf = b"[Desktop Entry]\nExec=/usr/bin/x\nTerminal=true\n";
     assert_eq!(
