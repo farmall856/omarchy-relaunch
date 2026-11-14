@@ -62,8 +62,10 @@ pub fn read_launcher(entry: &Entry, config_dir: &Path, uid: u32) -> Result<Vec<u
 /// # Errors
 ///
 /// `launcher-changed` when the bytes are not the approved ones, or their
-/// `Exec` or `Path` is not the signed `exec` or `cwd`; a parse failure; or a
-/// launcher kind that is not run as a command.
+/// `Exec` or `Path` is not the signed `exec` or `cwd`; a parse failure; a
+/// launcher kind that is not run as a command; or `desktop-entry-program`
+/// when the program word is one `uwsm-app` would replace with a desktop
+/// entry's `Exec`.
 pub fn decide(entry: &Entry, buffer: &[u8]) -> Result<Spawn, String> {
     if hex::encode(Sha256::digest(buffer)) != entry.launcher.sha256 {
         return Err("launcher-changed".into());
@@ -80,10 +82,21 @@ pub fn decide(entry: &Entry, buffer: &[u8]) -> Result<Spawn, String> {
     if canonical_exec_string(&de.argv) != entry.exec || de.path != entry.cwd {
         return Err("launcher-changed".into());
     }
+    if de.argv.first().is_some_and(|p| names_desktop_entry(p)) {
+        return Err("desktop-entry-program".into());
+    }
     Ok(Spawn {
         argv: de.argv,
         cwd: de.path,
     })
+}
+
+/// Whether `uwsm-app` would read `program` as a desktop entry (an id or a
+/// path, optionally `:action`) and run that entry's `Exec`, a file the
+/// signature does not cover. uwsm's own test: ends with `.desktop`, or
+/// contains `.desktop:`. Only the first word is inspected.
+fn names_desktop_entry(program: &str) -> bool {
+    program.ends_with(".desktop") || program.contains(".desktop:")
 }
 
 /// Whether a decided spawn's program would run with this `PATH`; the reason
