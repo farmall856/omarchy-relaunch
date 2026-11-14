@@ -10,6 +10,8 @@
 # which lists one running row per class: a bash-only row from its terminal
 # list is allowed. When that terminal is its class's only window, Rust's row
 # for it is the class guess on the same workspace, paired with bash's row.
+# When it is not, Rust's one row for the class may be that terminal's window,
+# so its workspace is the hosted row's while bash's is the class's other one.
 set -euo pipefail
 # Never the installed client: a suite names its own stand-in.
 unset RELAUNCH_RELAUNCHCTL
@@ -47,7 +49,14 @@ for y in hosted:
         renamed.append(alone[0])
 r["rows"] = [x for x in r["rows"] if x not in renamed]
 assert len(r["rows"]) == len(b["rows"]), ([x["id"] for x in r["rows"]], [y["id"] for y in b["rows"]])
-d2 = dlm = 0
+def collapses(x, keys, hosted_ws):
+    return keys == {"workspace"} and x["kind"] == "running" and x["workspace"] in hosted_ws
+# Only at a hosted terminal's workspace, and only a running row.
+assert not collapses({"kind": "running", "workspace": 3}, {"workspace"}, {6})
+assert not collapses({"kind": "startup", "workspace": 6}, {"workspace"}, {6})
+assert not collapses({"kind": "running", "workspace": 6}, {"workspace", "exec"}, {6})
+hosted_ws = {y["workspace"] for y in hosted}
+d2 = dlm = collapsed = 0
 for x, y in zip(r["rows"], b["rows"]):
     if x == y:
         continue
@@ -58,11 +67,15 @@ for x, y in zip(r["rows"], b["rows"]):
         dlm += 1
         continue
     keys = {k for k in set(x) | set(y) if x.get(k) != y.get(k)}
+    if collapses(x, keys, hosted_ws):
+        collapsed += 1
+        continue
     assert keys == {"exec"}, (x, y)
     assert x["execSource"] == "guess" and y["exec"] == x["class"].lower(), (x, y)
     assert shlex.split(x["exec"]) == [y["exec"]], (x["exec"], y["exec"])
     d2 += 1
 print(f"live list: {len(r['rows'])} rows, {len(r['startup'])} startup items; "
       f"identical except {d2} D2 guess rows, {dlm} DLM terminal rows and "
-      f"{len(hosted)} bash-only hosted-terminal rows ({len(renamed)} of them Rust's class guess)")
+      f"{len(hosted)} bash-only hosted-terminal rows ({len(renamed)} of them Rust's class guess, "
+      f"{collapsed} a class row Rust places at the hosted terminal)")
 EOF
