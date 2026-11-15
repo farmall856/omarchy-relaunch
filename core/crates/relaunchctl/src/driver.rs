@@ -248,18 +248,18 @@ mod tests {
     }
 
     impl Service for Mock {
-        async fn prepare(
+        fn prepare(
             &self,
             _b: Vec<u8>,
             _p: Vec<u8>,
-        ) -> Result<(Vec<u8>, String, String, String), String> {
+        ) -> impl Future<Output = Result<(Vec<u8>, String, String, String), String>> {
             self.calls.prepares.fetch_add(1, Ordering::SeqCst);
-            Ok((
+            std::future::ready(Ok((
                 self.txid.clone(),
                 "4F2A".into(),
                 "Relaunch will open this app at login:".into(),
                 "+ added x".into(),
-            ))
+            )))
         }
         async fn authorize(&self, txid: Vec<u8>) -> Result<Vec<u8>, String> {
             self.calls.authorizes.fetch_add(1, Ordering::SeqCst);
@@ -267,9 +267,13 @@ mod tests {
             let _p = self.release.acquire().await.unwrap();
             Ok(br#"{"v":2}"#.to_vec())
         }
-        async fn reduce(&self, _b: Vec<u8>, _o: Vec<(String, String)>) -> Result<Vec<u8>, String> {
+        fn reduce(
+            &self,
+            _b: Vec<u8>,
+            _o: Vec<(String, String)>,
+        ) -> impl Future<Output = Result<Vec<u8>, String>> {
             self.calls.reduces.fetch_add(1, Ordering::SeqCst);
-            Ok(br#"{"v":2}"#.to_vec())
+            std::future::ready(Ok(br#"{"v":2}"#.to_vec()))
         }
     }
 
@@ -402,7 +406,7 @@ mod tests {
         let (o, calls, rest) = h.outcome().await;
         assert_eq!(o, Outcome::Cancelled);
         assert_eq!(calls.authorizes.load(Ordering::SeqCst), 0);
-        assert!(rest.is_empty());
+        assert_eq!(rest, "");
     }
 
     #[tokio::test]

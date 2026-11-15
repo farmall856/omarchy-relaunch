@@ -1031,7 +1031,7 @@ mod tests {
             !d.join(paths::SKIP_ONCE_FLAG).exists(),
             "skip-once is consumed"
         );
-        assert!(host.events.is_empty());
+        assert_eq!(host.events, Vec::<String>::new());
         assert_eq!(
             run(&d, cfg(), &mut host, FAST).outcome,
             "landed",
@@ -1051,7 +1051,7 @@ mod tests {
         );
         let rec = run(&d, Err(SCHEMA_UPGRADE_NEEDED.into()), &mut host, FAST);
         assert_eq!(rec.outcome, SCHEMA_UPGRADE_NEEDED);
-        assert!(host.events.is_empty());
+        assert_eq!(host.events, Vec::<String>::new());
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -669,7 +669,7 @@ mod tests {
             "{:?}",
             b.candidates
         );
-        assert!(merged(&b.candidates).is_empty());
+        assert_eq!(merged(&b.candidates), Vec::<Value>::new());
     }
 
     #[test]
@@ -816,7 +816,7 @@ mod tests {
             !one(&b, "Untrusted").enabled,
             "§9: an untrusted window stays disabled"
         );
-        assert!(pins(&b, "Sandboxed").is_empty());
+        assert_eq!(pins(&b, "Sandboxed"), Vec::<&Entry>::new());
         assert_eq!(reason(&b, 2), Some("untrusted-window"));
     }
 
