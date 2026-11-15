@@ -4,8 +4,8 @@
 # each. `commit` is the tagged commit the package is built from. `file`, `size`
 # and `sha256` name the x86_64 release package, or are all empty when there is
 # none yet: then the boot tools are built from source on every architecture.
-version=2.0.3-1
-commit=4336616041f365f87ba960e2dd4512fb4e795d90
+version=2.0.4-1
+commit=f0fe4c08c3e4c5b33195069b9219bfc29ce04029
 file=
 size=
 sha256=
