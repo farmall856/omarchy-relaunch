@@ -142,13 +142,8 @@ impl boot::Host for RealHost {
         launch
     }
     fn exited(&mut self, pid: u32) -> Option<report::Exit> {
-        use std::os::unix::process::ExitStatusExt as _;
         let child = self.children.iter_mut().find(|c| c.id() == pid)?;
-        let status = child.try_wait().ok()??;
-        status
-            .code()
-            .map(report::Exit::Code)
-            .or_else(|| status.signal().map(report::Exit::Signal))
+        report::Exit::of(child.try_wait().ok()??)
     }
     fn place(
         &mut self,
@@ -220,8 +215,11 @@ fn launch_one(
                 },
                 Some(child),
             ),
-            _ => (
-                base("failed", Some("process exited immediately".to_owned())),
+            done => (
+                Launch {
+                    exit: done.ok().flatten().and_then(report::Exit::of),
+                    ..base("failed", Some("process exited immediately".to_owned()))
+                },
                 None,
             ),
         },
@@ -241,4 +239,52 @@ fn write_last_boot(config_dir: &Path, started_at: &str, record: Record) {
     };
     let _ = write_private_artifact(config_dir, paths::LAST_BOOT_JSON, record.json().as_bytes());
     let _ = write_private_artifact(config_dir, paths::LAST_BOOT_LOG, record.log().as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boot::Host as _;
+    use std::process::Command;
+
+    fn host() -> RealHost {
+        RealHost {
+            path: String::new(),
+            config_dir: PathBuf::new(),
+            uid: 0,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn exited_reads_the_real_status_of_a_launched_process_only() {
+        let mut h = host();
+        let spawn =
+            |program: &str, args: &[&str]| Command::new(program).args(args).spawn().unwrap();
+        let failed = spawn("false", &[]);
+        let mut killed = spawn("sleep", &["30"]);
+        killed.kill().unwrap();
+        let running = spawn("sleep", &["30"]);
+        let (f, k, r) = (failed.id(), killed.id(), running.id());
+        h.children.extend([failed, killed, running]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut seen = (None, None);
+        while (seen.0.is_none() || seen.1.is_none()) && std::time::Instant::now() < deadline {
+            seen = (
+                seen.0.or_else(|| h.exited(f)),
+                seen.1.or_else(|| h.exited(k)),
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            seen,
+            (Some(report::Exit::Code(1)), Some(report::Exit::Signal(9)))
+        );
+        assert_eq!(h.exited(r), None, "still running");
+        assert_eq!(h.exited(u32::MAX), None, "not a process this boot launched");
+        for child in &mut h.children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }

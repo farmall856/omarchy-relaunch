@@ -55,6 +55,16 @@ pub enum Exit {
 }
 
 impl Exit {
+    /// How a finished process ended, by its wait status.
+    #[must_use]
+    pub fn of(status: std::process::ExitStatus) -> Option<Self> {
+        use std::os::unix::process::ExitStatusExt as _;
+        status
+            .code()
+            .map(Self::Code)
+            .or_else(|| status.signal().map(Self::Signal))
+    }
+
     /// The exit, in words: the status and, for the shell's own two, what it
     /// means.
     #[must_use]
@@ -111,10 +121,14 @@ impl Launch {
         }
         let Some(p) = &self.placement else {
             let why = self.error.as_deref().unwrap_or("unknown error");
-            return Some(match self.status {
+            let said = match self.status {
                 "not_found" => format!("it did not start: {why}"),
                 "verify-failed" => format!("it was not launched: {why}"),
                 _ => format!("it failed to start: {why}"),
+            };
+            return Some(match self.exit {
+                Some(e) => format!("{said}; the command {}", e.describe()),
+                None => said,
             });
         };
         if p.outcome == "misplaced" {
@@ -129,6 +143,12 @@ impl Launch {
             "no window appeared"
         };
         Some(match self.exit {
+            // Status 0 with no window of its own: often a launcher that
+            // handed off to another process, which showed none.
+            Some(Exit::Code(0)) => format!(
+                "{window}; the command exited with status 0, so it may have handed off \
+                 to another process that showed no window"
+            ),
             Some(e) => format!("{window}; the command {}", e.describe()),
             None => window.to_owned(),
         })
@@ -451,6 +471,18 @@ mod tests {
     }
 
     #[test]
+    fn a_wait_status_is_read_as_its_exit_code_or_signal() {
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::process::ExitStatus;
+        assert_eq!(
+            Exit::of(ExitStatus::from_raw(127 << 8)),
+            Some(Exit::Code(127))
+        );
+        assert_eq!(Exit::of(ExitStatus::from_raw(0)), Some(Exit::Code(0)));
+        assert_eq!(Exit::of(ExitStatus::from_raw(9)), Some(Exit::Signal(9)));
+    }
+
+    #[test]
     fn an_exit_is_described_by_its_status_or_signal() {
         let said = |e: Exit| e.describe();
         assert_eq!(said(Exit::Code(1)), "exited with status 1");
@@ -468,6 +500,25 @@ mod tests {
         assert_eq!(
             l.problem().as_deref(),
             Some("no window appeared; the command was ended by signal 9")
+        );
+        l.exit = Some(Exit::Code(0));
+        assert_eq!(
+            l.problem().as_deref(),
+            Some(
+                "no window appeared; the command exited with status 0, so it may have \
+                 handed off to another process that showed no window"
+            )
+        );
+        let mut quick = launch("Quick", 2, None);
+        quick.status = "failed";
+        quick.error = Some("process exited immediately".into());
+        quick.exit = Some(Exit::Code(127));
+        assert_eq!(
+            quick.problem().as_deref(),
+            Some(
+                "it failed to start: process exited immediately; the command exited with \
+                 status 127 (a program it runs was not found)"
+            )
         );
         let mut failed = launch("Nope", 2, None);
         failed.status = "not_found";
