@@ -294,6 +294,31 @@ impl Record {
         let mut out = String::new();
         let _ = writeln!(out, "relaunch boot  {}", self.started_at);
         let _ = writeln!(out, "outcome: {}", self.outcome);
+        if !self.launches.is_empty() {
+            let placed = self.launches.iter().filter(|l| l.placed()).count();
+            let misplaced = self
+                .launches
+                .iter()
+                .filter(|l| {
+                    l.placement
+                        .as_ref()
+                        .is_some_and(|p| p.outcome == "misplaced")
+                })
+                .count();
+            let unopened = self.launches.len() - placed - misplaced;
+            let mut notes = Vec::new();
+            if unopened > 0 {
+                notes.push(format!("{unopened} did not open"));
+            }
+            if misplaced > 0 {
+                notes.push(format!("{misplaced} on another workspace"));
+            }
+            let _ = write!(out, "placed:  {placed} of {}", self.launches.len());
+            if !notes.is_empty() {
+                let _ = write!(out, " ({}; see below)", notes.join(", "));
+            }
+            out.push('\n');
+        }
         if !self.reason.is_empty() {
             let _ = writeln!(out, "reason:  {}", self.reason);
         }
@@ -430,6 +455,7 @@ mod tests {
         assert_eq!(
             rec.log(),
             "relaunch boot  2026-10-22T08:00:00+01:00\noutcome: launched\n\
+             placed:  1 of 5 (3 did not open, 1 on another workspace; see below)\n\
              delays:  0 ms before, 500 ms after\n\nlaunches:\n\
              \x20 ws 1  Here App  started  pid=10  placed  here\n\
              \x20 ws 2  Moved  started  pid=10  MISPLACED on ws 5  moved\n\
@@ -468,6 +494,28 @@ mod tests {
             "its window opened, then closed; the command exited with status 127 \
              (a program it runs was not found)"
         );
+    }
+
+    #[test]
+    fn the_log_counts_placed_launches_and_names_none_missing_when_all_landed() {
+        let rec = |launches| Record {
+            started_at: "T".into(),
+            outcome: "landed",
+            reason: String::new(),
+            pre_launch_ms: 0,
+            post_launch_ms: 0,
+            launches,
+        };
+        let all = rec(vec![
+            launch("A", 1, Some(("placed", Some(1)))),
+            launch("B", 2, Some(("placed", Some(2)))),
+        ]);
+        assert!(
+            all.log().contains("\nplaced:  2 of 2\ndelays:"),
+            "{}",
+            all.log()
+        );
+        assert!(!rec(Vec::new()).log().contains("placed:"));
     }
 
     #[test]
