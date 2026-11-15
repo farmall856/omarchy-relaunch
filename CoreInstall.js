@@ -13,7 +13,8 @@
 //   "ready"      the normal panel, with the Boot tools section
 // From "ready", the lifecycle (the normal panel stays up throughout):
 //   "checking-updates" the headless update check runs
-//   "update-available" the AUR has a newer version: the Update action
+//   "update-available" the plugin pins a newer version than the installed
+//                one: the Update action
 //   "updating" / "reinstalling" / "uninstalling"
 //                the package change runs in a visible terminal; an update or
 //                reinstall then wires again, an uninstall ends in "missing"
@@ -35,8 +36,8 @@
 function create(fx) {
   var s = {
     phase: "checking",
-    // Whether Omarchy's package tools and a terminal launcher are here: the
-    // button can install only through them.
+    // Whether pacman, a terminal launcher and the plugin's boot-tools script
+    // are here: the button can install only through them.
     canInstall: false,
     message: "",
     isError: false,
@@ -190,7 +191,7 @@ function create(fx) {
       }
       if (s.phase !== "missing") return false
       if (!s.canInstall) {
-        missing("Relaunch can't install its boot tools here: it needs Omarchy's package tools (omarchy pkg aur add, with yay) and a terminal. See the README to install the omarchy-relaunch package yourself.", true)
+        missing("Relaunch can't install its boot tools here: it needs pacman, a terminal and the plugin's packaging/boot-tools.sh. See the README to install the omarchy-relaunch package yourself.", true)
         render()
         return false
       }
@@ -260,15 +261,15 @@ function create(fx) {
       s.op += 1
       s.phase = "checking-updates"
       s.confirm = ""
-      s.message = "Checking the AUR for a newer version…"
+      s.message = "Checking for a newer version…"
       s.isError = false
       fx.checkUpdates(s.op)
       render()
       return true
     },
 
-    // r = { result: "newer"|"current"|"unreachable"|"notpkg"|"noaur"|"nohelper"|
-    //       "nocurl"|"nojq"|"fetchfailed"|"badreply", installed, latest }
+    // r = { result: "newer"|"current"|"notpkg"|"badpin", installed, latest }:
+    // latest is the version this plugin pins.
     updatesChecked: function (op, r) {
       if (op !== s.op || s.phase !== "checking-updates") return
       var res = r && r.result
@@ -279,22 +280,10 @@ function create(fx) {
         s.isError = false
       } else if (res === "current") {
         ready("Up to date (" + String(r.installed) + ").", false)
-      } else if (res === "unreachable") {
-        ready("Couldn't reach the AUR. Try again later.", true)
       } else if (res === "notpkg") {
         ready(NOT_A_PACKAGE, false)
-      } else if (res === "noaur") {
-        ready("The AUR has no omarchy-relaunch package.", true)
-      } else if (res === "nohelper") {
-        ready("Updating needs yay, Omarchy's AUR helper.", true)
-      } else if (res === "nocurl") {
-        ready("The update check needs curl.", true)
-      } else if (res === "nojq") {
-        ready("The update check needs jq.", true)
-      } else if (res === "fetchfailed") {
-        ready("Couldn't check for updates: the request to the AUR failed. Try again later.", true)
-      } else if (res === "badreply") {
-        ready("Couldn't check for updates: the AUR's reply could not be read. Try again later.", true)
+      } else if (res === "badpin") {
+        ready("This plugin's boot tools pin is unreadable. Reinstall or update the plugin.", true)
       } else {
         ready("The update check failed.", true)
       }
@@ -320,7 +309,7 @@ function create(fx) {
         return false
       }
       if (!s.canInstall) {
-        ready("This needs Omarchy's package tools (omarchy, yay) and a terminal.", true)
+        ready("This needs pacman, a terminal and the plugin's packaging/boot-tools.sh.", true)
         render()
         return false
       }

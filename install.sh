@@ -67,6 +67,12 @@ install -m 0644 "$REPO_DIR/Overlay.qml"   "$PLUGIN_DST/Overlay.qml"
 install -m 0644 "$REPO_DIR/TxnLifecycle.js" "$PLUGIN_DST/TxnLifecycle.js"
 install -m 0644 "$REPO_DIR/CoreInstall.js" "$PLUGIN_DST/CoreInstall.js"
 install -m 0755 "$REPO_DIR/relaunch"      "$PLUGIN_DST/relaunch"
+# The boot tools the panel's buttons install: the script and what it pins.
+install -d -m 0755 "$PLUGIN_DST/packaging/arch"
+install -m 0755 "$REPO_DIR/packaging/boot-tools.sh"  "$PLUGIN_DST/packaging/boot-tools.sh"
+install -m 0644 "$REPO_DIR/packaging/boot-tools.pin" "$PLUGIN_DST/packaging/boot-tools.pin"
+install -m 0644 "$REPO_DIR/packaging/arch/PKGBUILD" "$PLUGIN_DST/packaging/arch/PKGBUILD"
+install -m 0644 "$REPO_DIR/packaging/arch/omarchy-relaunch.install" "$PLUGIN_DST/packaging/arch/omarchy-relaunch.install"
 echo "    installed $PLUGIN_DST"
 
 echo "==> wiring the root anchor into hyprland.lua"

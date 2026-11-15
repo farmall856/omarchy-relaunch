@@ -44,7 +44,8 @@ else starts at login, and that is all.
 ## Install
 
 Relaunch comes in two parts: the bar widget, from the Omarchy plugin
-marketplace, and its **boot tools**, a small system package from the AUR.
+marketplace, and its **boot tools**, a small root-owned system package
+(`omarchy-relaunch`) that the widget installs for you.
 
 ```sh
 omarchy plugin add https://github.com/farmall856/omarchy-relaunch.git --enable
@@ -52,23 +53,44 @@ omarchy plugin add https://github.com/farmall856/omarchy-relaunch.git --enable
 
 Open the widget. Until the boot tools are installed it says **Relaunch needs
 its boot tools**, explains what they are, and offers **Install boot tools**.
+This is a one-time setup that asks for your password.
 
 > **Helper package required.** Relaunch restores apps at login through a small
-> root-owned system package installed from the AUR as `omarchy-relaunch` (the
-> "boot tools"): a polkit-gated signing authority, a login-time verifier that
-> runs only a signature-verified launch list, a D-Bus activation file, and a
-> systemd unit. The panel installs it for you, or install it yourself with
-> `omarchy pkg aur add omarchy-relaunch` and then
+> root-owned system package, `omarchy-relaunch` (the "boot tools"): a
+> polkit-gated signing authority, a login-time verifier that runs only a
+> signature-verified launch list, a D-Bus activation file, and a systemd unit.
+> The panel installs it for you, or install it yourself with
+> `packaging/boot-tools.sh install` from the plugin folder and then
 > `relaunch ensure-hooks --anchor` (which wires the login step into
 > `hyprland.lua`). The plugin never changes your config without an explicit
 > Authorize.
 
+### Where the boot tools come from
+
+The plugin installs only what its own files name. `packaging/boot-tools.pin`
+holds one version of the package: the commit it is built from, and, for
+x86_64, the release package's file name, size and SHA-256.
+
+- **x86_64:** the package is downloaded from this repository's GitHub release
+  for that version. It is installed only if its size and SHA-256 are the
+  pinned ones. When `gh` is signed in, its build attestation must also show it
+  was built by this repository's release workflow from the pinned commit. If
+  someone replaces the file on GitHub or moves a tag, nothing changes: the
+  plugin installs the pinned bytes or nothing. No signing key is involved.
+- **Any other architecture** (aarch64), or `packaging/boot-tools.sh install
+  --source`: the package is built on your machine from
+  `packaging/arch/PKGBUILD`, whose source is the pinned commit. This needs
+  `base-devel`, installs the Rust toolchain for the build and removes it
+  afterwards, and takes a few minutes.
+
+Either way pacman asks for your password in a terminal window. The plugin
+itself never elevates.
+
 **Install boot tools** runs exactly two fixed commands:
 
-1. `omarchy pkg aur add omarchy-relaunch` in a terminal window, where the
-   package builds and pacman asks for your password. The plugin itself never
-   elevates. If the terminal outlives the install, click **I'm done**;
-   **Check again** looks for the package again.
+1. `packaging/boot-tools.sh install` in a terminal window, as above. If the
+   terminal outlives the install, click **I'm done**; **Check again** looks
+   for the package again.
 2. Once the package's files are in place,
    `/usr/lib/omarchy-relaunch/relaunch ensure-hooks --anchor`, which adds the
    one login line to `~/.config/hypr/hyprland.lua`. Running it again changes
@@ -77,32 +99,35 @@ its boot tools**, explains what they are, and offers **Install boot tools**.
 
 Nothing launches at login until you capture a layout and Authorize it.
 
-Once they are installed, the panel's **Boot tools ·** line shows the installed
-version (or **development install** for a build that pacman does not own,
-which the panel cannot manage). Its buttons each run in a terminal window that
-asks for your password, except the update check:
+### Updates
 
-- **Check for updates** asks the AUR for a newer version (no password, no
-  terminal), and offers **Update** (`yay -S --needed omarchy-relaunch`) when
-  there is one.
-- **Reinstall** rebuilds the current version (`yay -S --rebuild
-  omarchy-relaunch`), for damaged files or a half-finished update. It asks
-  first.
-- **Uninstall** removes the package (`omarchy pkg drop omarchy-relaunch`) after
-  asking **Remove the boot tools?**. Your saved layout, your signing key and
-  the widget are kept, so installing again brings everything back; until then
-  nothing restores at login.
+A new version of the boot tools arrives with a plugin update
+(`omarchy plugin update`), which brings a newer pin. The panel's **Boot
+tools ·** line shows the installed version, or **development install** for a
+build that pacman does not own, which the panel cannot manage. Its buttons
+each run in a terminal window that asks for your password, except the update
+check:
 
-`omarchy pkg aur add` leaves an installed package as it is, so updates go to
-yay, the AUR helper Omarchy uses, directly.
+- **Check for updates** compares the installed version with the one this
+  plugin pins (no password, no terminal, no network), and offers **Update**
+  (`packaging/boot-tools.sh update`) when the pin is newer.
+- **Reinstall** installs the pinned version again
+  (`packaging/boot-tools.sh reinstall`), for damaged files or a half-finished
+  update. It asks first.
+- **Uninstall** removes the package (`sudo pacman -Rns omarchy-relaunch`)
+  after asking **Remove the boot tools?**. Your saved layout, your signing key
+  and the widget are kept, so installing again brings everything back; until
+  then nothing restores at login.
 
 From a checkout instead, `./install.sh` installs the plugin folder and wires
-the same login line (the boot tools package still comes from the AUR).
+the same login line. Install the boot tools first with
+`packaging/boot-tools.sh install`.
 
 ### Dependencies
 
-- **Omarchy / Hyprland**, with `uwsm` (Omarchy's session manager) and
-  `omarchy pkg aur add` for the boot tools.
+- **Omarchy / Hyprland**, with `uwsm` (Omarchy's session manager).
+- **pacman** and **curl** for the boot tools; **base-devel** only for a
+  source build.
 - **polkit**, **systemd**, **dbus**: pulled in by the `omarchy-relaunch`
   package.
 - A Nerd Font in the bar (Omarchy default) for the widget glyph.

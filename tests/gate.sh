@@ -12,7 +12,10 @@
 #   the §11 restore check: oracle vs engine by identity + placement (fixture,
 #   and LIVE on this desktop, sandboxed)
 #   install.sh over the release core, black-box (tests/install-test.sh)
-#   the AUR package owns files only under /usr (tests/pkgbuild-test.sh)
+#   the boot tools package owns files only under /usr (tests/pkgbuild-test.sh)
+#   the boot tools pin agrees with the PKGBUILD, boot-tools.sh installs only
+#   what it pins (tests/boot-tools-test.sh), the release workflow pins every
+#   action by commit
 #   the polkit rule, executed (authorize and purge: AUTH_SELF or NO)
 #   qmllint on the panel QML
 #   the live key store (/var/lib/omarchy-relaunch/<uid>) is unchanged by it all
@@ -31,7 +34,7 @@ CORE="$ROOT/core"
 ORACLE="$ROOT/tests/oracle/relaunch"
 
 # Shell that must stay shellcheck-clean.
-SHELLCHECK_STRICT=(relaunch install.sh git-init.sh tests/gate.sh tests/check-notices.sh tests/capture-test.sh tests/hooks-test.sh tests/install-test.sh tests/anchor-lua-test.sh tests/live-list.sh tests/differential.sh tests/differential/world.sh tests/restore-parity.sh tests/pkgbuild-test.sh)
+SHELLCHECK_STRICT=(relaunch install.sh git-init.sh tests/gate.sh tests/check-notices.sh tests/capture-test.sh tests/hooks-test.sh tests/install-test.sh tests/anchor-lua-test.sh tests/live-list.sh tests/differential.sh tests/differential/world.sh tests/restore-parity.sh tests/pkgbuild-test.sh packaging/boot-tools.sh packaging/pin-release.sh tests/boot-tools-test.sh)
 # Reported, not enforced (see header).
 SHELLCHECK_REPORT=(tests/oracle/relaunch tests/relaunch-test.sh)
 
@@ -109,8 +112,15 @@ step "install.sh, black-box over the release core (user namespace + overlays)"
 (cd "$CORE" && cargo build --release --quiet)
 "$ROOT/tests/install-test.sh" "$CORE/target/release"
 
-step "the AUR package owns only /usr (Uninstall keeps the key store)"
+step "the boot tools package owns only /usr (Uninstall keeps the key store)"
 "$ROOT/tests/pkgbuild-test.sh"
+
+step "the boot tools pin, and the script that installs only what it pins"
+"$ROOT/packaging/boot-tools.sh" lint
+"$ROOT/tests/boot-tools-test.sh"
+unpinned="$(grep -nE '^[[:space:]]*-?[[:space:]]*uses:' "$ROOT/.github/workflows/release.yml" | { grep -vE 'uses: [^@[:space:]]+@[0-9a-f]{40}( |$)' || true; })"
+[[ -z "$unpinned" ]] || { printf 'release.yml: an action not pinned by commit:\n%s\n' "$unpinned" >&2; exit 1; }
+printf '    release.yml: every action pinned by commit\n'
 
 step "the root anchor loader (packaging/lua/anchor.lua), executed"
 "$ROOT/tests/anchor-lua-test.sh"

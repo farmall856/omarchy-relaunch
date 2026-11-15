@@ -92,59 +92,51 @@ Panel {
   // installed plugin uses the packaged path.
   property string relaunchctlPath: "/usr/lib/omarchy-relaunch/relaunchctl"
 
-  // The boot tools (the system package) and the two commands that install
-  // them: FIXED literals, nothing from the user or the environment goes into
-  // either. The plugin never elevates; pacman (through omarchy pkg aur add)
-  // asks for the password in the terminal. See CoreInstall.js.
+  // The boot tools (the system package) and the commands that manage them:
+  // FIXED literals, nothing from the user or the environment goes into any of
+  // them. They run packaging/boot-tools.sh from this plugin's own checkout,
+  // which installs only what packaging/boot-tools.pin names (the release
+  // package by its SHA-256, or a source build of the pinned commit). The
+  // plugin never elevates; pacman asks for the password in the terminal. See
+  // CoreInstall.js.
   readonly property string corePackage: "omarchy-relaunch"
   readonly property string relaunchdPath: "/usr/lib/omarchy-relaunch/relaunchd"
   readonly property string coreEnginePath: "/usr/lib/omarchy-relaunch/relaunch"
+  readonly property string bootToolsPath: {
+    var s = Qt.resolvedUrl("packaging/boot-tools.sh").toString()
+    return s.indexOf("file://") === 0 ? decodeURIComponent(s.slice(7)) : ""
+  }
   // Prints "core" when the three components are installed, and "tools" when
-  // Omarchy's package command, its AUR helper (yay) and a terminal launcher
-  // are on PATH; then the package's version ("version 1.0.7-1", only when
-  // pacman owns it) and relaunchd's stamp (inode and change time, new on every
-  // reinstall). The paths arrive as arguments, never in the script.
+  // pacman, a terminal launcher and this plugin's boot-tools script are here;
+  // then the package's version ("version 1.0.7-1", only when pacman owns it)
+  // and relaunchd's stamp (inode and change time, new on every reinstall). The
+  // paths arrive as arguments, never in the script.
   readonly property string coreProbeScript: 'if test -x "$1" && test -x "$2" && test -x "$3"; then echo core; fi; '
-    + 'if command -v omarchy >/dev/null && command -v yay >/dev/null && command -v xdg-terminal-exec >/dev/null; then echo tools; fi; '
+    + 'if command -v pacman >/dev/null && command -v xdg-terminal-exec >/dev/null && test -f "$4"; then echo tools; fi; '
     + 'if v=$(pacman -Q omarchy-relaunch 2>/dev/null); then echo "version ${v#* }"; fi; '
     + 'if t=$(stat -c %i.%Z "$1" 2>/dev/null); then echo "stamp $t"; fi'
-  readonly property var coreInstallCommand: ["xdg-terminal-exec", "--app-id=org.omarchy.terminal",
-    "--title=Relaunch: install boot tools", "-e", "bash", "-c",
-    'omarchy pkg aur add omarchy-relaunch; s=$?; echo; '
-    + 'if [ "$s" -eq 0 ]; then echo "Done. Go back to the Relaunch panel."; else echo "The install did not finish (exit $s)."; fi; '
-    + 'read -r -p "Press Enter to close this window. " _']
+  readonly property var coreInstallCommand: root.coreTerminal("Relaunch: install boot tools",
+    'bash "$1" install', [root.bootToolsPath])
   readonly property var coreWireCommand: [root.coreEnginePath, "ensure-hooks", "--anchor"]
   // The lifecycle (boot-tools-lifecycle-buttons-design.md), each a FIXED
-  // literal like the install. The check is headless: no password, no
-  // terminal; it prints "installed V", "latest V" and one verdict line.
-  // A failed fetch (fetchfailed) and an unreadable reply (badreply) are told
-  // apart from a reply that has no such package (noaur); the transfer is
-  // capped so a stalled reply cannot hold the check open.
-  readonly property string coreUpdateCheckScript: 'command -v yay >/dev/null || { echo nohelper; exit 0; }; '
-    + 'command -v curl >/dev/null 2>&1 || { echo nocurl; exit 0; }; '
-    + 'command -v jq >/dev/null 2>&1 || { echo nojq; exit 0; }; '
-    + 'v=$(pacman -Q omarchy-relaunch 2>/dev/null) || { echo notpkg; exit 0; }; v=${v#* }; echo "installed $v"; '
-    + 'omarchy pkg aur accessible || { echo unreachable; exit 0; }; '
-    + "r=$(curl -sfg --connect-timeout 15 --max-time 30 'https://aur.archlinux.org/rpc/v5/info?arg[]=omarchy-relaunch') || { echo fetchfailed; exit 0; }; "
-    + "a=$(printf '%s' \"$r\" | jq -r '.results[0].Version // empty') || { echo badreply; exit 0; }; "
-    + '[ -n "$a" ] || { echo noaur; exit 0; }; echo "latest $a"; '
-    + 'if [ "$(vercmp "$a" "$v")" -gt 0 ]; then echo newer; else echo current; fi'
-  // `omarchy pkg aur add` does nothing for a package already installed, so
-  // an update and a reinstall go to yay (the AUR helper Omarchy uses) directly.
+  // literal like the install. The check is headless and offline: no password,
+  // no terminal, no network. It compares this plugin's pin with the installed
+  // package and prints "installed V", "pinned V" and one verdict line; a
+  // plugin update brings a newer pin.
+  readonly property var coreUpdateCheckCommand: ["bash", root.bootToolsPath, "check"]
   readonly property var coreManageCommands: ({
-    update: root.coreTerminal("Relaunch: update boot tools",
-      'yay -S --noconfirm --needed omarchy-relaunch'),
-    reinstall: root.coreTerminal("Relaunch: reinstall boot tools",
-      'if omarchy pkg aur accessible; then yay -S --noconfirm --rebuild omarchy-relaunch; else echo "Could not reach the AUR."; false; fi'),
-    uninstall: root.coreTerminal("Relaunch: remove boot tools",
-      'omarchy pkg drop omarchy-relaunch')
+    update: root.coreTerminal("Relaunch: update boot tools", 'bash "$1" update', [root.bootToolsPath]),
+    reinstall: root.coreTerminal("Relaunch: reinstall boot tools", 'bash "$1" reinstall', [root.bootToolsPath]),
+    uninstall: root.coreTerminal("Relaunch: remove boot tools", 'sudo pacman -Rns omarchy-relaunch', [])
   })
-  // A visible terminal running `script` (a constant above), then its result
-  // and a pause so the output can be read.
-  function coreTerminal(title, script) {
+  // A visible terminal running `script` (a constant above) with `args` as its
+  // positional parameters, then its result and a pause so the output can be
+  // read.
+  function coreTerminal(title, script, args) {
     return ["xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=" + title, "-e", "bash", "-c",
       script + '; s=$?; echo; if [ "$s" -eq 0 ]; then echo "Done. Go back to the Relaunch panel."; '
-      + 'else echo "It did not finish (exit $s)."; fi; read -r -p "Press Enter to close this window. " _']
+      + 'else echo "It did not finish (exit $s)."; fi; read -r -p "Press Enter to close this window. " _', "bash"]
+      .concat(args)
   }
   property string coreVersion: ""
   property string coreConfirm: ""
@@ -488,10 +480,9 @@ Panel {
       root.core.probeEnded(proc.op, { core: lines.indexOf("core") >= 0, canInstall: lines.indexOf("tools") >= 0,
         version: field("version"), stamp: field("stamp") })
     } else if (proc === coreUpdatesProc) {
-      var verdicts = ["newer", "current", "unreachable", "notpkg", "noaur", "nohelper", "nocurl", "nojq",
-        "fetchfailed", "badreply"]
+      var verdicts = ["newer", "current", "notpkg", "badpin"]
       var result = lines.filter(function(l) { return verdicts.indexOf(l) >= 0 })[0] || ""
-      root.core.updatesChecked(proc.op, { result: result, installed: field("installed"), latest: field("latest") })
+      root.core.updatesChecked(proc.op, { result: result, installed: field("installed"), latest: field("pinned") })
     } else if (proc === coreInstallProc || proc === coreManageProc) {
       root.core.installEnded(proc.op, { started: proc.didStart })
     } else {
@@ -542,7 +533,7 @@ Panel {
 
   CoreProc {
     id: coreProbeProc
-    command: ["sh", "-c", root.coreProbeScript, "sh", root.relaunchdPath, root.relaunchctlPath, root.coreEnginePath]
+    command: ["sh", "-c", root.coreProbeScript, "sh", root.relaunchdPath, root.relaunchctlPath, root.coreEnginePath, root.bootToolsPath]
   }
   CoreProc {
     id: coreInstallProc
@@ -555,7 +546,7 @@ Panel {
   }
   CoreProc {
     id: coreUpdatesProc
-    command: ["sh", "-c", root.coreUpdateCheckScript]
+    command: root.coreUpdateCheckCommand
   }
   CoreProc {
     id: coreManageProc

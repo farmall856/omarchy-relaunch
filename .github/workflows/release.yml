@@ -1,0 +1,76 @@
+# Build the boot tools package (omarchy-relaunch, x86_64) for a pushed version
+# tag, attest its provenance (Sigstore, keyless), and attach it to a DRAFT
+# GitHub release. A maintainer publishes the draft, then runs
+# packaging/pin-release.sh to pin the package into the plugin.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Build tools
+        run: pacman -Syu --noconfirm --needed git github-cli
+
+      - name: Check out the tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Build the package from the tagged commit
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkgver="$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD | head -n 1)"
+          pkgrel="$(sed -n 's/^pkgrel=//p' packaging/arch/PKGBUILD | head -n 1)"
+          [[ "v$pkgver" == "$GITHUB_REF_NAME" ]] || { echo "PKGBUILD pkgver $pkgver is not $GITHUB_REF_NAME" >&2; exit 1; }
+          useradd -m builder
+          install -d -o builder /home/builder/build
+          cp packaging/arch/PKGBUILD packaging/arch/omarchy-relaunch.install /home/builder/build/
+          # The release builds exactly the commit this tag points at.
+          sed -i "s/^_commit=.*/_commit=$GITHUB_SHA/" /home/builder/build/PKGBUILD
+          chown -R builder /home/builder/build
+          pacman -S --noconfirm --needed cargo polkit
+          su builder -c 'cd /home/builder/build && PKGEXT=.pkg.tar.zst makepkg --noconfirm'
+          file="omarchy-relaunch-$pkgver-$pkgrel-x86_64.pkg.tar.zst"
+          test -f "/home/builder/build/$file"
+          mv "/home/builder/build/$file" "$GITHUB_WORKSPACE/$file"
+          echo "file=$file" >>"$GITHUB_OUTPUT"
+          {
+            echo "### $file"
+            echo
+            echo "- commit: \`$GITHUB_SHA\`"
+            echo "- size: $(stat -c %s "$GITHUB_WORKSPACE/$file") bytes"
+            echo "- sha256: \`$(sha256sum "$GITHUB_WORKSPACE/$file" | cut -d' ' -f1)\`"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: ${{ steps.build.outputs.file }}
+
+      - name: Attach to a draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILE: ${{ steps.build.outputs.file }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$FILE" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$FILE" --repo "$GITHUB_REPOSITORY" --draft \
+              --title "Relaunch ${GITHUB_REF_NAME#v}" --notes "Draft: built by the release workflow. Review, publish, then pin with packaging/pin-release.sh."
+          fi

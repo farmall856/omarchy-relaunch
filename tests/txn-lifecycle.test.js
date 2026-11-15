@@ -703,18 +703,18 @@ test("an update the user cancelled: same version after the terminal, back to rea
   assert.equal(h.count("wire"), 0)
 })
 
-test("up to date, and the AUR-unreachable and no-helper guards, run nothing", () => {
-  for (const [r, phase, msg] of [
-    [{ result: "current", installed: "1.0.7-1" }, "ready", /^Up to date \(1\.0\.7-1\)\.$/],
-    [{ result: "unreachable", installed: "1.0.7-1" }, "ready", /Couldn't reach the AUR/],
-    [{ result: "nohelper" }, "ready", /needs yay/],
-    [{ result: "noaur", installed: "1.0.7-1" }, "ready", /has no omarchy-relaunch/]
+test("up to date, a broken pin and an unknown reply run nothing", () => {
+  for (const [r, msg, isError] of [
+    [{ result: "current", installed: "1.0.7-1" }, /^Up to date \(1\.0\.7-1\)\.$/, false],
+    [{ result: "badpin" }, /boot tools pin is unreadable/, true],
+    [{ result: "" }, /^The update check failed\.$/, true]
   ]) {
     const h = readyAt("1.0.7-1", "11.100")
     h.c.checkUpdates()
     h.c.updatesChecked(h.lastOp("updates"), r)
-    assert.equal(h.s.phase, phase, r.result)
+    assert.equal(h.s.phase, "ready", r.result)
     assert.match(h.s.message, msg, r.result)
+    assert.equal(h.s.isError, isError, r.result)
     assert.equal(h.c.update(), false, r.result + ": no Update without a newer version")
     assert.equal(h.count("manage"), 0, r.result)
   }
@@ -825,21 +825,14 @@ test("a poll notices the update before the terminal closes", () => {
   assert.equal(h.s.phase, "wiring")
 })
 
-test("a missing tool or a failed request is said as such, never as no AUR package", () => {
-  for (const [result, msg] of [
-    ["nocurl", /^The update check needs curl\.$/],
-    ["nojq", /^The update check needs jq\.$/],
-    ["fetchfailed", /request to the AUR failed/],
-    ["badreply", /reply could not be read/]
-  ]) {
+test("the retired AUR verdicts are not understood as answers", () => {
+  for (const result of ["unreachable", "noaur", "nohelper", "nocurl", "nojq", "fetchfailed", "badreply"]) {
     const h = readyAt("1.0.7-1", "11.100")
     h.c.checkUpdates()
     h.c.updatesChecked(h.lastOp("updates"), { result: result, installed: "1.0.7-1" })
     assert.equal(h.s.phase, "ready", result)
-    assert.equal(h.s.isError, true, result)
-    assert.match(h.s.message, msg, result)
-    assert.doesNotMatch(h.s.message, /has no omarchy-relaunch/, result)
-    assert.equal(h.c.update(), false, result + ": no Update offered")
+    assert.match(h.s.message, /^The update check failed\.$/, result)
+    assert.doesNotMatch(h.s.message, /AUR|yay/, result)
     assert.equal(h.count("manage"), 0, result + ": nothing spawned")
   }
 })

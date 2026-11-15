@@ -19,7 +19,7 @@
 #   sudo rm -rf /srv/localrepo-relaunch
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # packaging/aur -> repo root
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # packaging/arch -> repo root
 PKGVER="${PKGVER:-2.0.0}"
 REPO_NAME="relaunch-test"
 # Outside $HOME so pacman's DownloadUser=alpm sandbox can read it (a 0700 home
@@ -40,7 +40,7 @@ echo "== version:     $PKGVER"
 echo "== local repo:  $LOCALREPO  (pacman repo [$REPO_NAME])"
 
 # A self-contained PKGBUILD that builds THIS tree (no git fetch, so uncommitted
-# changes ARE included) and installs exactly what packaging/aur/PKGBUILD does.
+# changes ARE included) and installs exactly what packaging/arch/PKGBUILD does.
 # Quoted heredoc = no expansion; the three @PLACEHOLDERS@ are filled by sed, so
 # $pkgdir / $_repo stay literal for makepkg.
 cat > "$BUILD_DIR/PKGBUILD" <<'PKGBUILD_EOF'
@@ -51,7 +51,7 @@ pkgdesc="Relaunch system core (LOCAL TEST build from working tree)"
 arch=('@ARCH@')
 url="https://github.com/farmall856/omarchy-relaunch"
 license=('MIT')
-depends=('polkit' 'systemd' 'dbus')
+depends=('glibc' 'libgcc' 'polkit' 'systemd' 'dbus')
 options=('!debug')
 source=()
 

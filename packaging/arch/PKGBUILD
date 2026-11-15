@@ -1,13 +1,15 @@
 # Maintainer: Layton F <layton@f22.me>
 #
-# The Relaunch SYSTEM CORE ("authorized boot tools"): the root-owned, login-time
-# signature-verified app relauncher for Omarchy. This is the helper package the
-# Relaunch shell plugin installs on the user's behalf (its "Install boot tools"
-# button runs `omarchy pkg aur add omarchy-relaunch`, elevating with polkit/sudo).
+# The Relaunch SYSTEM CORE ("boot tools"): the root-owned, login-time,
+# signature-verified app relauncher for Omarchy. The shell plugin installs it on
+# the user's behalf with packaging/boot-tools.sh: the release package built from
+# this file by .github/workflows/release.yml, checked against
+# packaging/boot-tools.pin, or (on another architecture, or by choice) built
+# locally from this file with makepkg.
 #
 # The user-space bar widget (the plugin QML) is NOT shipped here; it is installed
-# separately through the Omarchy plugin marketplace (`omarchy plugin add <url>`).
-# This package provides only the root components the marketplace path cannot:
+# through the Omarchy plugin marketplace (`omarchy plugin add <url>`). This
+# package provides only the root components the marketplace path cannot:
 # relaunchd (the polkit-gated signing authority), relaunch-anchor (the login
 # verifier), the relaunch engine + relaunchctl, the polkit action/rule, the D-Bus
 # activation, the anchor loader, and the systemd unit.
@@ -22,10 +24,13 @@ license=('MIT')
 depends=('glibc' 'libgcc' 'polkit' 'systemd' 'dbus')
 optdepends=('hyprland: the compositor Relaunch restores windows into (required at login, not to install)')
 makedepends=('cargo' 'git')
+options=('!debug')
 install="$pkgname.install"
-# AUR builds from a PUBLISHED ref. Tag the current code `v$pkgver` and push it
-# first (see packaging/aur/README.md); SKIP is correct for a git source.
-source=("$pkgname::git+$url.git#tag=v$pkgver")
+# The exact commit of tag v$pkgver: a moved tag cannot change what builds. The
+# release workflow builds the tagged commit; packaging/pin-release.sh writes it
+# here and in packaging/boot-tools.pin, and the gate checks the two agree.
+_commit=4336616041f365f87ba960e2dd4512fb4e795d90
+source=("$pkgname::git+$url.git#commit=$_commit")
 sha256sums=('SKIP')
 
 prepare() {
