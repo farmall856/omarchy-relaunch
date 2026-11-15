@@ -87,7 +87,8 @@ GH=bad t "an attestation that does not verify installs nothing" 1 "attestation d
 MACHINE=aarch64 t "aarch64: built from source, never downloaded" 0 \
   "^makepkg --syncdeps --install --rmdeps --clean --needed \[PKGBUILD omarchy-relaunch.install \]" "^curl|^sudo" "$released" install
 t "--source on x86_64 builds from source" 0 "^makepkg " "^curl|^sudo" "$released" install --source
-t "no release pinned yet: built from source" 0 "^makepkg .*--needed" "^curl" - install
+t "no release pinned yet: built from source" 0 "^makepkg .*--needed" "^curl" \
+  "version=$VER\ncommit=$COMMIT\nfile=\nsize=\nsha256=\n" install
 t "a reinstall from source rebuilds without --needed" 0 "^makepkg --syncdeps --install --rmdeps --clean \[" "--needed" - reinstall --source
 t "a PKGBUILD that builds another commit is refused" 1 "_commit is not the pinned commit" "^makepkg" \
   "version=$VER\ncommit=${COMMIT//?/a}\nfile=\nsize=\nsha256=\n" install

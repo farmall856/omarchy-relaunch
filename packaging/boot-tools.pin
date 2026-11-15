@@ -5,7 +5,7 @@
 # and `sha256` name the x86_64 release package, or are all empty when there is
 # none yet: then the boot tools are built from source on every architecture.
 version=2.0.4-1
-commit=f0fe4c08c3e4c5b33195069b9219bfc29ce04029
-file=
-size=
-sha256=
+commit=9d981d65d281fe2339c8947800d1fb5880c36987
+file=omarchy-relaunch-2.0.4-1-x86_64.pkg.tar.zst
+size=3641273
+sha256=86765f8e209dbc84682a59479ca1717715a39ad846d470ad35ce639c745cb433
