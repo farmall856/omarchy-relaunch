@@ -29,7 +29,7 @@ install="$pkgname.install"
 # The exact commit of tag v$pkgver: a moved tag cannot change what builds. The
 # release workflow builds the tagged commit; packaging/pin-release.sh writes it
 # here and in packaging/boot-tools.pin, and the gate checks the two agree.
-_commit=2b834ccbd47cc589084de6a6ad816c575852d2d8
+_commit=dd413eb8ab9e3fc862702275bc900d3d181aec99
 source=("$pkgname::git+$url.git#commit=$_commit")
 sha256sums=('SKIP')
 
