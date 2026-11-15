@@ -17,23 +17,26 @@ marketplace and is NOT in this package.
 `relaunchd` is D-Bus activated (`Type=dbus`); nothing is enabled or started at
 install time. pacman's own alpm hooks reload systemd/D-Bus/polkit.
 
-## Prerequisite before any AUR build
+## Publishing a version
 
-AUR builds from a **published git ref**. The 2.0.0 code (Rust rewrite + hardening
-+ capture-keying + the short polkit prompt + the boot-tools plugin buttons) is
-newer than the latest pushed tag (`v1.0.4`) and is currently uncommitted. Before
-building for the real AUR, tag and push the version in `PKGBUILD` (`pkgver`).
-These are the maintainer's own steps (for LOCAL testing without the AUR, use
-`packaging/aur/test-on-postmarchy.sh` instead — no tag or push needed):
-
-    git add -A && git commit -m "Relaunch 2.0.0"
-    git tag -a v2.0.0 -m "Relaunch 2.0.0"
-    git push origin HEAD --tags
+AUR builds from a **published git tag** (`source=…#tag=v$pkgver`), so tag and
+push the version first; the GitHub release is cut from the same tag. For LOCAL
+testing without the AUR, use `packaging/aur/test-on-postmarchy.sh` instead (no
+tag or push needed).
 
 Keep `pkgver`, the git tag, and `manifest.json`'s `version` in lockstep. Bump
-`pkgrel` for packaging-only changes. Regenerate `.SRCINFO` after any edit:
+`pkgrel` for packaging-only changes. Regenerate `.SRCINFO` after any edit, and
+check it before pushing to the AUR:
 
     cd packaging/aur && makepkg --printsrcinfo > .SRCINFO
+
+The AUR repository holds only `PKGBUILD`, `.SRCINFO` and
+`omarchy-relaunch.install`, copied from this directory:
+
+    git clone ssh://aur@aur.archlinux.org/omarchy-relaunch.git aur-repo
+    cp packaging/aur/{PKGBUILD,.SRCINFO,omarchy-relaunch.install} aur-repo/
+    cd aur-repo && git add PKGBUILD .SRCINFO omarchy-relaunch.install
+    git commit -m "omarchy-relaunch $pkgver-$pkgrel" && git push
 
 ## Testing on an Arch box (e.g. the postmarchy server)
 

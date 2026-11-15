@@ -11,8 +11,10 @@ On the next login herdr is back on workspace 1, Brave on 2, your terminal on 6
 
 ## How it works
 
-There is no daemon and nothing samples your windows. Relaunch acts only when
-you click something in its panel, and once at login.
+Nothing runs in the background and nothing samples your windows. Relaunch acts
+only when you click something in its panel, and once at login. The one system
+service, the signing authority `relaunchd`, is started on demand over D-Bus
+when the panel asks it to sign, and exits once it has been idle for 30 seconds.
 
 1. **Capture.** The panel's engine (a Rust binary from the boot tools package)
    reads the open windows from `hyprctl clients -j` and works out the command
