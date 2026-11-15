@@ -110,6 +110,7 @@ fn run_boot(config_dir: &Path, uid: u32, result: Result<SignedConfig, String>) {
         path: std::env::var("PATH").unwrap_or_default(),
         config_dir: config_dir.to_path_buf(),
         uid,
+        children: Vec::new(),
     };
     let record = boot::run(config_dir, result, &mut host, Timing::default());
     write_last_boot(config_dir, &started_at, record);
@@ -124,6 +125,8 @@ struct RealHost {
     config_dir: PathBuf,
     /// The user the launchers must belong to.
     uid: u32,
+    /// Every process this boot started, so its exit can be read.
+    children: Vec<std::process::Child>,
 }
 
 impl boot::Host for RealHost {
@@ -134,7 +137,13 @@ impl boot::Host for RealHost {
         std::thread::sleep(d);
     }
     fn launch(&mut self, entry: &Entry) -> Launch {
-        launch_one(entry, &self.config_dir, self.uid, &self.path)
+        let (launch, child) = launch_one(entry, &self.config_dir, self.uid, &self.path);
+        self.children.extend(child);
+        launch
+    }
+    fn exited(&mut self, pid: u32) -> Option<report::Exit> {
+        let child = self.children.iter_mut().find(|c| c.id() == pid)?;
+        report::Exit::of(child.try_wait().ok()??)
     }
     fn place(
         &mut self,
@@ -170,8 +179,13 @@ fn iso_now() -> String {
 }
 
 /// Read the launcher once, decide from those bytes, check the program would
-/// run, and spawn it.
-fn launch_one(entry: &Entry, config_dir: &Path, uid: u32, path: &str) -> Launch {
+/// run, and spawn it: the launch, and its process when it started.
+fn launch_one(
+    entry: &Entry,
+    config_dir: &Path,
+    uid: u32,
+    path: &str,
+) -> (Launch, Option<std::process::Child>) {
     let base = |status: &'static str, error: Option<String>| Launch {
         class: entry.class.clone(),
         window_class: entry.window_class.clone(),
@@ -183,23 +197,33 @@ fn launch_one(entry: &Entry, config_dir: &Path, uid: u32, path: &str) -> Launch 
         pid: None,
         error,
         placement: None,
+        exit: None,
     };
     let spawn = match read_launcher(entry, config_dir, uid).and_then(|b| decide(entry, &b)) {
         Ok(s) => s,
-        Err(reason) => return base("verify-failed", Some(reason)),
+        Err(reason) => return (base("verify-failed", Some(reason)), None),
     };
     if let Err(reason) = launchable(&spawn, path) {
-        return base("not_found", Some(reason));
+        return (base("not_found", Some(reason)), None);
     }
     match relaunch_anchor::launch::spawn(&spawn, Path::new(paths::UWSM_APP)) {
         Ok(mut child) => match child.try_wait() {
-            Ok(None) => Launch {
-                pid: Some(child.id()),
-                ..base("started", None)
-            },
-            _ => base("failed", Some("process exited immediately".to_owned())),
+            Ok(None) => (
+                Launch {
+                    pid: Some(child.id()),
+                    ..base("started", None)
+                },
+                Some(child),
+            ),
+            done => (
+                Launch {
+                    exit: done.ok().flatten().and_then(report::Exit::of),
+                    ..base("failed", Some("process exited immediately".to_owned()))
+                },
+                None,
+            ),
         },
-        Err(e) => base("failed", Some(e)),
+        Err(e) => (base("failed", Some(e)), None),
     }
 }
 
@@ -215,4 +239,52 @@ fn write_last_boot(config_dir: &Path, started_at: &str, record: Record) {
     };
     let _ = write_private_artifact(config_dir, paths::LAST_BOOT_JSON, record.json().as_bytes());
     let _ = write_private_artifact(config_dir, paths::LAST_BOOT_LOG, record.log().as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boot::Host as _;
+    use std::process::Command;
+
+    fn host() -> RealHost {
+        RealHost {
+            path: String::new(),
+            config_dir: PathBuf::new(),
+            uid: 0,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn exited_reads_the_real_status_of_a_launched_process_only() {
+        let mut h = host();
+        let spawn =
+            |program: &str, args: &[&str]| Command::new(program).args(args).spawn().unwrap();
+        let failed = spawn("false", &[]);
+        let mut killed = spawn("sleep", &["30"]);
+        killed.kill().unwrap();
+        let running = spawn("sleep", &["30"]);
+        let (f, k, r) = (failed.id(), killed.id(), running.id());
+        h.children.extend([failed, killed, running]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut seen = (None, None);
+        while (seen.0.is_none() || seen.1.is_none()) && std::time::Instant::now() < deadline {
+            seen = (
+                seen.0.or_else(|| h.exited(f)),
+                seen.1.or_else(|| h.exited(k)),
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            seen,
+            (Some(report::Exit::Code(1)), Some(report::Exit::Signal(9)))
+        );
+        assert_eq!(h.exited(r), None, "still running");
+        assert_eq!(h.exited(u32::MAX), None, "not a process this boot launched");
+        for child in &mut h.children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }

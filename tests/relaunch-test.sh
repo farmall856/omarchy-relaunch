@@ -2480,6 +2480,8 @@ done
 command -v node >/dev/null 2>&1 || fail "node is required to test TxnLifecycle.js"
 node --test "$ROOT/tests/txn-lifecycle.test.js" >"$WORKDIR/txn-test.out" 2>&1 \
   || fail "TxnLifecycle.js tests failed:"$'\n'"$(cat "$WORKDIR/txn-test.out")"
+node --test "$ROOT/tests/last-boot.test.js" >"$WORKDIR/last-boot-test.out" 2>&1 \
+  || fail "LastBoot.js tests failed:"$'\n'"$(cat "$WORKDIR/last-boot-test.out")"
 
 if $ENGINE_IS_BASH; then  # bash internals; Rust: host-walk / trust-gate unit tests
 # --- §9 capture trust primitives: pid_is_host / window_trusted ---

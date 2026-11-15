@@ -6,6 +6,7 @@ import qs.Commons as Commons
 import qs.Ui
 import "TxnLifecycle.js" as TxnLifecycle
 import "CoreInstall.js" as CoreInstall
+import "LastBoot.js" as LastBoot
 
 // Relaunch panel. Shells out to `relaunch` for inventory, list edits, and
 // boot-policy changes. Existing Hyprland startup apps are shown so they can
@@ -1345,7 +1346,8 @@ Panel {
                       required property var modelData
                       // A broken row opens its editor unprompted: there is
                       // nothing on the collapsed line to fix it with.
-                      property bool expanded: root.rowBroken(modelData)
+                      property string bootProblem: LastBoot.rowProblem(root.lastBoot, modelData)
+                      property bool expanded: root.rowBroken(modelData) || bootProblem !== ""
                       width: wsBody.width
                       spacing: Style.space(4)
 
@@ -1363,7 +1365,8 @@ Panel {
                           text: relaunchRow.modelData.label
                             + (root.rowFromCommandLine(relaunchRow.modelData) ? "  (command line)" : "")
                           elide: Text.ElideRight
-                          color: root.rowBroken(relaunchRow.modelData) ? Commons.Color.urgent : root.ink
+                          color: root.rowBroken(relaunchRow.modelData) || relaunchRow.bootProblem !== ""
+                            ? Commons.Color.urgent : root.ink
                           opacity: relaunchRow.modelData.enabled ? 1.0 : 0.4
                           font.family: root.bar ? root.bar.fontFamily : Style.font.family
                           font.pixelSize: Style.font.bodySmall
@@ -1378,7 +1381,7 @@ Panel {
                             glyph: "\uf135"  // nf-fa-rocket
                             hint: relaunchRow.expanded ? "Hide launch command" : "View or edit launch command"
                             active: relaunchRow.expanded
-                            danger: root.rowBroken(relaunchRow.modelData)
+                            danger: root.rowBroken(relaunchRow.modelData) || relaunchRow.bootProblem !== ""
                             onClicked: relaunchRow.expanded = !relaunchRow.expanded
                           }
                           IconChip {
@@ -1407,6 +1410,18 @@ Panel {
                         wrapMode: Text.WordWrap
                         color: root.ink
                         opacity: 0.6
+                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                        font.pixelSize: Style.font.caption
+                      }
+
+                      Text {
+                        textFormat: Text.PlainText
+                        visible: relaunchRow.expanded && relaunchRow.bootProblem !== ""
+                        width: parent.width
+                        text: "Didn't open at the last boot: " + relaunchRow.bootProblem
+                          + ". Fix the command below, or remove this app."
+                        wrapMode: Text.WordWrap
+                        color: Commons.Color.urgent
                         font.family: root.bar ? root.bar.fontFamily : Style.font.family
                         font.pixelSize: Style.font.caption
                       }
@@ -1707,6 +1722,17 @@ Panel {
                       what: "Apply the launch delays",
                       nothingText: "no change. Those are already the delays."
                     })
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  visible: text !== ""
+                  text: LastBoot.summary(root.lastBoot)
+                  color: Commons.Color.urgent
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
                 }
 
                 Text {

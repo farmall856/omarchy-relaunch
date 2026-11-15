@@ -66,6 +66,7 @@ install -m 0644 "$REPO_DIR/Panel.qml"     "$PLUGIN_DST/Panel.qml"
 install -m 0644 "$REPO_DIR/Overlay.qml"   "$PLUGIN_DST/Overlay.qml"
 install -m 0644 "$REPO_DIR/TxnLifecycle.js" "$PLUGIN_DST/TxnLifecycle.js"
 install -m 0644 "$REPO_DIR/CoreInstall.js" "$PLUGIN_DST/CoreInstall.js"
+install -m 0644 "$REPO_DIR/LastBoot.js" "$PLUGIN_DST/LastBoot.js"
 install -m 0755 "$REPO_DIR/relaunch"      "$PLUGIN_DST/relaunch"
 # The boot tools the panel's buttons install: the script and what it pins.
 install -d -m 0755 "$PLUGIN_DST/packaging/arch"

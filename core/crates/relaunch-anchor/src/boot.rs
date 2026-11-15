@@ -19,7 +19,7 @@ use relaunch_core::{Entry, SignedConfig};
 use relaunch_shell::argv::{basename, is_relaunch_exec};
 use relaunch_sys::paths;
 
-use crate::report::{Launch, Placement, Record, Window};
+use crate::report::{Exit, Launch, Placement, Record, Window};
 
 /// The reason [`crate::load_verified`] gives for a document of another signed
 /// schema: it must be saved, and so re-authorized, again.
@@ -37,6 +37,9 @@ pub trait Host {
     fn sleep(&mut self, d: Duration);
     /// Verify and launch one entry, reporting what happened.
     fn launch(&mut self, entry: &Entry) -> Launch;
+    /// How the process `launch` started as `pid` ended, if it has; `None`
+    /// while it runs or when that is not known.
+    fn exited(&mut self, pid: u32) -> Option<Exit>;
     /// Place the window at `address`: move it to `workspace` and float or
     /// tile it, each only when given.
     ///
@@ -234,6 +237,7 @@ pub fn run(
     );
     claim_by_pid(&mut launches, &mut known, host);
     settle(&mut launches, host);
+    note_exits(&mut launches, host);
 
     let landed = !launches.is_empty() && launches.iter().all(Launch::placed);
     Record {
@@ -378,6 +382,16 @@ fn settle(launches: &mut [Launch], host: &mut impl Host) {
     }
 }
 
+/// For each launch whose window is not on its workspace, how its process
+/// ended, when it has: what says why a window never appeared or closed.
+fn note_exits(launches: &mut [Launch], host: &mut impl Host) {
+    for l in launches.iter_mut().filter(|l| !l.placed()) {
+        if let Some(pid) = l.pid {
+            l.exit = host.exited(pid);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +424,15 @@ mod tests {
         shared_pid: Option<u32>,
         /// Classes that launch but map no window of their own.
         silent: Vec<String>,
+        /// Classes whose window closes again right after it is first seen.
+        closes: Vec<String>,
+        /// Windows of `closes` already seen once, so gone at the next read.
+        closing: Vec<String>,
+        /// How the process launched for a class ended (it still runs when
+        /// the class is not here).
+        exits: Vec<(String, Exit)>,
+        /// The class each launched pid was launched for.
+        launched: Vec<(u32, String)>,
         next_pid: u32,
     }
 
@@ -446,7 +469,14 @@ mod tests {
             let (ready, later): (Vec<_>, Vec<_>) =
                 self.queued.drain(..).partition(|(n, _)| *n == 0);
             self.queued = later.into_iter().map(|(n, w)| (n - 1, w)).collect();
-            self.windows.extend(ready.into_iter().map(|(_, w)| w));
+            let closing = std::mem::take(&mut self.closing);
+            self.windows.retain(|w| !closing.contains(&w.address));
+            for (_, w) in ready {
+                if self.closes.contains(&w.class) {
+                    self.closing.push(w.address.clone());
+                }
+                self.windows.push(w);
+            }
             Some(self.windows.clone())
         }
         fn sleep(&mut self, d: Duration) {
@@ -456,6 +486,7 @@ mod tests {
             self.events.push(format!("launch {}", e.window_class));
             self.next_pid += 1;
             let pid = self.shared_pid.unwrap_or(self.next_pid);
+            self.launched.push((pid, e.window_class.clone()));
             if self.helper_first.contains(&e.window_class) {
                 let mut w = win(
                     &format!("0x{:x}", self.next),
@@ -492,7 +523,13 @@ mod tests {
                 pid: Some(pid),
                 error: None,
                 placement: None,
+                exit: None,
             }
+        }
+        fn exited(&mut self, pid: u32) -> Option<Exit> {
+            self.events.push(format!("exited? {pid}"));
+            let (_, class) = self.launched.iter().find(|(p, _)| *p == pid)?;
+            self.exits.iter().find(|(c, _)| c == class).map(|(_, e)| *e)
         }
         fn place(
             &mut self,
@@ -780,6 +817,70 @@ mod tests {
             .rposition(|e| e.starts_with("sleep "))
             .unwrap();
         assert!(moved > last_wait, "only after the sweep: {:?}", host.events);
+    }
+
+    #[test]
+    fn a_window_that_closes_with_its_command_says_how_the_command_ended() {
+        let mut host = Fake::new();
+        host.closes = vec!["TUI.float".into()];
+        host.exits = vec![("TUI.float".into(), Exit::Code(127))];
+        let r = go(
+            "closes",
+            doc(
+                0,
+                0,
+                vec![
+                    entry(
+                        1,
+                        "TUI.float",
+                        "foot --app-id=TUI.float -e bash -c dua\\ i\\ /",
+                        6,
+                    ),
+                    entry(2, "Signal", "signal-desktop", 5),
+                ],
+            ),
+            &mut host,
+        );
+        assert_eq!(outcomes(&r), [("placed", Some(5)), ("no-show", None)]);
+        let gone = &r.launches[1];
+        assert!(gone.placement.as_ref().is_some_and(|p| p.address.is_some()));
+        assert_eq!(gone.exit, Some(Exit::Code(127)));
+        assert_eq!(
+            gone.problem().as_deref(),
+            Some(
+                "its window opened, then closed; the command exited with status 127 \
+                 (a program it runs was not found)"
+            )
+        );
+        assert!(r
+            .log()
+            .contains("NO-SHOW (its window opened, then closed; the command exited"));
+        // A placed launch is never asked how it ended: a launcher that hands
+        // off to a running app and exits is normal.
+        let asked: Vec<&String> = host
+            .events
+            .iter()
+            .filter(|e| e.starts_with("exited? "))
+            .collect();
+        assert_eq!(asked, [&format!("exited? {}", gone.pid.unwrap())]);
+        assert_eq!(r.launches[0].exit, None);
+    }
+
+    #[test]
+    fn a_launch_still_running_without_a_window_has_no_exit() {
+        let mut host = Fake::new();
+        host.never = vec!["Slow".into()];
+        let r = go(
+            "slow",
+            doc(0, 0, vec![entry(1, "Slow", "slow", 2)]),
+            &mut host,
+        );
+        assert_eq!(outcomes(&r), [("no-show", None)]);
+        assert_eq!(r.launches[0].exit, None);
+        assert_eq!(
+            r.launches[0].problem().as_deref(),
+            Some("no window appeared")
+        );
     }
 
     #[test]

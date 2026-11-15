@@ -90,7 +90,7 @@ grep -qE 'o\.|dofile|require' "$RULES" && fail "the inspection copy must hold no
 [[ "$(stat -c '%a' "$H/.config/omarchy-relaunch")" == 700 ]] || fail "the config dir must be 0700"
 cmp -s "$ROOT/relaunch" "$H/.local/bin/relaunch" || fail "the relaunch shim must be on PATH"
 PLUGIN="$H/.config/omarchy/plugins/io.github.laytonf.relaunch"
-for f in manifest.json BarWidget.qml Panel.qml Overlay.qml TxnLifecycle.js CoreInstall.js relaunch \
+for f in manifest.json BarWidget.qml Panel.qml Overlay.qml TxnLifecycle.js CoreInstall.js LastBoot.js relaunch \
   packaging/boot-tools.sh packaging/boot-tools.pin packaging/arch/PKGBUILD packaging/arch/omarchy-relaunch.install; do
   cmp -s "$ROOT/$f" "$PLUGIN/$f" || fail "the plugin's $f must be installed"
 done
