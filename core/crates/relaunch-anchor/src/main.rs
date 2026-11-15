@@ -110,6 +110,7 @@ fn run_boot(config_dir: &Path, uid: u32, result: Result<SignedConfig, String>) {
         path: std::env::var("PATH").unwrap_or_default(),
         config_dir: config_dir.to_path_buf(),
         uid,
+        children: Vec::new(),
     };
     let record = boot::run(config_dir, result, &mut host, Timing::default());
     write_last_boot(config_dir, &started_at, record);
@@ -124,6 +125,8 @@ struct RealHost {
     config_dir: PathBuf,
     /// The user the launchers must belong to.
     uid: u32,
+    /// Every process this boot started, so its exit can be read.
+    children: Vec<std::process::Child>,
 }
 
 impl boot::Host for RealHost {
@@ -134,7 +137,18 @@ impl boot::Host for RealHost {
         std::thread::sleep(d);
     }
     fn launch(&mut self, entry: &Entry) -> Launch {
-        launch_one(entry, &self.config_dir, self.uid, &self.path)
+        let (launch, child) = launch_one(entry, &self.config_dir, self.uid, &self.path);
+        self.children.extend(child);
+        launch
+    }
+    fn exited(&mut self, pid: u32) -> Option<report::Exit> {
+        use std::os::unix::process::ExitStatusExt as _;
+        let child = self.children.iter_mut().find(|c| c.id() == pid)?;
+        let status = child.try_wait().ok()??;
+        status
+            .code()
+            .map(report::Exit::Code)
+            .or_else(|| status.signal().map(report::Exit::Signal))
     }
     fn place(
         &mut self,
@@ -170,8 +184,13 @@ fn iso_now() -> String {
 }
 
 /// Read the launcher once, decide from those bytes, check the program would
-/// run, and spawn it.
-fn launch_one(entry: &Entry, config_dir: &Path, uid: u32, path: &str) -> Launch {
+/// run, and spawn it: the launch, and its process when it started.
+fn launch_one(
+    entry: &Entry,
+    config_dir: &Path,
+    uid: u32,
+    path: &str,
+) -> (Launch, Option<std::process::Child>) {
     let base = |status: &'static str, error: Option<String>| Launch {
         class: entry.class.clone(),
         window_class: entry.window_class.clone(),
@@ -183,23 +202,30 @@ fn launch_one(entry: &Entry, config_dir: &Path, uid: u32, path: &str) -> Launch 
         pid: None,
         error,
         placement: None,
+        exit: None,
     };
     let spawn = match read_launcher(entry, config_dir, uid).and_then(|b| decide(entry, &b)) {
         Ok(s) => s,
-        Err(reason) => return base("verify-failed", Some(reason)),
+        Err(reason) => return (base("verify-failed", Some(reason)), None),
     };
     if let Err(reason) = launchable(&spawn, path) {
-        return base("not_found", Some(reason));
+        return (base("not_found", Some(reason)), None);
     }
     match relaunch_anchor::launch::spawn(&spawn, Path::new(paths::UWSM_APP)) {
         Ok(mut child) => match child.try_wait() {
-            Ok(None) => Launch {
-                pid: Some(child.id()),
-                ..base("started", None)
-            },
-            _ => base("failed", Some("process exited immediately".to_owned())),
+            Ok(None) => (
+                Launch {
+                    pid: Some(child.id()),
+                    ..base("started", None)
+                },
+                Some(child),
+            ),
+            _ => (
+                base("failed", Some("process exited immediately".to_owned())),
+                None,
+            ),
         },
-        Err(e) => base("failed", Some(e)),
+        Err(e) => (base("failed", Some(e)), None),
     }
 }
 

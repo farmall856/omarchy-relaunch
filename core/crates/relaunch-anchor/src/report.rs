@@ -7,7 +7,10 @@
 //! `placed` (on the pinned workspace), `misplaced` (on another; the actual
 //! workspace is named) or `no-show` (no window of its class appeared in time).
 //! A window recognised by the launch's own pid instead, because its class is
-//! not the pinned one, also names the class it had (`seenClass`).
+//! not the pinned one, also names the class it had (`seenClass`). A launch
+//! whose process had exited by the end of the boot says how (`exit`), and
+//! every launch that did not end on its workspace says why, in words, as
+//! `problem`.
 //! The boot's own `outcome` is `landed` only when every launch was placed.
 
 use std::fmt::Write as _;
@@ -38,6 +41,42 @@ pub struct Launch {
     pub error: Option<String>,
     /// Where its window went; `None` for a launch that did not start.
     pub placement: Option<Placement>,
+    /// How its process ended, when it had by the end of the boot.
+    pub exit: Option<Exit>,
+}
+
+/// How a launched process ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// It exited with this status.
+    Code(i32),
+    /// A signal ended it.
+    Signal(i32),
+}
+
+impl Exit {
+    /// The exit, in words: the status and, for the shell's own two, what it
+    /// means.
+    #[must_use]
+    pub fn describe(self) -> String {
+        match self {
+            Self::Code(126) => {
+                "exited with status 126 (a program it runs is not executable)".to_owned()
+            }
+            Self::Code(127) => {
+                "exited with status 127 (a program it runs was not found)".to_owned()
+            }
+            Self::Code(c) => format!("exited with status {c}"),
+            Self::Signal(s) => format!("was ended by signal {s}"),
+        }
+    }
+
+    fn to_json(self) -> Value {
+        match self {
+            Self::Code(c) => json!({ "code": c }),
+            Self::Signal(s) => json!({ "signal": s }),
+        }
+    }
 }
 
 /// Where a launch's window ended up.
@@ -63,6 +102,38 @@ impl Launch {
             .is_some_and(|p| p.outcome == "placed")
     }
 
+    /// Why the launch did not end with its window on its workspace, in
+    /// words; `None` when it did.
+    #[must_use]
+    pub fn problem(&self) -> Option<String> {
+        if self.placed() {
+            return None;
+        }
+        let Some(p) = &self.placement else {
+            let why = self.error.as_deref().unwrap_or("unknown error");
+            return Some(match self.status {
+                "not_found" => format!("it did not start: {why}"),
+                "verify-failed" => format!("it was not launched: {why}"),
+                _ => format!("it failed to start: {why}"),
+            });
+        };
+        if p.outcome == "misplaced" {
+            return Some(match p.actual_workspace {
+                Some(ws) => format!("its window is on workspace {ws}, not {}", self.workspace),
+                None => "its window could not be moved to its workspace".to_owned(),
+            });
+        }
+        let window = if p.address.is_some() {
+            "its window opened, then closed"
+        } else {
+            "no window appeared"
+        };
+        Some(match self.exit {
+            Some(e) => format!("{window}; the command {}", e.describe()),
+            None => window.to_owned(),
+        })
+    }
+
     fn to_json(&self) -> Value {
         let mut v = json!({
             "class": self.class,
@@ -82,6 +153,10 @@ impl Launch {
             if let Some(seen) = &p.seen_class {
                 map.insert("seenClass".into(), json!(seen));
             }
+        }
+        if let Some(map) = v.as_object_mut() {
+            map.insert("exit".into(), self.exit.map_or(Value::Null, Exit::to_json));
+            map.insert("problem".into(), json!(self.problem()));
         }
         v
     }
@@ -223,7 +298,10 @@ impl Record {
                             let _ = write!(out, "  MISPLACED on ws {ws}");
                         }
                         ("misplaced", None) => out.push_str("  MISPLACED"),
-                        ("no-show", _) => out.push_str("  NO-SHOW (no window)"),
+                        ("no-show", _) => {
+                            let why = l.problem().unwrap_or_default();
+                            let _ = write!(out, "  NO-SHOW ({why})");
+                        }
                         _ => out.push_str("  placed"),
                     }
                     if let Some(seen) = &p.seen_class {
@@ -262,6 +340,7 @@ mod tests {
                 outcome,
                 seen_class: None,
             }),
+            exit: None,
         }
     }
 
@@ -308,6 +387,12 @@ mod tests {
         gone.error = Some("launcher-changed".into());
         let mut named = launch("Here", 1, Some(("placed", Some(1))));
         named.label = "Here App".into();
+        let mut late = launch("Late", 3, Some(("no-show", None)));
+        if let Some(p) = late.placement.as_mut() {
+            p.address = None;
+        }
+        let mut closed = launch("Closed", 6, Some(("no-show", None)));
+        closed.exit = Some(Exit::Code(127));
         let rec = Record {
             started_at: "2026-10-22T08:00:00+01:00".into(),
             outcome: "launched",
@@ -317,8 +402,9 @@ mod tests {
             launches: vec![
                 named,
                 launch("Moved", 2, Some(("misplaced", Some(5)))),
-                launch("Late", 3, Some(("no-show", None))),
+                late,
                 gone,
+                closed,
             ],
         };
         assert_eq!(
@@ -327,8 +413,10 @@ mod tests {
              delays:  0 ms before, 500 ms after\n\nlaunches:\n\
              \x20 ws 1  Here App  started  pid=10  placed  here\n\
              \x20 ws 2  Moved  started  pid=10  MISPLACED on ws 5  moved\n\
-             \x20 ws 3  Late  started  pid=10  NO-SHOW (no window)  late\n\
-             \x20 ws 4  Gone  verify-failed  pid=-  gone  (launcher-changed)\n"
+             \x20 ws 3  Late  started  pid=10  NO-SHOW (no window appeared)  late\n\
+             \x20 ws 4  Gone  verify-failed  pid=-  gone  (launcher-changed)\n\
+             \x20 ws 6  Closed  started  pid=10  NO-SHOW (its window opened, then closed; \
+             the command exited with status 127 (a program it runs was not found))  closed\n"
         );
         let v: Value = serde_json::from_str(&rec.json()).unwrap();
         assert_eq!(
@@ -343,6 +431,56 @@ mod tests {
         assert_eq!(v["launches"][3]["placed"], false);
         assert_eq!(v["launches"][3]["outcome"], Value::Null);
         assert_eq!(v["launches"][3]["windowClass"], "Gone");
+        assert_eq!(v["launches"][0]["problem"], Value::Null);
+        assert_eq!(v["launches"][0]["exit"], Value::Null);
+        assert_eq!(
+            v["launches"][1]["problem"],
+            "its window is on workspace 5, not 2"
+        );
+        assert_eq!(v["launches"][2]["problem"], "no window appeared");
+        assert_eq!(
+            v["launches"][3]["problem"],
+            "it was not launched: launcher-changed"
+        );
+        assert_eq!(v["launches"][4]["exit"], json!({ "code": 127 }));
+        assert_eq!(
+            v["launches"][4]["problem"],
+            "its window opened, then closed; the command exited with status 127 \
+             (a program it runs was not found)"
+        );
+    }
+
+    #[test]
+    fn an_exit_is_described_by_its_status_or_signal() {
+        let said = |e: Exit| e.describe();
+        assert_eq!(said(Exit::Code(1)), "exited with status 1");
+        assert_eq!(said(Exit::Code(0)), "exited with status 0");
+        assert_eq!(
+            said(Exit::Code(126)),
+            "exited with status 126 (a program it runs is not executable)"
+        );
+        assert_eq!(said(Exit::Signal(9)), "was ended by signal 9");
+        let mut l = launch("Quit", 2, Some(("no-show", None)));
+        if let Some(p) = l.placement.as_mut() {
+            p.address = None;
+        }
+        l.exit = Some(Exit::Signal(9));
+        assert_eq!(
+            l.problem().as_deref(),
+            Some("no window appeared; the command was ended by signal 9")
+        );
+        let mut failed = launch("Nope", 2, None);
+        failed.status = "not_found";
+        failed.error = Some("nope: not on PATH".into());
+        assert_eq!(
+            failed.problem().as_deref(),
+            Some("it did not start: nope: not on PATH")
+        );
+        failed.status = "failed";
+        assert_eq!(
+            failed.problem().as_deref(),
+            Some("it failed to start: nope: not on PATH")
+        );
     }
 
     #[test]
