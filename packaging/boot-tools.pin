@@ -4,8 +4,8 @@
 # each. `commit` is the tagged commit the package is built from. `file`, `size`
 # and `sha256` name the x86_64 release package, or are all empty when there is
 # none yet: then the boot tools are built from source on every architecture.
-version=2.0.4-1
-commit=9d981d65d281fe2339c8947800d1fb5880c36987
-file=omarchy-relaunch-2.0.4-1-x86_64.pkg.tar.zst
-size=3641273
-sha256=86765f8e209dbc84682a59479ca1717715a39ad846d470ad35ce639c745cb433
+version=2.0.5-1
+commit=2b834ccbd47cc589084de6a6ad816c575852d2d8
+file=
+size=
+sha256=
